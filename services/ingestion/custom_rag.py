@@ -41,14 +41,16 @@ import sys
 import time
 from datetime import datetime
 
-# Configure logging
+# Logging handlers — stdout always, file logging only if LOG_FILE is set
+log_handlers = [logging.StreamHandler(sys.stdout)]
+log_file = os.getenv("LOG_FILE")  # Not set in containers; set locally if desired
+if log_file:
+    log_handlers.append(logging.FileHandler(log_file))
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=os.getenv("LOG_LEVEL", "INFO"),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('rag.log')
-    ]
+    handlers=log_handlers
 )
 
 logger = logging.getLogger(__name__)
@@ -280,6 +282,9 @@ class rag:
             logger.debug("Reading file content")
             file_content = await file.read()
             logger.info(f"File content read successfully - size: {len(file_content)} bytes")
+
+            document_id = hashlib.sha256(file_content).hexdigest()[:16]
+            logger.info(f"Document ID (content hash): {document_id}")
             
             # Get total pages using fitz
             logger.debug("Analyzing PDF structure with fitz")
@@ -357,7 +362,7 @@ class rag:
                     token_list.append(token_count)
                     
                     azure_docs.append({
-                        "id": str(uuid.uuid4()),
+                        "id": f"{document_id}_{fr_mode}_{i:05d}",
                         "bot_tag": tag,
                         "fr_tag": f"fr_{fr_mode}",
                         "filename": filename,
@@ -367,7 +372,11 @@ class rag:
                         "sub_section": chunk.metadata.get("Header_2", ""),
                         "source": filename,
                         "content": content,
-                        "content_vector": content_vector
+                        "content_vector": content_vector,
+                        "document_id": document_id,
+                        "ingestion_timestamp": datetime.utcnow().isoformat() + "Z",
+                        "source_type": "upload",
+                        "source_path": file_path,
                     })
                     
                     logger.debug(f"Chunk {i+1} processed successfully")
@@ -405,7 +414,7 @@ class rag:
                     token_list.append(token_count)
                     
                     azure_docs.append({
-                        "id": str(uuid.uuid4()),
+                        "id": f"{document_id}_{fr_mode}_{i:05d}",
                         "bot_tag": tag,
                         "fr_tag": f"fr_{fr_mode}",
                         "filename": filename,
@@ -415,7 +424,11 @@ class rag:
                         "sub_section": "",     # Empty for read mode
                         "source": filename,
                         "content": content,
-                        "content_vector": content_vector
+                        "content_vector": content_vector,
+                        "document_id": document_id,
+                        "ingestion_timestamp": datetime.utcnow().isoformat() + "Z",
+                        "source_type": "upload",
+                        "source_path": file_path,
                     })
                     
                     logger.debug(f"Chunk {i+1} processed successfully")
@@ -425,7 +438,7 @@ class rag:
                 logger.info(f"Uploading {len(azure_docs)} documents to search index")
                 start_time = time.time()
                 
-                result = search_client.upload_documents(documents=azure_docs)
+                result = search_client.merge_or_upload_documents(documents=azure_docs)
                 end_time = time.time()
                 
                 logger.info(f"Documents uploaded successfully in {end_time - start_time:.2f} seconds")
@@ -458,56 +471,50 @@ class rag:
             logger.error(f"Error in upload process: {str(e)}", exc_info=True)
             raise
 
-    async def _chunk_text_by_tokens(self, text: str, max_tokens: int = 500, overlap: int = 50):
-        """Chunks text based on token count with overlap."""
-        logger.debug(f"Chunking text by tokens - max_tokens: {max_tokens}, overlap: {overlap}")
-        
+    async def _chunk_text_by_tokens(self, text: str, max_tokens: int = 500, overlap: int = 50) -> list[str]:
+        """Chunk text by real token count using tiktoken (cl100k_base encoding).
+
+        Args:
+            text: Input text to chunk.
+            max_tokens: Maximum tokens per chunk (actual tiktoken count, not words).
+            overlap: Number of tokens to overlap between consecutive chunks.
+
+        Returns:
+            List of text chunks, each bounded by max_tokens real tokens.
+        """
+        logger.debug(f"Chunking text by real tokens - max_tokens: {max_tokens}, overlap: {overlap}")
+
         try:
+            encoding = tiktoken.get_encoding("cl100k_base")
+            token_ids = encoding.encode(text)
+
+            if not token_ids:
+                logger.debug("No tokens found in text")
+                return []
+
+            logger.debug(f"Total tokens in text: {len(token_ids)}")
+
             chunks = []
-            words = text.split()
-            
-            if not words:
-                logger.debug("No words found in text")
-                return chunks
-            
-            logger.debug(f"Total words in text: {len(words)}")
-            
-            start_idx = 0
-            chunk_count = 0
-            
-            while start_idx < len(words):
-                chunk_count += 1
-                logger.debug(f"Processing chunk {chunk_count} starting at word {start_idx}")
-                
-                # Determine the end index for this chunk
-                end_idx = min(start_idx + max_tokens, len(words))
-                
-                # Create chunk from start_idx to end_idx
-                chunk_words = words[start_idx:end_idx]
-                chunk = " ".join(chunk_words)
-                
-                if chunk.strip():
-                    chunks.append(chunk.strip())
-                    logger.debug(f"Chunk {chunk_count} created - length: {len(chunk)} characters, words: {len(chunk_words)}")
-                
-                # Move start_idx for next chunk, accounting for overlap
-                # If this is the last chunk, break
-                if end_idx >= len(words):
-                    logger.debug(f"Reached end of text at chunk {chunk_count}")
+            start = 0
+
+            while start < len(token_ids):
+                end = min(start + max_tokens, len(token_ids))
+                chunk_token_ids = token_ids[start:end]
+                chunk_text = encoding.decode(chunk_token_ids)
+
+                if chunk_text.strip():
+                    chunks.append(chunk_text.strip())
+
+                if end >= len(token_ids):
                     break
-                    
-                # Move start index forward by (max_tokens - overlap)
-                start_idx = start_idx + max_tokens - overlap
-                
-                # Ensure we don't go backwards
-                if start_idx <= 0:
-                    start_idx = max_tokens
-                    
-                logger.debug(f"Next chunk will start at word {start_idx}")
-            
-            logger.info(f"Text chunking completed - created {len(chunks)} chunks")
+
+                start = start + max_tokens - overlap
+                if start <= 0:
+                    start = max_tokens
+
+            logger.info(f"Token-aware chunking complete: {len(chunks)} chunks from {len(token_ids)} tokens")
             return chunks
-            
+
         except Exception as e:
-            logger.error(f"Error in text chunking: {str(e)}", exc_info=True)
+            logger.error(f"Error in token-aware chunking: {str(e)}", exc_info=True)
             raise

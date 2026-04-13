@@ -83,3 +83,5 @@ urllib3==2.5.0
 uvicorn==0.35.0
 yarl==1.20.0
 zstandard==0.23.0
+pytest
+pytest-asyncio
