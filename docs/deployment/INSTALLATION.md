@@ -1,14 +1,42 @@
 # TocDoc — Client Installation Guide
 
-This guide covers deploying TocDoc into a new client Azure resource group.
+This guide covers a complete, runnable TocDoc deployment into a new Azure
+resource group. Following all steps in order results in both services starting
+successfully after the container image swap.
+
+## What Bicep wires automatically vs what you provide
+
+| Value | How it is set |
+|---|---|
+| OpenAI / Search / Doc Intelligence endpoints | Computed from deployed resources → wired as plain env vars |
+| API version, model names, index name | Parameters with sensible defaults → wired as plain env vars |
+| `AUDIENCE_ID`, `TocdocSPTenantID`, `AZURE_KEY_VAULT` | Parameters → wired as plain env vars |
+| API keys (`openAiApiKey`, `searchApiKey`, `docIntelApiKey`) | Passed as `@secure()` params at deploy time → stored as Container App secrets, never in plain config |
+| SP credentials (`spClientId`, `spClientSecret`) | Passed as `@secure()` params → stored as Container App secrets (current QnA auth path for Key Vault) |
+
+> **Auth model note**: The QnA service currently uses `ClientSecretCredential`
+> (service principal) to load secrets from Key Vault at startup. System-assigned
+> managed identities are provisioned and granted Key Vault Secrets User in this
+> template as infrastructure preparation for a future migration to
+> `ManagedIdentityCredential`. They do not affect the current startup path.
 
 ## Prerequisites
+
 - Azure subscription with Contributor access on the target resource group
-- Azure CLI logged in (`az login`)
-- Docker (for building images locally)
-- GitHub access to `MaanavA26/TocDoc---Enterprise-RAG`
+- Azure CLI ≥ 2.50 logged in (`az login`)
+- Docker (for building container images)
+- Service principal with Key Vault access created for the QnA service
 
 ## Step 1: Provision Azure resources
+
+Gather these values before running the command:
+- `<tenant-id>` — Azure AD tenant ID
+- `<audience-client-id>` — App registration client ID for JWT audience
+- `<openai-key>` — Azure OpenAI API key (from the resource after deploy, or use an existing one)
+- `<search-key>` — Azure Cognitive Search admin key
+- `<doc-intel-key>` — Document Intelligence API key
+- `<sp-client-id>` — Service principal client ID for QnA Key Vault access
+- `<sp-client-secret>` — Service principal client secret
 
 ```bash
 az group create --name rg-tocdoc-<client-name> --location <region>
@@ -17,18 +45,17 @@ az deployment group create \
   --resource-group rg-tocdoc-<client-name> \
   --template-file infra/main.bicep \
   --parameters infra/parameters/prod.bicepparam \
-  --parameters tenantId=<tenant-id> audienceClientId=<audience-client-id>
+  --parameters \
+      tenantId=<tenant-id> \
+      audienceClientId=<audience-client-id> \
+      openAiApiKey=<openai-key> \
+      searchApiKey=<search-key> \
+      docIntelApiKey=<doc-intel-key> \
+      spClientId=<sp-client-id> \
+      spClientSecret=<sp-client-secret>
 ```
 
-The deployment provisions:
-- Azure OpenAI (S0) with endpoint wired into both apps
-- Azure Cognitive Search (S1 + semantic ranker) with endpoint wired into both apps
-- Azure Document Intelligence with endpoint wired into the ingestion app
-- Key Vault (soft-delete 90 days, RBAC-enabled)
-- Log Analytics workspace + Application Insights (connection string wired into both apps)
-- Container Apps Environment with log forwarding
-- Ingestion + QnA container apps with system-assigned managed identities
-- Key Vault Secrets User role assignments so apps load API keys at startup
+The `@secure()` parameters are not logged or shown in Azure deployment history.
 
 Save the deployment outputs — you will need the FQDNs for smoke testing:
 
@@ -36,42 +63,40 @@ Save the deployment outputs — you will need the FQDNs for smoke testing:
 az deployment group show \
   --resource-group rg-tocdoc-<client-name> \
   --name main \
-  --query properties.outputs
+  --query "properties.outputs" -o json
 ```
 
-## Step 2: Store API keys in Key Vault
+## Step 2: Verify container app configuration
 
-The Bicep template wires all endpoint URLs automatically. You only need to
-store the API keys (secrets) that cannot be computed from resource properties:
+Confirm both apps have the expected env/secret names configured before swapping
+the image. A missing env var here means the app will fail at startup.
 
 ```bash
-KV=<key-vault-name-from-deployment-output>
+# Check ingestion env vars
+az containerapp show \
+  --name tocdoc-ingestion-prod \
+  --resource-group rg-tocdoc-<client-name> \
+  --query "properties.template.containers[0].env[].name" -o tsv
 
-# Azure OpenAI key
-az keyvault secret set --vault-name $KV --name TocdocOpenAIKey \
-  --value "<azure-openai-api-key>"
+# Expected output should include:
+# AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_VERSION, AZURE_OPENAI_EMBEDDING_MODEL,
+# AZURE_SEARCH_ENDPOINT, INDEX_NAME, DOC_INTELLIGENCE_ENDPOINT, LOG_LEVEL,
+# AZURE_OPENAI_KEY, AZURE_SEARCH_KEY, DOC_INTELLIGENCE_KEY
 
-# Azure Cognitive Search admin key
-az keyvault secret set --vault-name $KV --name AzureSearchKey \
-  --value "<azure-search-admin-key>"
+# Check QnA env vars
+az containerapp show \
+  --name tocdoc-qna-prod \
+  --resource-group rg-tocdoc-<client-name> \
+  --query "properties.template.containers[0].env[].name" -o tsv
 
-# Document Intelligence key (for ingestion service)
-az keyvault secret set --vault-name $KV --name DocIntelligenceKey \
-  --value "<document-intelligence-api-key>"
-
-# Service principal credentials (if used for additional auth)
-az keyvault secret set --vault-name $KV --name TocdocSPClientID \
-  --value "<service-principal-client-id>"
-az keyvault secret set --vault-name $KV --name TocdocSPSecretValue \
-  --value "<service-principal-secret>"
+# Expected output should include:
+# AzureOpenaiAccountEndpoint, AzureOpenaiApiVersion, AzureOpenaiLlmModel,
+# AZURE_OPENAI_EMBEDDING_MODEL, AzureSearchEndpoint, INDEX_NAME,
+# AUDIENCE_ID, AZURE_KEY_VAULT, TocdocSPTenantID, LOG_LEVEL,
+# TocdocOpenAIKey, AzureSearchKey, TocdocSPClientID, TocdocSPSecretValue
 ```
 
-The container apps' system-assigned managed identities have been granted
-**Key Vault Secrets User** by Bicep. No additional access policy setup is needed.
-
 ## Step 3: Build and deploy container images
-
-Build the real images and swap out the placeholder:
 
 ```bash
 # Build and push (replace <your-registry> with your container registry)
@@ -81,39 +106,44 @@ docker push <your-registry>/tocdoc-ingestion:latest
 docker build -t <your-registry>/tocdoc-qna:latest ./services/qna
 docker push <your-registry>/tocdoc-qna:latest
 
-# Swap the placeholder image — env vars and KV access are already configured
+# Swap the placeholder image — all env vars and secrets are already configured
 az containerapp update \
-  --name tocdoc-ingestion-<environment> \
+  --name tocdoc-ingestion-prod \
   --resource-group rg-tocdoc-<client-name> \
   --image <your-registry>/tocdoc-ingestion:latest
 
 az containerapp update \
-  --name tocdoc-qna-<environment> \
+  --name tocdoc-qna-prod \
   --resource-group rg-tocdoc-<client-name> \
   --image <your-registry>/tocdoc-qna:latest
 ```
 
-The apps will start, read their endpoint URLs from the pre-configured env vars,
-and load API keys from Key Vault using their managed identities automatically.
+After the image swap the real services start immediately — all required env vars
+and secret values are already present in the container app configuration.
 
 ## Step 4: Smoke test
 
-Use the FQDNs from the deployment outputs:
-
 ```bash
-INGESTION_FQDN=<ingestionAppFqdn from deployment output>
-QNA_FQDN=<qnaAppFqdn from deployment output>
+INGESTION_FQDN=$(az deployment group show \
+  --resource-group rg-tocdoc-<client-name> --name main \
+  --query "properties.outputs.ingestionAppFqdn.value" -o tsv)
+
+QNA_FQDN=$(az deployment group show \
+  --resource-group rg-tocdoc-<client-name> --name main \
+  --query "properties.outputs.qnaAppFqdn.value" -o tsv)
 
 curl https://${INGESTION_FQDN}/upload_pipeline/health
 curl https://${QNA_FQDN}/qna/health
 
-# Expected response: {"status": "healthy"} / {"status": "ok"}
+# Expected: {"status":"healthy"} and {"status":"ok","qna_module":"loaded",...}
 ```
 
 ## Estimated installation time
-- Infrastructure provisioning: 10–15 minutes
-- Secret configuration: 5 minutes
-- Container image build + push: 5–10 minutes
-- Container app update + startup: 3–5 minutes
-- Smoke testing: 2 minutes
-- **Total: ~25–40 minutes**
+
+| Step | Time |
+|---|---|
+| Infrastructure provisioning (Step 1) | 10–15 min |
+| Config verification (Step 2) | 2 min |
+| Image build + push + update (Step 3) | 5–10 min |
+| Smoke test (Step 4) | 2 min |
+| **Total** | **~20–30 min** |

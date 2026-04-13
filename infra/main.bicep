@@ -1,22 +1,36 @@
 // TocDoc Enterprise RAG — Infrastructure Prerequisites
 // Provisions: Azure OpenAI, Cognitive Search, Document Intelligence,
 // Key Vault, Log Analytics, App Insights, Container Apps Environment,
-// and placeholder Container Apps (ingestion + QnA) with system-assigned
-// managed identities and Key Vault Secrets User role assignments.
+// and Container Apps (ingestion + QnA) with all required env vars wired
+// using the exact names the current service code reads at startup.
 //
-// After deployment the container apps have all required env vars wired.
-// Swap the placeholder image with the real one via:
-//   az containerapp update --name <app> --resource-group <rg> --image <image>
+// Authentication model (current):
+//   - Ingestion: reads API keys directly from environment variables.
+//   - QnA: reads bootstrap SP credentials from env, then uses
+//     ClientSecretCredential to load additional secrets from Key Vault.
+//   - System-assigned managed identities are provisioned and granted
+//     Key Vault Secrets User for future ManagedIdentityCredential migration.
+//
+// Secrets are passed as @secure() parameters so they are stored as
+// Container App secrets and never appear in plain deployment logs.
 //
 // Usage:
 //   az deployment group create \
-//     --resource-group rg-tocdoc-client \
+//     --resource-group rg-tocdoc-<client> \
 //     --template-file infra/main.bicep \
-//     --parameters infra/parameters/prod.bicepparam
+//     --parameters infra/parameters/prod.bicepparam \
+//     --parameters \
+//         openAiApiKey=<key> \
+//         searchApiKey=<key> \
+//         docIntelApiKey=<key> \
+//         spClientId=<id> \
+//         spClientSecret=<secret>
 
 targetScope = 'resourceGroup'
 
-@description('Short name prefix used for all resource names. Keep under 8 chars.')
+// ── Non-secret parameters ─────────────────────────────────────────────────────
+
+@description('Short name prefix for all resource names. Keep under 8 chars.')
 param prefix string = 'tocdoc'
 
 @description('Azure region for all resources.')
@@ -26,23 +40,16 @@ param location string = resourceGroup().location
 @allowed(['dev', 'staging', 'prod'])
 param environment string = 'prod'
 
-@description('Azure AD tenant ID for JWT validation.')
+@description('Azure AD tenant ID (used for JWT validation and SP auth).')
 param tenantId string
 
-@description('App registration client ID (audience for JWT).')
+@description('App registration client ID (audience for JWT / AUDIENCE_ID).')
 param audienceClientId string
 
-@description('SKU for Azure OpenAI. Use S0 for standard.')
-param openAiSku string = 'S0'
-
-@description('Search service SKU. Use basic for small deployments, S1 for production.')
-@allowed(['basic', 'S1', 'S2', 'S3'])
-param searchSku string = 'S1'
-
-@description('Azure OpenAI API version used by both services.')
+@description('Azure OpenAI API version.')
 param openAiApiVersion string = '2024-02-01'
 
-@description('Azure OpenAI chat deployment/model name.')
+@description('Azure OpenAI LLM deployment/model name.')
 param openAiLlmModel string = 'gpt-4o-mini'
 
 @description('Azure OpenAI embedding deployment/model name.')
@@ -51,18 +58,47 @@ param openAiEmbeddingModel string = 'text-embedding-3-small'
 @description('Azure Cognitive Search index name.')
 param searchIndexName string = 'tocdoc-index'
 
-// ── Resource names (deterministic from prefix) ───────────────────────────────
-var openAiName = '${prefix}-openai-${environment}'
-var searchName = '${prefix}-search-${environment}'
-var docIntelName = '${prefix}-docintel-${environment}'
-var kvName = '${prefix}-kv-${environment}'
-var logAnalyticsName = '${prefix}-logs-${environment}'
-var appInsightsName = '${prefix}-appinsights-${environment}'
-var containerEnvName = '${prefix}-containerenv-${environment}'
-var ingestionAppName = '${prefix}-ingestion-${environment}'
-var qnaAppName = '${prefix}-qna-${environment}'
+@description('SKU for Azure OpenAI.')
+param openAiSku string = 'S0'
 
-// Key Vault Secrets User built-in role ID (read secret values, no management)
+@description('Search service SKU.')
+@allowed(['basic', 'S1', 'S2', 'S3'])
+param searchSku string = 'S1'
+
+// ── Secret parameters (@secure prevents values appearing in deployment logs) ──
+
+@secure()
+@description('Azure OpenAI API key. Injected as a container app secret.')
+param openAiApiKey string
+
+@secure()
+@description('Azure Cognitive Search admin key. Injected as a container app secret.')
+param searchApiKey string
+
+@secure()
+@description('Azure Document Intelligence key. Injected into the ingestion app only.')
+param docIntelApiKey string
+
+@secure()
+@description('Service principal client ID for QnA Key Vault access (current auth path).')
+param spClientId string
+
+@secure()
+@description('Service principal client secret for QnA Key Vault access (current auth path).')
+param spClientSecret string
+
+// ── Resource names ────────────────────────────────────────────────────────────
+var openAiName         = '${prefix}-openai-${environment}'
+var searchName         = '${prefix}-search-${environment}'
+var docIntelName       = '${prefix}-docintel-${environment}'
+var kvName             = '${prefix}-kv-${environment}'
+var logAnalyticsName   = '${prefix}-logs-${environment}'
+var appInsightsName    = '${prefix}-appinsights-${environment}'
+var containerEnvName   = '${prefix}-containerenv-${environment}'
+var ingestionAppName   = '${prefix}-ingestion-${environment}'
+var qnaAppName         = '${prefix}-qna-${environment}'
+
+// Key Vault Secrets User (read secret values; no management operations)
 var kvSecretsUserRoleId = '4633458b-17de-408a-b874-0445c86b69e0'
 
 // ── Log Analytics workspace ───────────────────────────────────────────────────
@@ -88,7 +124,7 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
   tags: { environment: environment, product: 'tocdoc' }
 }
 
-// ── Azure OpenAI ─────────────────────────────────────────────────────────────
+// ── Azure OpenAI ──────────────────────────────────────────────────────────────
 resource openAi 'Microsoft.CognitiveServices/accounts@2023-05-01' = {
   name: openAiName
   location: location
@@ -159,17 +195,21 @@ resource containerEnv 'Microsoft.App/managedEnvironments@2023-11-02-preview' = {
 }
 
 // ── Ingestion Container App ───────────────────────────────────────────────────
-// System-assigned identity lets the app authenticate to Key Vault at startup
-// to load API keys. All non-secret config is wired directly as env vars below.
+// Env var names match exactly what ingestion/custom_rag.py reads via os.getenv().
+// API keys are stored as Container App secrets (not plain env vars).
 resource ingestionApp 'Microsoft.App/containerApps@2023-11-02-preview' = {
   name: ingestionAppName
   location: location
-  identity: {
-    type: 'SystemAssigned'
-  }
+  identity: { type: 'SystemAssigned' }
   properties: {
     managedEnvironmentId: containerEnv.id
     configuration: {
+      secrets: [
+        // Injected as env vars via secretRef below; never appear in plain config.
+        { name: 'azure-openai-key',  value: openAiApiKey   }
+        { name: 'azure-search-key',  value: searchApiKey   }
+        { name: 'doc-intel-key',     value: docIntelApiKey }
+      ]
       ingress: {
         external: true
         targetPort: 5501
@@ -179,28 +219,22 @@ resource ingestionApp 'Microsoft.App/containerApps@2023-11-02-preview' = {
       containers: [
         {
           name: 'ingestion'
-          // Replace with the real image after pushing: az containerapp update --image ...
+          // Replace after pushing your image: az containerapp update --image ...
           image: 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
           resources: { cpu: json('0.5'), memory: '1Gi' }
           env: [
-            // Auth
-            { name: 'AUDIENCE_ID', value: audienceClientId }
-            { name: 'AZURE_TENANT_ID', value: tenantId }
-            // Key Vault — the app loads secret values (API keys) from KV at startup
-            { name: 'AZURE_KEY_VAULT', value: keyVault.name }
-            // Azure OpenAI
-            { name: 'AZURE_OPENAI_ENDPOINT', value: openAi.properties.endpoint }
-            { name: 'AZURE_OPENAI_VERSION', value: openAiApiVersion }
-            { name: 'AZURE_OPENAI_LLM_MODEL', value: openAiLlmModel }
-            { name: 'AZURE_OPENAI_EMBEDDING_MODEL', value: openAiEmbeddingModel }
-            // Azure Cognitive Search
-            { name: 'AZURE_SEARCH_ENDPOINT', value: 'https://${search.name}.search.windows.net' }
-            { name: 'INDEX_NAME', value: searchIndexName }
-            // Document Intelligence
-            { name: 'DOC_INTELLIGENCE_ENDPOINT', value: docIntel.properties.endpoint }
-            // Observability
-            { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appInsights.properties.ConnectionString }
-            { name: 'LOG_LEVEL', value: 'INFO' }
+            // ── Plain env vars (computed from deployed resources) ──
+            { name: 'AZURE_OPENAI_ENDPOINT',         value: openAi.properties.endpoint }
+            { name: 'AZURE_OPENAI_VERSION',           value: openAiApiVersion }
+            { name: 'AZURE_OPENAI_EMBEDDING_MODEL',   value: openAiEmbeddingModel }
+            { name: 'AZURE_SEARCH_ENDPOINT',          value: 'https://${search.name}.search.windows.net' }
+            { name: 'INDEX_NAME',                     value: searchIndexName }
+            { name: 'DOC_INTELLIGENCE_ENDPOINT',      value: docIntel.properties.endpoint }
+            { name: 'LOG_LEVEL',                      value: 'INFO' }
+            // ── Secret env vars (values stored as Container App secrets above) ──
+            { name: 'AZURE_OPENAI_KEY',   secretRef: 'azure-openai-key' }
+            { name: 'AZURE_SEARCH_KEY',   secretRef: 'azure-search-key' }
+            { name: 'DOC_INTELLIGENCE_KEY', secretRef: 'doc-intel-key'  }
           ]
         }
       ]
@@ -211,15 +245,26 @@ resource ingestionApp 'Microsoft.App/containerApps@2023-11-02-preview' = {
 }
 
 // ── QnA Container App ─────────────────────────────────────────────────────────
+// Env var names match exactly what services/qna/src/config/config.py reads.
+// The QnA service validates AzureOpenaiAccountEndpoint, TocdocOpenAIKey,
+// AzureOpenaiApiVersion, AZURE_OPENAI_EMBEDDING_MODEL, AzureSearchEndpoint,
+// AzureSearchKey, and INDEX_NAME at import time (before Key Vault loading).
+// SP credentials (TocdocSPClientID / TocdocSPSecretValue) are the current
+// auth path for Key Vault; managed identity role assignment below is
+// future-ready for a ManagedIdentityCredential migration.
 resource qnaApp 'Microsoft.App/containerApps@2023-11-02-preview' = {
   name: qnaAppName
   location: location
-  identity: {
-    type: 'SystemAssigned'
-  }
+  identity: { type: 'SystemAssigned' }
   properties: {
     managedEnvironmentId: containerEnv.id
     configuration: {
+      secrets: [
+        { name: 'tocdoc-openai-key',   value: openAiApiKey    }
+        { name: 'azure-search-key',    value: searchApiKey    }
+        { name: 'sp-client-id',        value: spClientId      }
+        { name: 'sp-client-secret',    value: spClientSecret  }
+      ]
       ingress: {
         external: true
         targetPort: 5500
@@ -232,22 +277,22 @@ resource qnaApp 'Microsoft.App/containerApps@2023-11-02-preview' = {
           image: 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
           resources: { cpu: json('0.5'), memory: '1Gi' }
           env: [
-            // Auth
-            { name: 'AUDIENCE_ID', value: audienceClientId }
-            { name: 'AZURE_TENANT_ID', value: tenantId }
-            // Key Vault — the app loads secret values (API keys) from KV at startup
-            { name: 'AZURE_KEY_VAULT', value: keyVault.name }
-            // Azure OpenAI
-            { name: 'AZURE_OPENAI_ENDPOINT', value: openAi.properties.endpoint }
-            { name: 'AZURE_OPENAI_VERSION', value: openAiApiVersion }
-            { name: 'AZURE_OPENAI_LLM_MODEL', value: openAiLlmModel }
-            { name: 'AZURE_OPENAI_EMBEDDING_MODEL', value: openAiEmbeddingModel }
-            // Azure Cognitive Search
-            { name: 'AZURE_SEARCH_ENDPOINT', value: 'https://${search.name}.search.windows.net' }
-            { name: 'INDEX_NAME', value: searchIndexName }
-            // Observability
-            { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appInsights.properties.ConnectionString }
-            { name: 'LOG_LEVEL', value: 'INFO' }
+            // ── Plain env vars ──
+            { name: 'AzureOpenaiAccountEndpoint',    value: openAi.properties.endpoint }
+            { name: 'AzureOpenaiApiVersion',         value: openAiApiVersion }
+            { name: 'AzureOpenaiLlmModel',           value: openAiLlmModel }
+            { name: 'AZURE_OPENAI_EMBEDDING_MODEL',  value: openAiEmbeddingModel }
+            { name: 'AzureSearchEndpoint',           value: 'https://${search.name}.search.windows.net' }
+            { name: 'INDEX_NAME',                    value: searchIndexName }
+            { name: 'AUDIENCE_ID',                   value: audienceClientId }
+            { name: 'AZURE_KEY_VAULT',               value: keyVault.name }
+            { name: 'TocdocSPTenantID',              value: tenantId }
+            { name: 'LOG_LEVEL',                     value: 'INFO' }
+            // ── Secret env vars ──
+            { name: 'TocdocOpenAIKey',      secretRef: 'tocdoc-openai-key'  }
+            { name: 'AzureSearchKey',       secretRef: 'azure-search-key'   }
+            { name: 'TocdocSPClientID',     secretRef: 'sp-client-id'       }
+            { name: 'TocdocSPSecretValue',  secretRef: 'sp-client-secret'   }
           ]
         }
       ]
@@ -257,9 +302,11 @@ resource qnaApp 'Microsoft.App/containerApps@2023-11-02-preview' = {
   tags: { environment: environment, product: 'tocdoc' }
 }
 
-// ── Key Vault access: Key Vault Secrets User role for both container apps ─────
-// Allows each app's managed identity to read secret *values* from Key Vault.
-// The app uses this at startup to load API keys without storing them in env vars.
+// ── Key Vault role assignments (future ManagedIdentityCredential migration) ───
+// Grants each app's system-assigned identity the ability to read secret values.
+// The current QnA code path still uses ClientSecretCredential (wired above as
+// TocdocSPClientID / TocdocSPSecretValue). These assignments are infrastructure
+// preparation for a future code migration — they do not affect current behavior.
 
 resource kvRoleIngestion 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(keyVault.id, ingestionApp.id, kvSecretsUserRoleId)
@@ -282,11 +329,10 @@ resource kvRoleQna 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
 }
 
 // ── Outputs ───────────────────────────────────────────────────────────────────
-output openAiEndpoint string = openAi.properties.endpoint
-output searchEndpoint string = 'https://${search.name}.search.windows.net'
-output docIntelEndpoint string = docIntel.properties.endpoint
-output keyVaultName string = keyVault.name
-output containerEnvId string = containerEnv.id
+output openAiEndpoint              string = openAi.properties.endpoint
+output searchEndpoint              string = 'https://${search.name}.search.windows.net'
+output docIntelEndpoint            string = docIntel.properties.endpoint
+output keyVaultName                string = keyVault.name
 output appInsightsConnectionString string = appInsights.properties.ConnectionString
-output ingestionAppFqdn string = ingestionApp.properties.configuration.ingress.fqdn
-output qnaAppFqdn string = qnaApp.properties.configuration.ingress.fqdn
+output ingestionAppFqdn            string = ingestionApp.properties.configuration.ingress.fqdn
+output qnaAppFqdn                  string = qnaApp.properties.configuration.ingress.fqdn
