@@ -61,6 +61,8 @@ async def generate_answer(
         - History is never stored in module-level state; each call is isolated.
     """
     request_id = f"gen_{int(time.time() * 1000)}"
+    if not bot_tag or not bot_tag.strip():
+        raise ValueError("bot_tag is required for tenant isolation")
     logger.info(f"[{request_id}] Starting answer generation")
     logger.info(f"[{request_id}] Query: {query!r}, fr_mode: {fr_mode!r}")
     start_time = time.time()

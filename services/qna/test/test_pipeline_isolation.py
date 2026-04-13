@@ -324,28 +324,39 @@ async def test_generate_answer_passes_bot_tag_to_search():
 @pytest.mark.asyncio
 async def test_concurrent_requests_do_not_cross_contaminate():
     """
-    Two concurrent calls with different histories must each receive independent
-    answers. This is the regression test for P0-3 — the old global approach
-    would cause the second request's history to overwrite the first's, leading
-    to wrong answers or cross-user data bleed.
+    Two concurrent calls with different bot_tags must each receive independent
+    results without cross-contamination. Patches are set up once outside
+    asyncio.gather to avoid race conditions on module-level symbols.
     """
     from src.pipeline import qna_pipeline
 
     fake_azure = FakeAzure()
     results = {}
 
-    async def run_request(tenant_id: str, user_q: str):
-        hist = [{"user_query": user_q, "bot_response": None}]
-        with patch.object(qna_pipeline, "rephrase_queries", new=AsyncMock(return_value={
-                 "rephrased_query": user_q,
-                 "is_greeting": True,
-                 "extracted_snippet": "",
-                 "is_followup": False,
-                 "was_rephrased": False,
-             })), \
-             patch.object(qna_pipeline, "generate_openai_response", new=AsyncMock(return_value=f"Answer for {tenant_id}.\n\n**Sources:\n")), \
-             patch.object(qna_pipeline, "extract_answer_and_filenames_from_text", new=AsyncMock(return_value=(f"Answer for {tenant_id}.", []))):
+    async def fake_rephrase(azure, current_query, prev_query, prev_prev_query,
+                             latest_bot_reply, full_history):
+        return {
+            "rephrased_query": current_query,
+            "is_greeting": True,
+            "extracted_snippet": "",
+            "is_followup": False,
+            "was_rephrased": False,
+        }
 
+    async def fake_openai_response(query, knowledge_source, *, is_greeting, is_follow_up, azure):
+        # Return a response that embeds the query so we can assert no cross-contamination
+        return f"Answer for '{query}'.\n\n**Sources:\n"
+
+    async def fake_extract(text):
+        answer = text.split("\n\n")[0]
+        return (answer, [])
+
+    with patch.object(qna_pipeline, "rephrase_queries", side_effect=fake_rephrase), \
+         patch.object(qna_pipeline, "generate_openai_response", side_effect=fake_openai_response), \
+         patch.object(qna_pipeline, "extract_answer_and_filenames_from_text", side_effect=fake_extract):
+
+        async def run_request(tenant_id: str, user_q: str):
+            hist = [{"user_query": user_q, "bot_response": None}]
             result = await qna_pipeline.generate_answer(
                 query=user_q,
                 fr_mode="read",
@@ -353,18 +364,14 @@ async def test_concurrent_requests_do_not_cross_contaminate():
                 history=hist,
                 azure=fake_azure,
             )
-        results[tenant_id] = result
+            results[tenant_id] = result
 
-    # Run both requests concurrently
-    await asyncio.gather(
-        run_request("tenant-x", "What is the budget?"),
-        run_request("tenant-y", "Who is the supplier?"),
-    )
+        await asyncio.gather(
+            run_request("tenant-x", "What is the budget?"),
+            run_request("tenant-y", "Who is the supplier?"),
+        )
 
-    assert "tenant-x" in results
-    assert "tenant-y" in results
-    assert "Answer for tenant-x" in results["tenant-x"]["answer"]
-    assert "Answer for tenant-y" in results["tenant-y"]["answer"]
-    # Ensure no cross-contamination
+    assert "Answer for 'What is the budget?'" in results["tenant-x"]["answer"]
+    assert "Answer for 'Who is the supplier?'" in results["tenant-y"]["answer"]
     assert "tenant-y" not in results["tenant-x"]["answer"]
     assert "tenant-x" not in results["tenant-y"]["answer"]

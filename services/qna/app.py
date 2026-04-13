@@ -1,10 +1,8 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
 from src.core.lifecycle import startup_event, shutdown_event
 import src.pipeline.qna_pipeline
 import logging
-import os
 import time
 from datetime import datetime
 import traceback
@@ -15,21 +13,12 @@ from src.core.auth import AuthUtils
 # ---------------------------------------------------------------------------
 # Logging configuration
 # ---------------------------------------------------------------------------
-# Stdout always; file logging only if LOG_FILE env var is set (local dev)
-_log_handlers = [logging.StreamHandler()]
-_log_file = os.getenv("LOG_FILE")
-if _log_file:
-    _log_file_handler = logging.FileHandler(_log_file, mode="a", encoding="utf-8")
-    _log_handlers.append(_log_file_handler)
-
-_formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-for _h in _log_handlers:
-    _h.setFormatter(_formatter)
+_handler = logging.StreamHandler()
+_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
 
 logger = logging.getLogger(__name__)
-logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
-for _h in _log_handlers:
-    logger.addHandler(_h)
+logger.setLevel(logging.INFO)
+logger.addHandler(_handler)
 
 # Avoid duplicate propagation to root logger
 logger.propagate = False
@@ -69,20 +58,6 @@ app = FastAPI(
     openapi_url="/openapi.json",
     lifespan=lifespan,
 )
-
-# CORS: read from env, default to empty (restrictive) in production
-# In local dev: set CORS_ALLOWED_ORIGINS=http://localhost:3000,http://localhost:5500
-_cors_origins_raw = os.getenv("CORS_ALLOWED_ORIGINS", "")
-_cors_origins = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()] if _cors_origins_raw else []
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_cors_origins,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
-)
-
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):

@@ -91,7 +91,9 @@ def _search_sync(azure, query: str, vector: List[float], fr_mode: str, bot_tag: 
         fields="content_vector",
     )
 
-    filter_expr = f"fr_tag eq '{fr_mode}' and bot_tag eq '{bot_tag}'"
+    safe_bot_tag = bot_tag.replace("'", "''")
+    safe_fr_mode = fr_mode.replace("'", "''")
+    filter_expr = f"fr_tag eq '{safe_fr_mode}' and bot_tag eq '{safe_bot_tag}'"
     logger.debug(f"Filter expression: {filter_expr}")
 
     results = azure.search_client.search(
