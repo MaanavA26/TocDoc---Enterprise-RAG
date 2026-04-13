@@ -130,12 +130,10 @@ async def custom_rag_qna(payload: Payload, request: Request):
 
     Behavior:
         - Validates presence of required fields (query, bot_tag, fr_tag).
-        - Normalizes history via `_as_turn` and exposes it to the pipeline at
-          `src.qna_pipeline.bot_queries` for backward compatibility.
+        - Normalizes history via `_as_turn` and passes it explicitly to
+          `generate_answer()` as a `history` parameter.
+        - Passes `bot_tag` explicitly so the search layer enforces tenant isolation.
         - Calls the pipeline to obtain an answer and returns it verbatim.
-
-    Constraints:
-        - Logic, variable names, and execution flow remain unchanged.
 
     Args:
         payload: Request body containing conversation context and tags.
@@ -184,12 +182,14 @@ async def custom_rag_qna(payload: Payload, request: Request):
         if not fr_tag:
             raise HTTPException(status_code=400, detail="FR tag cannot be empty")
 
-        # Expose normalized history where the existing code expects it.
-        # (Kept for backward compatibility with qna_pipeline.)
-        src.pipeline.qna_pipeline.bot_queries = history
-
         logger.info(f"[{request_id}] Calling qna.generate_answer...")
-        ans = await src.pipeline.qna_pipeline.generate_answer(query, fr_tag, azure=azure)
+        ans = await src.pipeline.qna_pipeline.generate_answer(
+            query=query,
+            fr_mode=fr_tag,
+            bot_tag=bot_tag,
+            history=history,
+            azure=azure,
+        )
 
         elapsed = time.time() - start
         logger.info(f"[{request_id}] QnA processing completed in {elapsed:.4f}s")

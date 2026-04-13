@@ -335,11 +335,10 @@ async def test_pipeline_handles_non_string_model_response(monkeypatch):
 
     # Provide minimal history and FakeAzure
     app.state.azure = FakeAzure()
-    history = [{"user_query": "q1"}]
-    qna_pipeline.bot_queries = [_as_turn(x) for x in history]
+    history = [_as_turn({"user_query": "q1"})]
 
     # Call pipeline directly (bypassing HTTP) for this edge case
-    result = await generate_answer("q1", "read", app.state.azure)
+    result = await generate_answer("q1", "read", bot_tag="toc", history=history, azure=app.state.azure)
     assert "answer" in result and "citation" in result
     assert "error" in result  # pipeline returns an error payload on TypeError
 
