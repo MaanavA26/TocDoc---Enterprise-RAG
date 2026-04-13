@@ -4,6 +4,7 @@ import pytest
 from typing import Any
 from jose import jwt
 from httpx import AsyncClient, ASGITransport
+from unittest.mock import AsyncMock, patch
 
 # ---------------------------------------------------------------------------
 # Ensure required env vars exist BEFORE importing the app
@@ -122,6 +123,40 @@ def _patch_startup(monkeypatch):
         return {}
     from src.config import config as cfg
     monkeypatch.setattr(cfg.settings, "load_secrets_from_keyvault", _no_kv, raising=True)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _patch_validate_token(monkeypatch):
+    """
+    Patch validate_token so existing pipeline/functional tests don't need
+    real RS256 tokens.  test_auth.py uses its own RSA key pair and does NOT
+    apply this patch.
+
+    The mock returns a minimal claims dict built from the HS256 'dummy' token
+    payload created by make_token().  If validate_token raises (e.g. the token
+    has no 'upn'), the middleware returns 401 as expected by
+    test_qna_401_missing_email_claim.
+    """
+    import src.core.token_validator as tv
+
+    async def _fake_validate(token: str, tenant_id: str, audience: str) -> dict:
+        # Decode the test HS256 token without verification to extract claims.
+        # This mirrors what the old middleware did with verify_signature=False.
+        from jose import jwt as jose_jwt
+        try:
+            claims = jose_jwt.decode(
+                token,
+                key="dummy",
+                algorithms=["HS256"],
+                options={"verify_signature": False, "verify_aud": False},
+            )
+        except Exception:
+            raise tv.TokenValidationError("Invalid token")
+        return claims
+
+    import src.core.auth as auth_module
+    monkeypatch.setattr(auth_module, "validate_token", _fake_validate, raising=True)
     yield
 
 

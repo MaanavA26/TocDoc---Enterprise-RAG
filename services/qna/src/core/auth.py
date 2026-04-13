@@ -1,62 +1,52 @@
-import jwt  # NOTE: Imported but shadowed by `from jose import jwt` below. Kept to preserve imports.
 import logging
 from fastapi import Request
 from fastapi.responses import JSONResponse
-from jose import jwt, JWTError  # This `jwt` shadows the PyJWT import above (intentional per constraints).
 from src.config.config import settings
+from src.core.token_validator import validate_token, TokenValidationError
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Expected Azure AD values (configured via environment / Settings)
-# ---------------------------------------------------------------------------
-EXPECTED_ISS = f"https://sts.windows.net/{settings.AZURE_TENANT_ID}/"
-EXPECTED_AUD = settings.AUDIENCE_ID
 
 
 class AuthUtils:
     """
     Authentication utilities.
 
-    Currently exposes a FastAPI middleware that:
-      - Skips auth for `/health`.
-      - Expects an `Authorization: Bearer <token>` header.
-      - Decodes the JWT **without signature validation** (as implemented),
-        while still checking issuer/audience via the provided arguments.
+    Exposes a FastAPI middleware that:
+      - Skips auth for public routes (CORS preflight, /qna/health, swagger assets).
+      - Expects an ``Authorization: Bearer <token>`` header.
+      - Validates the JWT cryptographically via Azure AD JWKS (RS256).
       - Extracts a user email from common claim names and attaches it to
-        `request.state.email`.
-
-    NOTE:
-        - Signature verification is explicitly disabled (`verify_signature=False`).
-          See the suggestions section if you plan to enable proper validation.
+        ``request.state.email``.
     """
 
-    # 🔹 Middleware
+    # Middleware
     async def auth_middleware(request: Request, call_next):
         """
         FastAPI HTTP middleware for JWT-based authentication.
 
-        Behavior (unaltered):
-            - Allows CORS preflight/health routes to pass when path is `/health`.
+        Behavior:
+            - Allows CORS preflight/health routes to pass when path is ``/qna/health``.
             - Validates presence and shape of Authorization header.
-            - Decodes token with `jose.jwt.decode` and `verify_signature=False`.
-            - Extracts email from `upn` / `preferred_username` / `email`.
-            - Attaches `request.state.email` for downstream usage.
+            - Decodes and verifies the token via ``validate_token()`` using RS256
+              against the Azure AD JWKS endpoint.
+            - Extracts email from ``upn`` / ``preferred_username`` / ``email`` claims.
+            - Attaches ``request.state.email`` for downstream usage.
 
         Returns:
-            starlette.responses.Response: The next handler's response or a JSON 401/500.
+            starlette.responses.Response: The next handler's response or a JSON
+            401/500 error response.
         """
         path = request.url.path or "/"
 
-        # ---- Public routes / methods
+        # ---- Public routes / methods ----------------------------------------
         if (
-            request.method == "OPTIONS"                      # CORS preflight
-            or path.endswith("/qna/health")                      # /health, /qna/health, /api/qna/health, etc.
-            or path in {"/docs", "/redoc", "/openapi.json"}  # (optional) swagger assets
+            request.method == "OPTIONS"                           # CORS preflight
+            or path.endswith("/qna/health")                       # health endpoint
+            or path in {"/docs", "/redoc", "/openapi.json"}      # swagger assets
         ):
             return await call_next(request)
 
-        # Authorization header presence/shape check
+        # ---- Authorization header presence/shape check ----------------------
         auth_header = request.headers.get("Authorization")
         if not auth_header or not auth_header.startswith("Bearer "):
             return JSONResponse(
@@ -67,14 +57,12 @@ class AuthUtils:
         token = auth_header.split(" ")[1]
 
         try:
-            # Decode without signature validation (kept as-is by design).
-            decoded = jwt.decode(
+            # Full RS256 signature validation against Azure AD JWKS.
+            # NOTE: the token value is never logged.
+            decoded = await validate_token(
                 token,
-                key="",  # No key for now, as signature validation is skipped
-                options={"verify_signature": False, "leeway": 10},
-                issuer=EXPECTED_ISS,
-                audience=EXPECTED_AUD,
-                algorithms=["RS256"],
+                settings.AZURE_TENANT_ID,
+                settings.AUDIENCE_ID,
             )
 
             # Extract email from common claim aliases
@@ -92,11 +80,16 @@ class AuthUtils:
             # Attach email to request.state (downstream handlers can rely on it)
             request.state.email = email
 
-        except JWTError as e:
-            logger.error(f"Token decoding failed: {str(e)}")
-            return JSONResponse(status_code=401, content={"detail": "Invalid token"})
+        except TokenValidationError as e:
+            return JSONResponse(
+                status_code=e.status_code,
+                content={"detail": e.message},
+            )
         except Exception as e:
-            logger.error(f"Auth middleware error: {str(e)}")
-            return JSONResponse(status_code=500, content={"detail": "Authentication error"})
+            logger.error("Auth middleware unexpected error: %s", str(e))
+            return JSONResponse(
+                status_code=500,
+                content={"detail": "Authentication error"},
+            )
 
         return await call_next(request)
