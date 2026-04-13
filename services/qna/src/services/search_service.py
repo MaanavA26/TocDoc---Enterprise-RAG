@@ -15,27 +15,34 @@ search_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="search")
 localconfig = LocalConfig()
 
 
-async def perform_search(azure, query: str, vector: List[float], fr_mode: str) -> List[Dict[str, Any]]:
+async def perform_search(azure, query: str, vector: List[float], fr_mode: str, bot_tag: str) -> List[Dict[str, Any]]:
     """
     Execute a hybrid (text + vector) search against Azure Cognitive Search.
 
     Offloads the synchronous SDK call to a thread pool via `run_in_executor`
-    to avoid blocking the event loop. Applies a filter on `fr_tag` using the
-    provided `fr_mode`.
+    to avoid blocking the event loop. Applies a filter on `fr_tag` and
+    `bot_tag` using the provided `fr_mode` and `bot_tag` to enforce tenant
+    isolation.
 
     Args:
         azure: Object expected to expose `search_client.search(...)`.
         query (str): The user's textual query.
         vector (List[float]): Embedding vector for KNN search.
         fr_mode (str): Retrieval mode tag (e.g., "fr_read" or "fr_layout").
+        bot_tag (str): Bot/tenant identifier used for search isolation. Must
+            be non-empty; an empty value is rejected before any search runs.
 
     Returns:
         List[Dict[str, Any]]: Materialized list of search results.
 
     Raises:
+        ValueError: If bot_tag is empty or whitespace-only.
         Exception: Any SDK or runtime error is logged and re-raised.
     """
-    logger.info(f"Performing search with query: '{query}', fr_mode: '{fr_mode}'")
+    if not bot_tag or not bot_tag.strip():
+        raise ValueError("bot_tag is required for search isolation — empty bot_tag rejected")
+
+    logger.info(f"Performing search with query: '{query}', fr_mode: '{fr_mode}', bot_tag: '{bot_tag}'")
 
     try:
         start_time = time.time()
@@ -47,6 +54,7 @@ async def perform_search(azure, query: str, vector: List[float], fr_mode: str) -
             query=query,
             vector=vector,
             fr_mode=fr_mode,
+            bot_tag=bot_tag,
             top=localconfig.TOP_K,
         )
         results = await loop.run_in_executor(search_executor, search_fn)
@@ -62,7 +70,7 @@ async def perform_search(azure, query: str, vector: List[float], fr_mode: str) -
         raise
 
 
-def _search_sync(azure, query: str, vector: List[float], fr_mode: str, top: int) -> List[Dict[str, Any]]:
+def _search_sync(azure, query: str, vector: List[float], fr_mode: str, bot_tag: str, top: int) -> List[Dict[str, Any]]:
     """
     Synchronous helper that performs the actual Azure Cognitive Search call.
 
@@ -71,6 +79,7 @@ def _search_sync(azure, query: str, vector: List[float], fr_mode: str, top: int)
         query (str): Text query for semantic/keyword search.
         vector (List[float]): Embedding vector for vector KNN search.
         fr_mode (str): Retrieval mode tag used in filter expression.
+        bot_tag (str): Bot/tenant identifier used in filter expression.
         top (int): Maximum number of results to return.
 
     Returns:
@@ -82,7 +91,7 @@ def _search_sync(azure, query: str, vector: List[float], fr_mode: str, top: int)
         fields="content_vector",
     )
 
-    filter_expr = f"fr_tag eq '{fr_mode}'"
+    filter_expr = f"fr_tag eq '{fr_mode}' and bot_tag eq '{bot_tag}'"
     logger.debug(f"Filter expression: {filter_expr}")
 
     results = azure.search_client.search(
