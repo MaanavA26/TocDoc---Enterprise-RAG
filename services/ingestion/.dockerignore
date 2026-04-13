@@ -13,4 +13,5 @@ htmlcov/
 .venv
 .git
 test/
+# Markdown docs are not required at runtime; exclude to keep image layers clean.
 *.md

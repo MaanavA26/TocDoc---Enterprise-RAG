@@ -23,4 +23,4 @@ EXPOSE 5501
 # UVICORN_WORKERS can be overridden via environment variable
 ENV UVICORN_WORKERS=2
 
-ENTRYPOINT ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port 5501 --workers ${UVICORN_WORKERS}"]
+ENTRYPOINT ["sh", "-c", "exec uvicorn app:app --host 0.0.0.0 --port 5501 --workers ${UVICORN_WORKERS}"]
