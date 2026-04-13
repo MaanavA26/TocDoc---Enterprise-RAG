@@ -1,0 +1,17 @@
+.env
+.env.*
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.coverage
+htmlcov/
+*.log
+*.ipynb
+.DS_Store
+.venv
+.git
+test/
+# Markdown docs are not required at runtime; exclude to keep image layers clean.
+*.md

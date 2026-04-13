@@ -9,13 +9,16 @@ import sys
 from typing import Optional
 
 # ── Logging ───────────────────────────────────────────────────────────────────
+# Stdout always; file logging only if LOG_FILE env var is set (local dev)
+_log_handlers = [logging.StreamHandler(sys.stdout)]
+_log_file = os.getenv("LOG_FILE")
+if _log_file:
+    _log_handlers.append(logging.FileHandler(_log_file))
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler("app.log"),
-    ],
+    handlers=_log_handlers,
 )
 
 logger = logging.getLogger(__name__)
@@ -42,12 +45,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# CORS: read from env, default to empty (restrictive) in production
+# In local dev: set CORS_ALLOWED_ORIGINS=http://localhost:3000,http://localhost:5500
+_cors_origins_raw = os.getenv("CORS_ALLOWED_ORIGINS", "")
+_cors_origins = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()] if _cors_origins_raw else []
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 

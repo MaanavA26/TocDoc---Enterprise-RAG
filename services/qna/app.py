@@ -1,5 +1,7 @@
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from src.core.lifecycle import startup_event, shutdown_event
 import src.pipeline.qna_pipeline
 import logging
@@ -13,14 +15,12 @@ from src.core.auth import AuthUtils
 # ---------------------------------------------------------------------------
 # Logging configuration
 # ---------------------------------------------------------------------------
-_handler = logging.StreamHandler()
-_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
-
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-logger.addHandler(_handler)
-
-# Avoid duplicate propagation to root logger
+logger.setLevel(getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO))
+if not logger.handlers:
+    _console = logging.StreamHandler()
+    _console.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+    logger.addHandler(_console)
 logger.propagate = False
 
 
@@ -58,6 +58,16 @@ app = FastAPI(
     openapi_url="/openapi.json",
     lifespan=lifespan,
 )
+
+_cors_raw = os.getenv("CORS_ALLOWED_ORIGINS", "")
+_cors_origins = [o.strip() for o in _cors_raw.split(",") if o.strip()] if _cors_raw.strip() else []
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
