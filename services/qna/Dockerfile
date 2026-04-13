@@ -1,9 +1,6 @@
 FROM python:3.10-slim
 
-# Set working directory
-WORKDIR /app
-
-# Install dependencies and Microsoft ODBC driver with updated key handling
+# Install system dependencies and Microsoft ODBC driver
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         gnupg2 \
@@ -20,13 +17,22 @@ RUN apt-get update && \
     ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql18 && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install Python packages
+WORKDIR /app
+
+# Install Python dependencies before copying code (layer caching)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt && pip show sqlmodel
 
 # Copy application code
 COPY . .
 
-# Set entrypoint and default command
-ENTRYPOINT ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "5500"]
-CMD ["--reload"]
+# Run as non-root user for container security
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+USER appuser
+
+EXPOSE 5500
+
+# UVICORN_WORKERS can be overridden via environment variable
+ENV UVICORN_WORKERS=2
+
+ENTRYPOINT ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port 5500 --workers ${UVICORN_WORKERS}"]

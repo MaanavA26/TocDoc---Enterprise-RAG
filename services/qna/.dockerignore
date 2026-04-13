@@ -1,0 +1,17 @@
+.env
+.env.*
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.coverage
+htmlcov/
+coverage.xml
+*.log
+*.ipynb
+.DS_Store
+.venv
+.git
+test/
+*.md
