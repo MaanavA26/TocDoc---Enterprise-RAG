@@ -1,6 +1,5 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
 from src.core.lifecycle import startup_event, shutdown_event
 import src.pipeline.qna_pipeline
 import logging
@@ -14,23 +13,12 @@ from src.core.auth import AuthUtils
 # ---------------------------------------------------------------------------
 # Logging configuration
 # ---------------------------------------------------------------------------
+_handler = logging.StreamHandler()
+_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
-formatter = logging.Formatter(
-    "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-
-file_handler = logging.FileHandler("app.log", mode="a", encoding="utf-8")
-file_handler.setLevel(logging.INFO)
-file_handler.setFormatter(formatter)
-
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
-console_handler.setFormatter(formatter)
-
-logger.addHandler(file_handler)
-logger.addHandler(console_handler)
+logger.addHandler(_handler)
 
 # Avoid duplicate propagation to root logger
 logger.propagate = False
@@ -70,15 +58,6 @@ app = FastAPI(
     openapi_url="/openapi.json",
     lifespan=lifespan,
 )
-
-# CORS: allow all origins/headers/methods. Tighten in production if needed.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
@@ -141,12 +120,10 @@ async def custom_rag_qna(payload: Payload, request: Request):
 
     Behavior:
         - Validates presence of required fields (query, bot_tag, fr_tag).
-        - Normalizes history via `_as_turn` and exposes it to the pipeline at
-          `src.qna_pipeline.bot_queries` for backward compatibility.
+        - Normalizes history via `_as_turn` and passes it explicitly to
+          `generate_answer()` as a `history` parameter.
+        - Passes `bot_tag` explicitly so the search layer enforces tenant isolation.
         - Calls the pipeline to obtain an answer and returns it verbatim.
-
-    Constraints:
-        - Logic, variable names, and execution flow remain unchanged.
 
     Args:
         payload: Request body containing conversation context and tags.
@@ -195,12 +172,14 @@ async def custom_rag_qna(payload: Payload, request: Request):
         if not fr_tag:
             raise HTTPException(status_code=400, detail="FR tag cannot be empty")
 
-        # Expose normalized history where the existing code expects it.
-        # (Kept for backward compatibility with qna_pipeline.)
-        src.pipeline.qna_pipeline.bot_queries = history
-
         logger.info(f"[{request_id}] Calling qna.generate_answer...")
-        ans = await src.pipeline.qna_pipeline.generate_answer(query, fr_tag, azure=azure)
+        ans = await src.pipeline.qna_pipeline.generate_answer(
+            query=query,
+            fr_mode=fr_tag,
+            bot_tag=bot_tag,
+            history=history,
+            azure=azure,
+        )
 
         elapsed = time.time() - start
         logger.info(f"[{request_id}] QnA processing completed in {elapsed:.4f}s")

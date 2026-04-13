@@ -7,8 +7,10 @@
 - Calls the model to produce an answer.
 - Parses the answer to extract citations and returns the final payload.
 
-* Set by the caller (app.py) before invoking generate_answer.
-*- Expected shape: List[{"user_query": str, "bot_response": Optional[str]}]
+Conversation history and bot_tag are passed explicitly as parameters to
+generate_answer() — there is no module-level mutable global. This ensures
+concurrent requests cannot contaminate each other's conversation context.
+Expected history shape: List[{"user_query": str, "bot_response": Optional[str]}]
 """
 
 import time
@@ -26,31 +28,47 @@ from concurrent.futures import ThreadPoolExecutor
 # Executors / globals
 # ---------------------------------------------------------------------------
 process_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="process")
-bot_queries: Optional[List[Dict[str, Optional[str]]]] = None
 
 
-async def generate_answer(query: str, fr_mode: str, azure) -> Dict[str, Any]:
+async def generate_answer(
+    query: str,
+    fr_mode: str,
+    bot_tag: str,
+    history: List[Dict[str, Optional[str]]],
+    azure,
+) -> Dict[str, Any]:
     """
     Generate a grounded answer for the user's query.
 
-    Inputs:
+    Args:
         query: Latest user utterance (may be rephrased for retrieval).
         fr_mode: 'read' or 'layout' (affects retrieval strategy).
+        bot_tag: Bot/tenant identifier forwarded to the search layer to enforce
+            tenant isolation. Must be non-empty.
+        history: Ordered conversation turns (oldest → newest), each with
+            {"user_query": str, "bot_response": Optional[str]}. May be empty
+            for a first-turn request; None is treated as [].
+        azure: Azure client holder (OpenAI, embeddings, search).
 
-    Output:
+    Returns:
         A dict with:
             - "answer": str
             - "citation": {filename: filepath, ...}
             - ("request_id"/"error" only in exceptional cases)
 
     Notes:
-        - Logic and control flow preserved exactly as provided.
         - Rephrasal is best-effort; the pipeline proceeds if it fails.
+        - History is never stored in module-level state; each call is isolated.
     """
     request_id = f"gen_{int(time.time() * 1000)}"
+    if not bot_tag or not bot_tag.strip():
+        raise ValueError("bot_tag is required for tenant isolation")
     logger.info(f"[{request_id}] Starting answer generation")
     logger.info(f"[{request_id}] Query: {query!r}, fr_mode: {fr_mode!r}")
     start_time = time.time()
+
+    # Defensive normalisation: treat None as an empty list.
+    history = history or []
 
     try:
         if fr_mode not in ("read", "layout"):
@@ -61,16 +79,16 @@ async def generate_answer(query: str, fr_mode: str, azure) -> Dict[str, Any]:
         # Pull: current user query, the two prior user queries, and
         # the latest bot response.
         latest_q, prev_q, prev_prev_q, latest_bot_reply = _latest_three_and_reply(
-            bot_queries
+            history
         )
 
         logger.info(
             f"[{request_id}] history types -> "
-            f"{[type(x).__name__ for x in bot_queries]}"
+            f"{[type(x).__name__ for x in history]}"
         )
         logger.info(
             f"[{request_id}] prev turn sample -> "
-            f"{bot_queries[-2] if len(bot_queries) >= 2 else 'n/a'}"
+            f"{history[-2] if len(history) >= 2 else 'n/a'}"
         )
         logger.info(
             f"[{request_id}] Latest Query: {latest_q},\n"
@@ -97,7 +115,7 @@ async def generate_answer(query: str, fr_mode: str, azure) -> Dict[str, Any]:
                 prev_query=prev_q,
                 prev_prev_query=prev_prev_q,
                 latest_bot_reply=latest_bot_reply,
-                full_history=bot_queries,
+                full_history=history,
             )
             if isinstance(rq, dict):
                 effective_query = rq.get("rephrased_query")
@@ -143,7 +161,7 @@ async def generate_answer(query: str, fr_mode: str, azure) -> Dict[str, Any]:
 
             logger.info(f"[{request_id}] Step 2: Performing search")
             results = await perform_search(
-                azure, effective_query, vector, fr_mode_tag
+                azure, effective_query, vector, fr_mode_tag, bot_tag
             )
 
             # Build knowledge base lines and a filename→filepath map
