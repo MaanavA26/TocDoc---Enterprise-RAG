@@ -7,7 +7,6 @@ no network calls are made.  All 8 auth failure/success modes are covered.
 
 import os
 import time
-import json
 import pytest
 from unittest.mock import AsyncMock, patch
 from typing import Any
@@ -37,9 +36,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
 from jose import jwt as jose_jwt
-from jose.utils import base64url_encode
 import base64
-import struct
 
 
 def _generate_rsa_keypair():
@@ -143,6 +140,9 @@ def jwk_key(rsa_keypair):
 @pytest.fixture(autouse=True)
 def mock_jwks(jwk_key):
     """Auto-use fixture that mocks JWKS fetch for all tests in this module."""
+    # Patch _get_jwks (inside token_validator) — NOT validate_token in auth.py.
+    # auth.py calls validate_token which calls _get_jwks internally.
+    # Patching _get_jwks correctly intercepts the JWKS fetch for all tests.
     with patch(
         "src.core.token_validator._get_jwks",
         new=AsyncMock(return_value=[jwk_key]),

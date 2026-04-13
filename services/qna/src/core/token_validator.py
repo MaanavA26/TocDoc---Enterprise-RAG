@@ -172,7 +172,25 @@ async def validate_token(token: str, tenant_id: str, audience: str) -> dict:
     # Step 4: Decode and verify with python-jose.  Signature verification
     # is ON by default (the opposite of the old placeholder).
     # ------------------------------------------------------------------
-    expected_issuer = f"https://sts.windows.net/{tenant_id}/"
+
+    # Read unverified claims to discover which issuer format the token uses.
+    # This is intentionally unverified — it's only used to pick the right
+    # expected_issuer string; the actual iss validation happens in jwt.decode().
+    try:
+        unverified_claims = jwt.get_unverified_claims(token)
+    except JWTError as exc:
+        raise TokenValidationError("Malformed token claims") from exc
+
+    token_iss = unverified_claims.get("iss", "")
+    v1_issuer = f"https://sts.windows.net/{tenant_id}/"
+    v2_issuer = f"https://login.microsoftonline.com/{tenant_id}/v2.0"
+
+    if token_iss == v1_issuer:
+        expected_issuer = v1_issuer
+    elif token_iss == v2_issuer:
+        expected_issuer = v2_issuer
+    else:
+        raise TokenValidationError("Invalid token issuer")
 
     try:
         claims = jwt.decode(
@@ -186,8 +204,8 @@ async def validate_token(token: str, tenant_id: str, audience: str) -> dict:
     except ExpiredSignatureError as exc:
         raise TokenValidationError("Token has expired") from exc
     except JWTError as exc:
-        # Covers wrong audience, wrong issuer, invalid signature, etc.
-        raise TokenValidationError(f"Token validation failed: {exc}") from exc
+        logger.warning("JWT decode failed: %s", exc)
+        raise TokenValidationError("Invalid token") from exc
     except Exception as exc:
         logger.error("Unexpected error during JWT decode: %s", exc)
         raise TokenValidationError("Token validation error") from exc

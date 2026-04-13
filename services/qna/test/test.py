@@ -155,7 +155,8 @@ def _patch_validate_token(monkeypatch):
             raise tv.TokenValidationError("Invalid token")
         return claims
 
-    monkeypatch.setattr(tv, "validate_token", _fake_validate, raising=True)
+    import src.core.auth as auth_module
+    monkeypatch.setattr(auth_module, "validate_token", _fake_validate, raising=True)
     yield
 
 
