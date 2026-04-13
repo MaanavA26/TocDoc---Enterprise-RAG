@@ -1,6 +1,5 @@
 """Tests for token-aware chunking and deterministic chunk IDs."""
 import pytest
-import asyncio
 import hashlib
 import sys
 import os
@@ -43,14 +42,28 @@ async def test_chunk_token_count_is_bounded(rag_instance):
 
 @pytest.mark.asyncio
 async def test_chunk_overlap_preserved(rag_instance):
-    """Adjacent chunks should share overlapping content."""
+    """Adjacent chunks must share at least `overlap` tokens at their boundary."""
     import tiktoken
     encoding = tiktoken.get_encoding("cl100k_base")
 
     text = " ".join([f"word{i}" for i in range(1000)])
-    chunks = await rag_instance._chunk_text_by_tokens(text, max_tokens=100, overlap=20)
+    overlap = 20
+    chunks = await rag_instance._chunk_text_by_tokens(text, max_tokens=100, overlap=overlap)
 
     assert len(chunks) > 1, "Should produce multiple chunks"
+
+    # Verify that adjacent chunk pairs share tokens at the boundary
+    for i in range(len(chunks) - 1):
+        tokens_current = encoding.encode(chunks[i])
+        tokens_next = encoding.encode(chunks[i + 1])
+        # The last `overlap` tokens of chunk[i] should appear at the start of chunk[i+1]
+        tail = tokens_current[-overlap:]
+        head = tokens_next[:overlap]
+        shared = sum(1 for t in tail if t in set(head))
+        assert shared > 0, (
+            f"Chunks {i} and {i+1} share no tokens at boundary; "
+            f"expected ~{overlap} shared tokens"
+        )
 
 @pytest.mark.asyncio
 async def test_empty_text_returns_empty_list(rag_instance):

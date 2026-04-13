@@ -188,6 +188,26 @@ class rag:
                     type=SearchFieldDataType.String,
                     filterable=True,
                 ),
+                SimpleField(
+                    name="document_id",
+                    type=SearchFieldDataType.String,
+                    filterable=True,
+                ),
+                SimpleField(
+                    name="ingestion_timestamp",
+                    type=SearchFieldDataType.String,
+                    filterable=False,
+                ),
+                SimpleField(
+                    name="source_type",
+                    type=SearchFieldDataType.String,
+                    filterable=True,
+                ),
+                SearchableField(
+                    name="source_path",
+                    type=SearchFieldDataType.String,
+                    searchable=False,
+                ),
                 SearchableField(
                     name="content",
                     type=SearchFieldDataType.String,
@@ -296,7 +316,21 @@ class rag:
             # Initialize search client
             logger.info("Initializing search client")
             search_client = await self.create_search_index()
-            
+
+            # Delete any existing chunks for this document+tenant to avoid stale data
+            try:
+                existing = list(search_client.search(
+                    search_text="*",
+                    filter=f"document_id eq '{document_id}' and bot_tag eq '{tag}'",
+                    select=["id"],
+                    top=1000,
+                ))
+                if existing:
+                    search_client.delete_documents(documents=existing)
+                    logger.info(f"Deleted {len(existing)} stale chunks for document_id={document_id!r}, bot_tag={tag!r}")
+            except Exception as cleanup_err:
+                logger.warning(f"Stale chunk cleanup failed (non-fatal): {cleanup_err}")
+
             # Load document using Azure AI Document Intelligence
             logger.info(f"Loading document with Azure AI Document Intelligence - mode: {fr_mode}")
             start_time = time.time()
@@ -362,7 +396,7 @@ class rag:
                     token_list.append(token_count)
                     
                     azure_docs.append({
-                        "id": f"{document_id}_{fr_mode}_{i:05d}",
+                        "id": f"{tag}_{document_id}_{fr_mode}_{i:05d}",
                         "bot_tag": tag,
                         "fr_tag": f"fr_{fr_mode}",
                         "filename": filename,
@@ -414,7 +448,7 @@ class rag:
                     token_list.append(token_count)
                     
                     azure_docs.append({
-                        "id": f"{document_id}_{fr_mode}_{i:05d}",
+                        "id": f"{tag}_{document_id}_{fr_mode}_{i:05d}",
                         "bot_tag": tag,
                         "fr_tag": f"fr_{fr_mode}",
                         "filename": filename,
