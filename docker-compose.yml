@@ -1,0 +1,56 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TocDoc – Enterprise RAG Assistant
+# Local development compose file.
+#
+# Usage:
+#   1. Copy services/ingestion/.env.example  → services/ingestion/.env
+#      Copy services/qna/.env.example        → services/qna/.env
+#      Fill in all placeholder values.
+#   2. docker compose up --build
+#
+# Endpoints after startup:
+#   Ingestion  →  http://localhost:5501/upload_pipeline/docs
+#   QnA        →  http://localhost:5500/qna/docs
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  ingestion:
+    build:
+      context: ./services/ingestion
+      dockerfile: Dockerfile
+    container_name: tocdoc-ingestion
+    ports:
+      - "5501:5501"
+    env_file:
+      - ./services/ingestion/.env
+    volumes:
+      - ./services/ingestion:/app
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5501/upload_pipeline/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  qna:
+    build:
+      context: ./services/qna
+      dockerfile: Dockerfile
+    container_name: tocdoc-qna
+    ports:
+      - "5500:5500"
+    env_file:
+      - ./services/qna/.env
+    volumes:
+      - ./services/qna:/app
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5500/qna/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
