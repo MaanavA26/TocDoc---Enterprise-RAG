@@ -38,25 +38,28 @@ Store the following in the provisioned Key Vault:
 | `TocdocSPClientID` | Service principal client ID |
 | `TocdocSPSecretValue` | Service principal secret |
 
-## Step 3: Deploy container images
+## Step 3: Build and deploy container images
 
-Images are published to GitHub Container Registry on every merge to main.
+Build and push images to a container registry of your choice, then deploy to the Container Apps created by the Bicep template.
 
 ```bash
-# Pull latest images
-docker pull ghcr.io/maanava26/tocdoc-ingestion:latest
-docker pull ghcr.io/maanava26/tocdoc-qna:latest
+# Build and push (example using GHCR — replace with your registry)
+docker build -t ghcr.io/<your-org>/tocdoc-ingestion:latest ./services/ingestion
+docker push ghcr.io/<your-org>/tocdoc-ingestion:latest
 
-# Deploy to Azure Container Apps
+docker build -t ghcr.io/<your-org>/tocdoc-qna:latest ./services/qna
+docker push ghcr.io/<your-org>/tocdoc-qna:latest
+
+# Update the container apps with your images
 az containerapp update \
-  --name tocdoc-ingestion-prod \
+  --name tocdoc-ingestion-<environment> \
   --resource-group rg-tocdoc-<client-name> \
-  --image ghcr.io/maanava26/tocdoc-ingestion:latest
+  --image ghcr.io/<your-org>/tocdoc-ingestion:latest
 
 az containerapp update \
-  --name tocdoc-qna-prod \
+  --name tocdoc-qna-<environment> \
   --resource-group rg-tocdoc-<client-name> \
-  --image ghcr.io/maanava26/tocdoc-qna:latest
+  --image ghcr.io/<your-org>/tocdoc-qna:latest
 ```
 
 ## Step 4: Smoke test

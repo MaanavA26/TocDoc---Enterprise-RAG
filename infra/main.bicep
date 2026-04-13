@@ -1,5 +1,11 @@
-// TocDoc Enterprise RAG — Main deployment template
-// Deploys all required Azure resources for a single-client installation.
+// TocDoc Enterprise RAG — Infrastructure Prerequisites
+// Provisions: Azure OpenAI, Cognitive Search, Document Intelligence,
+// Key Vault, Log Analytics, App Insights, Container Apps Environment,
+// and placeholder Container Apps (ingestion + QnA).
+//
+// NOTE: Container images must be built and pushed separately.
+// The container apps are initialized with a placeholder image.
+// Update them after pushing your images: az containerapp update --image ...
 //
 // Usage:
 //   az deployment group create \
@@ -136,6 +142,66 @@ resource containerEnv 'Microsoft.App/managedEnvironments@2023-11-02-preview' = {
   tags: { environment: environment, product: 'tocdoc' }
 }
 
+// ── Ingestion Container App ───────────────────────────────────────────────────
+resource ingestionApp 'Microsoft.App/containerApps@2023-11-02-preview' = {
+  name: ingestionAppName
+  location: location
+  properties: {
+    managedEnvironmentId: containerEnv.id
+    configuration: {
+      ingress: {
+        external: true
+        targetPort: 5501
+      }
+    }
+    template: {
+      containers: [
+        {
+          name: 'ingestion'
+          image: 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
+          resources: { cpu: json('0.5'), memory: '1Gi' }
+          env: [
+            { name: 'AUDIENCE_ID', value: audienceClientId }
+            { name: 'AZURE_TENANT_ID', value: tenantId }
+          ]
+        }
+      ]
+      scale: { minReplicas: 0, maxReplicas: 3 }
+    }
+  }
+  tags: { environment: environment, product: 'tocdoc' }
+}
+
+// ── QnA Container App ─────────────────────────────────────────────────────────
+resource qnaApp 'Microsoft.App/containerApps@2023-11-02-preview' = {
+  name: qnaAppName
+  location: location
+  properties: {
+    managedEnvironmentId: containerEnv.id
+    configuration: {
+      ingress: {
+        external: true
+        targetPort: 5500
+      }
+    }
+    template: {
+      containers: [
+        {
+          name: 'qna'
+          image: 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
+          resources: { cpu: json('0.5'), memory: '1Gi' }
+          env: [
+            { name: 'AUDIENCE_ID', value: audienceClientId }
+            { name: 'AZURE_TENANT_ID', value: tenantId }
+          ]
+        }
+      ]
+      scale: { minReplicas: 0, maxReplicas: 3 }
+    }
+  }
+  tags: { environment: environment, product: 'tocdoc' }
+}
+
 // ── Outputs ───────────────────────────────────────────────────────────────────
 output openAiEndpoint string = openAi.properties.endpoint
 output searchEndpoint string = 'https://${search.name}.search.windows.net'
@@ -143,3 +209,5 @@ output docIntelEndpoint string = docIntel.properties.endpoint
 output keyVaultName string = keyVault.name
 output containerEnvId string = containerEnv.id
 output appInsightsConnectionString string = appInsights.properties.ConnectionString
+output ingestionAppFqdn string = ingestionApp.properties.configuration.ingress.fqdn
+output qnaAppFqdn string = qnaApp.properties.configuration.ingress.fqdn
