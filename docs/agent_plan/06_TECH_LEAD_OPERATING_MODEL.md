@@ -54,17 +54,20 @@ The architect reviews the resulting GitHub PR. The tech lead never merges; only 
 ## Constraints (load-bearing)
 
 - **No live Azure access.** Nobody — tech lead, dev agent, reviewer — can call Azure services. Every test must mock the Azure SDK.
+- **No pip / no PyPI access from this dev environment.** Dependencies cannot be installed; **tests cannot be executed in-session**. Verification is by code review only. Every PR body must disclose that tests were written but not run; CI or the architect runs them.
 - **No production execution.** No `az deployment` runs, no `kubectl apply`, no live container deploys. IaC changes go through PR only.
-- **Code must be production-ready by reading.** Since we can't smoke-test against real services, the only quality bar is careful code review + comprehensive mocked unit tests. No "I'll test it later". No "it should work".
+- **Code must be production-ready by reading.** Since we can't smoke-test against real services and can't even run unit tests locally, the quality bar is careful code review + comprehensive mocked unit tests + advisor() pass. No "I'll test it later". No "it should work".
+- **Logging must be self-configuring.** A service whose `__main__` logger has `propagate=False` and does not configure root will silently drop INFO-level events into root's WARNING-only `lastResort` handler. New telemetry must idempotently install its own handler if the logger chain has none — never assume the host configures logging correctly.
 - **Defensive coding bar — non-negotiable:**
   - No bare `except:` — catch specific exception types
   - Never leak exception text to clients (return safe message; log internally with full stack)
-  - Never log secrets, JWTs, raw answers, or raw document content
+  - Never log secrets, JWTs, raw answers, or raw document content; truncate string log fields to ≤ 200 chars by default
   - Validate all inputs at the boundary (FastAPI `Annotated[Type, Field(...)]` / Pydantic models)
+  - Validate any HTTP header used in logs (e.g., `X-Request-ID`) with a regex to defend against log injection
   - Escape OData filter values even after regex validation (defense in depth)
-  - Handle Azure Search pagination explicitly — never assume `≤ 1000` results
+  - Handle Azure Search pagination explicitly — never assume `≤ 1000` results; use `.by_page()`
   - Every Azure SDK call wrapped in `loop.run_in_executor` (existing convention)
-- **Auth on admin endpoints is non-negotiable.** Even temporary measures must reject unauthenticated requests with 401, never expose raw error detail.
+- **Auth on admin endpoints is non-negotiable.** Even temporary measures must reject unauthenticated requests with 401, never expose raw error detail. Server-misconfiguration (env unset) returns 503, never silently bypasses.
 
 ---
 
@@ -101,9 +104,11 @@ The architect reviews the resulting GitHub PR. The tech lead never merges; only 
 ## Test discipline
 
 - **Real tests stay; scratch tests are deleted before PR.** A scratch test ("let me sanity-check this regex") lives 5 minutes in the dev agent's session and never reaches the diff. Real test files (e.g., `test_admin_api.py`) are part of the PR.
-- **All Azure SDK calls in tests must be mocked.** Use `unittest.mock.MagicMock`, `pytest-mock`, or `monkeypatch`. The CI environment cannot reach Azure.
-- **The developer agent must run pytest and include literal output in the report-back.** No "tests should pass". No "tests passed in my head".
-- **Negative cases are required for every input.** Missing field, invalid format, injection attempts. Security-sensitive features (auth, isolation, OData filters) need negative tests as part of the PR or the PR is rejected.
+- **All Azure SDK calls in tests must be mocked.** Use `unittest.mock.MagicMock`, `pytest-mock`, or `monkeypatch`. CI cannot reach Azure either; mocking is mandatory regardless.
+- **Tests cannot be executed in this dev environment.** No PyPI access means no `pip install`. Verification is by code review only; CI or the architect runs the tests. The PR body must say so explicitly.
+- **Design tests to import only what's needed.** Prefer mounting your new code on a tiny `FastAPI()` test app over importing the full service `app.py` (which pulls heavy deps like PyMuPDF / langchain). This makes CI installs cheaper and test failures easier to localize.
+- **Negative cases are required for every input.** Missing field, invalid format, injection attempts. Security-sensitive features (auth, isolation, OData filters, log fields) need negative tests as part of the PR or the PR is rejected.
+- **Trace tests by hand before commit.** Without a run-test loop, every test must be mentally traced: what does the mock return, what assertion fires, what could fail. If you can't predict the outcome with confidence, the test is too complex — simplify.
 
 ---
 
