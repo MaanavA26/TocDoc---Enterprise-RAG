@@ -9,6 +9,7 @@ import sys
 from typing import Optional
 
 from observability import RequestIDMiddleware
+from admin.routes import router as admin_router
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 # Stdout always; file logging only if LOG_FILE env var is set (local dev)
@@ -62,6 +63,10 @@ app.add_middleware(
     # below also echoes this header in every response.
     allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
 )
+
+# Admin API (read-only in PR-1; destructive endpoints follow in a later PR).
+# Auth is enforced inside the router via the require_admin_token dependency.
+app.include_router(admin_router, prefix="/admin")
 
 
 @app.middleware("http")
