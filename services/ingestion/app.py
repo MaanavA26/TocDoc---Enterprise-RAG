@@ -8,6 +8,8 @@ import logging
 import sys
 from typing import Optional
 
+from observability import RequestIDMiddleware
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 # Stdout always; file logging only if LOG_FILE env var is set (local dev)
 _log_handlers = [logging.StreamHandler(sys.stdout)]
@@ -77,6 +79,13 @@ async def limit_upload_size(request: Request, call_next):
             )
 
     return await call_next(request)
+
+
+# Request-ID / correlation middleware. Registered LAST so it becomes the
+# OUTERMOST layer in Starlette's stack — runs first on requests so
+# `request.state.request_id` is available to all downstream middleware,
+# including future auth.
+app.add_middleware(RequestIDMiddleware)
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
