@@ -13,6 +13,7 @@ successfully after the container image swap.
 | `AUDIENCE_ID`, `TocdocSPTenantID`, `AZURE_KEY_VAULT` | Parameters → wired as plain env vars |
 | API keys (`openAiApiKey`, `searchApiKey`, `docIntelApiKey`) | Passed as `@secure()` params at deploy time → stored as Container App secrets, never in plain config |
 | SP credentials (`spClientId`, `spClientSecret`) | Passed as `@secure()` params → stored as Container App secrets (current QnA auth path for Key Vault) |
+| `adminApiToken` (interim admin auth) | Passed as `@secure()` param → stored as Container App secret on the ingestion app; injected as `ADMIN_API_TOKEN` env var. See *Step 5: Admin API verification* for usage. |
 
 > **Auth model note**: The QnA service currently uses `ClientSecretCredential`
 > (service principal) to load secrets from Key Vault at startup. System-assigned
@@ -37,6 +38,7 @@ Gather these values before running the command:
 - `<doc-intel-key>` — Document Intelligence API key
 - `<sp-client-id>` — Service principal client ID for QnA Key Vault access
 - `<sp-client-secret>` — Service principal client secret
+- `<admin-api-token>` — Strong random token for the interim admin API guard. Generate with `python -c "import secrets; print(secrets.token_urlsafe(48))"`. Store the generated value securely — operators will need it to call `/admin/*` endpoints.
 
 ```bash
 az group create --name rg-tocdoc-<client-name> --location <region>
@@ -52,7 +54,8 @@ az deployment group create \
       searchApiKey=<search-key> \
       docIntelApiKey=<doc-intel-key> \
       spClientId=<sp-client-id> \
-      spClientSecret=<sp-client-secret>
+      spClientSecret=<sp-client-secret> \
+      adminApiToken=<admin-api-token>
 ```
 
 The `@secure()` parameters are not logged or shown in Azure deployment history.
@@ -81,7 +84,7 @@ az containerapp show \
 # Expected output should include:
 # AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_VERSION, AZURE_OPENAI_EMBEDDING_MODEL,
 # AZURE_SEARCH_ENDPOINT, INDEX_NAME, DOC_INTELLIGENCE_ENDPOINT, LOG_LEVEL,
-# AZURE_OPENAI_KEY, AZURE_SEARCH_KEY, DOC_INTELLIGENCE_KEY
+# AZURE_OPENAI_KEY, AZURE_SEARCH_KEY, DOC_INTELLIGENCE_KEY, ADMIN_API_TOKEN
 
 # Check QnA env vars
 az containerapp show \
@@ -138,6 +141,42 @@ curl https://${QNA_FQDN}/qna/health
 # Expected: {"status":"healthy"} and {"status":"ok","qna_module":"loaded",...}
 ```
 
+## Step 5: Admin API verification
+
+The ingestion service exposes a read-only admin API under `/admin/*` for inspecting
+indexed documents within a `bot_tag` (workspace) scope. Auth is **interim** — a
+static `X-Admin-Token` header compared against the `ADMIN_API_TOKEN` env var on
+the ingestion app. Operators replace this with full Azure AD auth in a later release.
+
+```bash
+INGESTION_FQDN=$(az deployment group show \
+  --resource-group rg-tocdoc-<client-name> --name main \
+  --query "properties.outputs.ingestionAppFqdn.value" -o tsv)
+
+ADMIN_TOKEN=<the-admin-api-token-you-passed-at-deploy>
+
+# List documents in a workspace (groups chunks by document_id)
+curl -H "X-Admin-Token: ${ADMIN_TOKEN}" \
+  "https://${INGESTION_FQDN}/upload_pipeline/admin/documents?bot_tag=client_a_hr"
+
+# Get one document's summary (chunk_count + sample chunks)
+curl -H "X-Admin-Token: ${ADMIN_TOKEN}" \
+  "https://${INGESTION_FQDN}/upload_pipeline/admin/documents/<document_id>?bot_tag=client_a_hr"
+
+# Aggregate stats for a workspace (document count, chunk count, breakdowns)
+curl -H "X-Admin-Token: ${ADMIN_TOKEN}" \
+  "https://${INGESTION_FQDN}/upload_pipeline/admin/index/stats?bot_tag=client_a_hr"
+```
+
+Expected response codes:
+- `200` — successful read
+- `401` — missing or wrong `X-Admin-Token`
+- `404` — document does not exist in this `bot_tag` scope (cross-tenant lookups also return 404; the API never reveals foreign-scope data)
+- `422` — invalid `bot_tag` or `document_id` format (regex-validated at the boundary)
+- `503` — admin service misconfigured (missing `ADMIN_API_TOKEN` or required search env vars on the container)
+
+Store `ADMIN_TOKEN` in your operator secret manager. **Do not** commit it, share it over chat, or check it into any infrastructure repo — rotate via `az containerapp secret set` if exposed.
+
 ## Operations: request correlation and observability
 
 Both services emit a correlation ID on every request. Use this to trace a single
@@ -172,13 +211,9 @@ client interaction end-to-end across services and Application Insights logs.
 Run these against the deployed app URLs and verify the listed expectations.
 These checks compensate for the lack of full-app integration tests in CI
 (the unit tests use a minimal FastAPI app to avoid importing heavy service
-dependencies — see PR #8 for the rationale).
+dependencies — see the observability PR for the rationale).
 
 ```bash
-INGESTION_FQDN=$(az deployment group show \
-  --resource-group rg-tocdoc-<client-name> --name main \
-  --query "properties.outputs.ingestionAppFqdn.value" -o tsv)
-
 QNA_FQDN=$(az deployment group show \
   --resource-group rg-tocdoc-<client-name> --name main \
   --query "properties.outputs.qnaAppFqdn.value" -o tsv)
@@ -244,4 +279,5 @@ on the container app — but **never** in production.
 | Config verification (Step 2) | 2 min |
 | Image build + push + update (Step 3) | 5–10 min |
 | Smoke test (Step 4) | 2 min |
-| **Total** | **~20–30 min** |
+| Admin API verification (Step 5) | 2 min |
+| **Total** | **~25–35 min** |

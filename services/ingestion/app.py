@@ -57,11 +57,12 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    # X-Request-ID: allow clients to pass a correlation ID through (browser
-    # tooling needs it accepted by CORS preflight). The RequestIDMiddleware
-    # below also echoes this header in every response.
-    allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    # X-Admin-Token: header used by the interim admin auth guard (see admin/auth.py).
+    #   Required for browser-based admin tooling to clear CORS preflight.
+    # X-Request-ID: client-supplied correlation ID echoed back in responses
+    #   by RequestIDMiddleware (see observability.py).
+    allow_headers=["Authorization", "Content-Type", "X-Admin-Token", "X-Request-ID"],
 )
 
 # Admin API (read-only in PR-1; destructive endpoints follow in a later PR).

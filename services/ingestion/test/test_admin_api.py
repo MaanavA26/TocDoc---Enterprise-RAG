@@ -74,6 +74,29 @@ VALID_HEADERS = {"X-Admin-Token": "test-admin-token"}
 # Auth tests
 # ---------------------------------------------------------------------------
 
+class TestAdminServiceMisconfiguration:
+    """When required search env vars are missing, the admin dependency must
+    return a clean 503 — NOT escape as a generic 500 via RuntimeError."""
+
+    def test_missing_search_env_returns_503(self, monkeypatch: pytest.MonkeyPatch):
+        # Reset the module-level singleton so get_admin_service re-evaluates env.
+        import admin.search_admin_service as svc_module
+        monkeypatch.setattr(svc_module, "_service_singleton", None)
+
+        # Unset the required vars
+        monkeypatch.delenv("AZURE_SEARCH_ENDPOINT", raising=False)
+        monkeypatch.delenv("AZURE_SEARCH_KEY", raising=False)
+        monkeypatch.delenv("INDEX_NAME", raising=False)
+
+        from admin.search_admin_service import get_admin_service
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException) as excinfo:
+            get_admin_service()
+        assert excinfo.value.status_code == 503
+        assert "not configured" in excinfo.value.detail.lower()
+
+
 class TestAdminTokenAuth:
 
     def test_missing_token_returns_401(self, client: TestClient):
@@ -261,7 +284,26 @@ def _make_paged_search_result(pages: list[list[dict]]) -> MagicMock:
 
 
 class TestPagination:
-    """Verify the service walks past the 1000-item per-page limit."""
+    """Verify the service walks past the 1000-item per-page limit AND does not
+    rely on `top=` (which the SDK may interpret as a total cap)."""
+
+    def test_search_call_does_not_pass_top_parameter(self):
+        """`top` in azure-search-documents corresponds to OData $top, which
+        is ambiguous between "items per page" and "total cap". Some service
+        behaviors silently truncate when `top` is set. The service MUST rely
+        on `.by_page()` continuation-token pagination instead — any test run
+        with `top` in the search kwargs fails this check.
+        """
+        mock_client = MagicMock()
+        mock_client.search.return_value = _make_paged_search_result([[]])
+        svc = SearchAdminService(mock_client)
+        svc.list_documents("client_a")
+
+        kwargs = mock_client.search.call_args.kwargs
+        assert "top" not in kwargs, (
+            f"SearchAdminService passed `top` to search(): {kwargs.get('top')!r}. "
+            "Use .by_page() pagination only — `top` may silently cap total results."
+        )
 
     def test_walks_all_pages_for_2500_chunks(self):
         # Simulate 2500 chunks split as 1000 + 1000 + 500 across 3 pages.

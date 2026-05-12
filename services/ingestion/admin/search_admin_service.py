@@ -21,6 +21,7 @@ from typing import Iterable, Optional
 
 from azure.core.credentials import AzureKeyCredential
 from azure.search.documents import SearchClient
+from fastapi import HTTPException, status
 
 from .models import (
     ChunkSample,
@@ -51,8 +52,17 @@ _GET_DOC_SELECT = [
 ]
 _STATS_SELECT = ["document_id", "source_type", "fr_tag"]
 
-# Azure Search hard per-page limit
-_MAX_PAGE_SIZE = 1000
+# NOTE on pagination:
+# The Azure Cognitive Search REST API caps results at 1000 per page. The
+# Python SDK exposes pagination via `SearchItemPaged.by_page()` which uses
+# continuation tokens to fetch subsequent pages transparently.
+#
+# We deliberately do NOT pass `top=N` to `SearchClient.search(...)`. In the
+# azure-search-documents SDK semantics, `top` corresponds to OData `$top`
+# which is ambiguous between "items per page" and "total cap"; some service
+# behaviors interpret it as a hard total cap, silently truncating results.
+# Relying on `.by_page()` alone keeps us correct: every result that matches
+# the filter is visited, with continuation handled by the SDK.
 
 
 class SearchAdminService:
@@ -105,15 +115,14 @@ class SearchAdminService:
     ) -> Iterable[dict]:
         """Yield every result matching `filter_expr`, walking all pages.
 
-        Uses `.by_page()` so behavior is independent of how the SDK auto-pages
-        for unspecified `top`. We always request the per-page max so we minimize
-        round trips.
+        Pagination is handled entirely by `SearchItemPaged.by_page()` and the
+        SDK's continuation-token mechanism. We do NOT pass `top` — see the
+        module-level note above for why that parameter is unsafe here.
         """
         result = self._search_client.search(
             search_text="*",
             filter=filter_expr,
             select=select,
-            top=_MAX_PAGE_SIZE,
         )
         for page in result.by_page():
             for item in page:
@@ -277,8 +286,15 @@ def get_admin_service() -> SearchAdminService:
     `AZURE_SEARCH_KEY`, `INDEX_NAME`). This avoids touching the existing
     `custom_rag` startup flow.
 
+    Raises:
+        HTTPException(503): if any required env var is missing. We surface
+            this as 503 (not RuntimeError) so it propagates as a clean HTTP
+            response with no internal detail leakage. A RuntimeError raised
+            inside dependency resolution would escape the route's
+            `try/except AzureError` and turn into a generic 500.
+
     Tests should override this dependency via
-    `app.dependency_overrides[get_admin_service]`.
+    `app.dependency_overrides[get_admin_service]` to inject a mocked service.
     """
     global _service_singleton
     if _service_singleton is None:
@@ -286,11 +302,23 @@ def get_admin_service() -> SearchAdminService:
         key = os.getenv("AZURE_SEARCH_KEY")
         index_name = os.getenv("INDEX_NAME")
         if not (endpoint and key and index_name):
-            # Surface a clear configuration error rather than constructing a
-            # client that will fail with cryptic Azure errors later.
-            raise RuntimeError(
-                "Admin service requires AZURE_SEARCH_ENDPOINT, "
-                "AZURE_SEARCH_KEY, and INDEX_NAME environment variables."
+            # Log the specific cause internally; return a generic safe message
+            # to the client. Each missing var is named in the log so operators
+            # can fix the deployment without reading source.
+            missing = [
+                name for name, value in (
+                    ("AZURE_SEARCH_ENDPOINT", endpoint),
+                    ("AZURE_SEARCH_KEY", key),
+                    ("INDEX_NAME", index_name),
+                ) if not value
+            ]
+            logger.error(
+                "Admin service misconfigured — missing env vars: %s",
+                ", ".join(missing),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Admin search service not configured",
             )
         client = SearchClient(
             endpoint=endpoint,
