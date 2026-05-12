@@ -76,10 +76,15 @@ The architect reviews the resulting GitHub PR. The tech lead never merges; only 
 - One workstream = one branch = one PR. Never mix workstreams.
 - Branch naming: `feat/<scope>` for new features (admin API, observability), `fix/<scope>` for P0 hardening or bug fixes, `chore/<scope>` for housekeeping, `docs/<scope>` for docs-only.
 - Examples already in repo: `fix/p0-jwt-security`, `fix/p0-pipeline-isolation`, `feat/p1-iac-bicep`.
-- Commit footer (every commit, mandatory):
-  ```
-  Co-Authored by Maanav's Mac-Pro
-  ```
+- Dual-persona commit footer (every commit, mandatory — pick the right one):
+  - Developer, tech lead, contributor, Claude/Codex, implementation PRs, operating-model content:
+    ```
+    Co-Authored by Maanav's Mac-Pro
+    ```
+  - Architect / ChatGPT review messages and architect-authored spec docs:
+    ```
+    Co-Authored by Maanav's Mac-Air
+    ```
 - Use HEREDOC for commit messages to preserve formatting.
 - PR body template:
   ```markdown
@@ -98,6 +103,10 @@ The architect reviews the resulting GitHub PR. The tech lead never merges; only 
 
   Co-Authored by Maanav's Mac-Pro
   ```
+
+### Exception: architect bootstrap docs on `main`
+
+Some architect-authored bootstrap documents (under `docs/architect_phase_2/`, etc.) may already exist on `main` from before this workflow was written, committed directly because branch-creation tooling wasn't available at the time. **This is not the default workflow.** All developer implementation work and all future feature changes — including new architect specs going forward — should go through PRs. Treat the pre-existing direct commits as a one-time exception, not a precedent.
 
 ---
 
