@@ -76,14 +76,21 @@ class TestRequestIdHeader:
         assert parsed.version == 4
         assert r.json()["request_id"] == rid
 
-    def test_malformed_id_is_ignored(self, client: TestClient):
+    def test_malformed_id_is_ignored(self, client: TestClient, caplog):
         bad = "; DROP TABLE--"
+        caplog.set_level(logging.WARNING)
         r = client.get("/ping", headers={"X-Request-ID": bad})
         assert r.status_code == 200
         rid = r.headers["X-Request-ID"]
         assert rid != bad
         parsed = uuid.UUID(rid)
         assert parsed.version == 4
+        # A structured event MUST be emitted so this is greppable, but the
+        # bad value MUST NOT be in the log (otherwise log injection wins).
+        rejected = [r for r in caplog.records if "invalid_request_id_rejected" in r.message]
+        assert len(rejected) >= 1, "expected an invalid_request_id_rejected event"
+        for record in rejected:
+            assert bad not in record.message, "bad value leaked into log"
 
     def test_oversized_id_is_ignored(self, client: TestClient):
         r = client.get("/ping", headers={"X-Request-ID": "a" * 129})
@@ -213,13 +220,24 @@ class TestLifecycleEvents:
     ):
         caplog.set_level(logging.INFO)
         r = client.get("/boom")
+        # Our middleware owns the 500 response (instead of letting Starlette's
+        # ServerErrorMiddleware respond) so the X-Request-ID header survives.
         assert r.status_code == 500
+        # Critical: X-Request-ID MUST be on the 500 response — that header is
+        # the single most useful correlation key during a failure.
+        assert "X-Request-ID" in r.headers
+        rid = r.headers["X-Request-ID"]
+        parsed = uuid.UUID(rid)
+        assert parsed.version == 4
+
         failed = [r for r in caplog.records if "request_failed" in r.message]
         assert len(failed) == 1, f"expected exactly 1 request_failed record, got {len(failed)}"
         payload = json.loads(failed[0].message)
         assert payload["event"] == "request_failed"
         assert payload["error_class"] == "RuntimeError"
-        # Critically: the actual exception message MUST NOT appear in logs.
+        assert payload["request_id"] == rid
+        # The actual exception message MUST NOT appear in the structured
+        # log record (it may contain sensitive details).
         assert "simulated handler failure" not in failed[0].message
         assert "sensitive details xyz123" not in failed[0].message
         assert payload["safe_message"] == "Request handler raised an unhandled exception"

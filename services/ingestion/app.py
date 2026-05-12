@@ -57,7 +57,10 @@ app.add_middleware(
     allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
+    # X-Request-ID: allow clients to pass a correlation ID through (browser
+    # tooling needs it accepted by CORS preflight). The RequestIDMiddleware
+    # below also echoes this header in every response.
+    allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
 )
 
 

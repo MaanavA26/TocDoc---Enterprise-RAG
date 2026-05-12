@@ -39,6 +39,7 @@ from typing import Any, Optional
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 # X-Request-ID validation: alphanumeric, dash, underscore; max 128 chars.
 # Defends against log injection via header (newline/control characters).
@@ -196,11 +197,18 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         incoming = request.headers.get("X-Request-ID")
-        if incoming and not _validate_request_id(incoming):
-            self._logger.warning(
-                "Invalid X-Request-ID header rejected; generating a fresh UUID4"
-            )
         request_id = _validate_request_id(incoming) or _generate_request_id()
+
+        if incoming and request_id != incoming:
+            # The client sent a value but it failed validation. Emit a
+            # structured event so this is greppable; the bad value itself
+            # is NOT logged (prevents log injection).
+            log_event(
+                self._logger,
+                "invalid_request_id_rejected",
+                request_id=request_id,
+                level=logging.WARNING,
+            )
 
         request.state.request_id = request_id
         token = _current_request_id.set(request_id)
@@ -218,6 +226,14 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
             response = await call_next(request)
         except Exception as exc:
             latency_ms = round((time.perf_counter() - start) * 1000, 2)
+            # Capture full exception with stack trace in server logs so ops
+            # can debug; do NOT include this in the response or in the
+            # structured event below.
+            self._logger.exception(
+                "Unhandled exception in request handler "
+                "(request_id=%s, error_class=%s)",
+                request_id, type(exc).__name__,
+            )
             log_event(
                 self._logger,
                 "request_failed",
@@ -230,7 +246,16 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
                 latency_ms=latency_ms,
             )
             _current_request_id.reset(token)
-            raise
+            # Return a clean 500 ourselves rather than re-raising. If we
+            # re-raised, Starlette's ServerErrorMiddleware would generate the
+            # 500 response — but that response would NOT carry our X-Request-ID
+            # header, losing the single most useful piece of correlation data
+            # during a failure. Owning the response here keeps the header.
+            return JSONResponse(
+                status_code=500,
+                content={"detail": "Internal Server Error"},
+                headers={"X-Request-ID": request_id},
+            )
 
         latency_ms = round((time.perf_counter() - start) * 1000, 2)
         response.headers["X-Request-ID"] = request_id
