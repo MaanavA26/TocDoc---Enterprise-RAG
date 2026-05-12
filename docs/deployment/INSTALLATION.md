@@ -148,6 +148,14 @@ indexed documents within a `bot_tag` (workspace) scope. Auth is **interim** — 
 static `X-Admin-Token` header compared against the `ADMIN_API_TOKEN` env var on
 the ingestion app. Operators replace this with full Azure AD auth in a later release.
 
+> **Route prefix**: the ingestion FastAPI app sets `root_path="/upload_pipeline"`,
+> and the Container Apps ingress in `infra/main.bicep` forwards the path unchanged
+> to the container. Public admin URLs therefore include the prefix
+> (`/upload_pipeline/admin/...`), matching the existing health pattern
+> (`/upload_pipeline/health`) used in Step 4. If a future deployment introduces
+> ingress-level path rewriting that strips `/upload_pipeline`, update both the
+> health and admin URL examples accordingly.
+
 ```bash
 INGESTION_FQDN=$(az deployment group show \
   --resource-group rg-tocdoc-<client-name> --name main \
