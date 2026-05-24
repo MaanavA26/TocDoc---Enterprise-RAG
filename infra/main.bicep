@@ -87,6 +87,10 @@ param spClientId string
 @description('Service principal client secret for QnA Key Vault access (current auth path).')
 param spClientSecret string
 
+@secure()
+@description('Static shared-secret token guarding /admin/* routes on the ingestion service. Interim auth — to be replaced with Azure AD JWT in a follow-up. Generate with: python -c "import secrets; print(secrets.token_urlsafe(48))"')
+param adminApiToken string
+
 // ── Resource names ────────────────────────────────────────────────────────────
 var openAiName         = '${prefix}-openai-${environment}'
 var searchName         = '${prefix}-search-${environment}'
@@ -209,6 +213,7 @@ resource ingestionApp 'Microsoft.App/containerApps@2023-11-02-preview' = {
         { name: 'azure-openai-key',  value: openAiApiKey   }
         { name: 'azure-search-key',  value: searchApiKey   }
         { name: 'doc-intel-key',     value: docIntelApiKey }
+        { name: 'admin-api-token',   value: adminApiToken  }
       ]
       ingress: {
         external: true
@@ -235,6 +240,7 @@ resource ingestionApp 'Microsoft.App/containerApps@2023-11-02-preview' = {
             { name: 'AZURE_OPENAI_KEY',   secretRef: 'azure-openai-key' }
             { name: 'AZURE_SEARCH_KEY',   secretRef: 'azure-search-key' }
             { name: 'DOC_INTELLIGENCE_KEY', secretRef: 'doc-intel-key'  }
+            { name: 'ADMIN_API_TOKEN',    secretRef: 'admin-api-token' }
           ]
         }
       ]
