@@ -1,11 +1,15 @@
 """Tests for the structured error contract (P0-6) — ingestion service.
 
-Mirror of `services/qna/test/test_error_contract.py`. Verifies the same
+Sibling of `services/qna/test/test_error_contract.py`. Verifies the same
 three handlers + raise_api_error helper against the ingestion service's
-copy of the error module.
+copy of the error module. Adds an integration test suite that mounts the
+real `RequestIDMiddleware` + `limit_upload_size` middleware + handlers
+to prove the full middleware stack produces enveloped responses.
 
-Uses a minimal FastAPI app to avoid importing custom_rag (which pulls heavy
-deps like PyMuPDF + langchain that aren't available in the no-PyPI CI).
+Uses minimal FastAPI apps — avoids importing `app.py` (which pulls heavy
+deps like PyMuPDF + langchain via `custom_rag`). The upload-size middleware
+is imported directly from `middleware.py`, which is a standalone module
+specifically for this reason.
 """
 
 import pathlib
@@ -17,8 +21,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
-# Make the per-service `errors` module importable when running pytest
-# from `services/ingestion/`.
+# Make the per-service `errors` and `middleware` modules importable when
+# running pytest from `services/ingestion/`.
 _INGESTION_ROOT = pathlib.Path(__file__).resolve().parent.parent
 if str(_INGESTION_ROOT) not in sys.path:
     sys.path.insert(0, str(_INGESTION_ROOT))
@@ -28,6 +32,8 @@ from errors import (  # noqa: E402
     raise_api_error,
     ApiErrorCode,
 )
+from middleware import limit_upload_size, MAX_UPLOAD_BYTES  # noqa: E402
+from observability import RequestIDMiddleware  # noqa: E402
 
 
 class _Item(BaseModel):
@@ -204,3 +210,151 @@ class TestApiErrorCodeStability:
         assert ApiErrorCode.VALIDATION_ERROR == "VALIDATION_ERROR"
         assert ApiErrorCode.UPSTREAM_UNAVAILABLE == "UPSTREAM_UNAVAILABLE"
         assert ApiErrorCode.INTERNAL_ERROR == "INTERNAL_ERROR"
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — real middleware stack
+# ---------------------------------------------------------------------------
+# Per architect review on PR #10: the unit tests above use a minimal app
+# without RequestIDMiddleware or upload-size middleware. These integration
+# tests mount the actual middleware to verify:
+#   1. RequestIDMiddleware sets request.state.request_id BEFORE the
+#      exception handlers run, so handler responses carry the same ID in
+#      body and header.
+#   2. limit_upload_size middleware uses build_error_response (NOT
+#      `raise HTTPException`) — its 413 response is envelope-shaped.
+#   3. Client-supplied X-Request-ID propagates through every error path.
+
+class TestRequestIdMiddlewareIntegration:
+    """RequestIDMiddleware + register_exception_handlers — full stack."""
+
+    @pytest.fixture
+    def app(self) -> FastAPI:
+        a = FastAPI()
+        register_exception_handlers(a)
+        a.add_middleware(RequestIDMiddleware)
+
+        @a.get("/boom")
+        def boom():
+            raise RuntimeError("simulated unhandled failure")
+
+        @a.get("/bad")
+        def bad():
+            raise HTTPException(status_code=400, detail="bot_tag cannot be empty")
+
+        return a
+
+    @pytest.fixture
+    def client(self, app: FastAPI) -> TestClient:
+        return TestClient(app, raise_server_exceptions=False)
+
+    def test_unhandled_500_carries_request_id_from_middleware(
+        self, client: TestClient,
+    ):
+        r = client.get("/boom")
+        assert r.status_code == 500
+        rid_header = r.headers["X-Request-ID"]
+        rid_body = r.json()["error"]["request_id"]
+        assert rid_header == rid_body
+        assert uuid.UUID(rid_header).version == 4
+
+    def test_client_supplied_request_id_flows_to_500(
+        self, client: TestClient,
+    ):
+        r = client.get("/boom", headers={"X-Request-ID": "client-supplied-001"})
+        assert r.status_code == 500
+        assert r.headers["X-Request-ID"] == "client-supplied-001"
+        assert r.json()["error"]["request_id"] == "client-supplied-001"
+
+    def test_client_supplied_request_id_flows_to_400(
+        self, client: TestClient,
+    ):
+        r = client.get("/bad", headers={"X-Request-ID": "client-supplied-002"})
+        assert r.status_code == 400
+        assert r.headers["X-Request-ID"] == "client-supplied-002"
+        assert r.json()["error"]["request_id"] == "client-supplied-002"
+
+
+class TestUploadSizeMiddlewareEnvelope:
+    """`limit_upload_size` middleware must return the envelope shape for
+    oversized requests (architect blocker #2 on PR #10) and NOT bypass
+    the contract by raising HTTPException."""
+
+    @pytest.fixture
+    def app(self) -> FastAPI:
+        a = FastAPI()
+        register_exception_handlers(a)
+        a.middleware("http")(limit_upload_size)
+        a.add_middleware(RequestIDMiddleware)
+
+        @a.post("/upload-mock")
+        def upload_mock():
+            # If middleware lets the request through, this handler runs and
+            # confirms it. We never want the test to reach here for oversize.
+            return {"ok": True}
+
+        return a
+
+    @pytest.fixture
+    def client(self, app: FastAPI) -> TestClient:
+        return TestClient(app, raise_server_exceptions=False)
+
+    def test_oversized_content_length_returns_413_envelope(
+        self, client: TestClient,
+    ):
+        # Send a content-length one byte over the limit. We use a 1-byte body
+        # but lie about content-length so the middleware fires on the header
+        # check before reading any body.
+        oversized = MAX_UPLOAD_BYTES + 1
+        r = client.post(
+            "/upload-mock",
+            content=b"x",
+            headers={"content-length": str(oversized)},
+        )
+        assert r.status_code == 413
+        body = r.json()
+        # CRITICAL: envelope shape, NOT a Starlette default 500 or a
+        # `{"detail": "..."}` from a raised-but-not-handled HTTPException.
+        assert "error" in body
+        assert "detail" not in body
+        assert body["error"]["code"] == ApiErrorCode.INVALID_REQUEST
+        assert "File too large" in body["error"]["message"]
+        # X-Request-ID matches in body + header
+        assert body["error"]["request_id"] == r.headers["X-Request-ID"]
+
+    def test_oversized_with_client_supplied_request_id_propagates(
+        self, client: TestClient,
+    ):
+        oversized = MAX_UPLOAD_BYTES + 1
+        r = client.post(
+            "/upload-mock",
+            content=b"x",
+            headers={
+                "content-length": str(oversized),
+                "X-Request-ID": "trace-oversize-001",
+            },
+        )
+        assert r.status_code == 413
+        assert r.headers["X-Request-ID"] == "trace-oversize-001"
+        assert r.json()["error"]["request_id"] == "trace-oversize-001"
+
+    def test_normal_size_passes_through(self, client: TestClient):
+        """A request within the limit reaches the handler."""
+        r = client.post(
+            "/upload-mock",
+            content=b"x",
+            headers={"content-length": "1"},
+        )
+        assert r.status_code == 200
+        # X-Request-ID still set by RequestIDMiddleware on the 200.
+        assert "X-Request-ID" in r.headers
+
+    def test_malformed_content_length_passes_through(self, client: TestClient):
+        """A non-numeric content-length is ignored defensively."""
+        r = client.post(
+            "/upload-mock",
+            content=b"x",
+            headers={"content-length": "not-a-number"},
+        )
+        # No 413, no 500 — middleware silently passed through.
+        assert r.status_code == 200

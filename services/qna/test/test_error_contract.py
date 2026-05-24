@@ -1,14 +1,17 @@
 """Tests for the structured error contract (P0-6).
 
 Verifies the three exception handlers (HTTPException, RequestValidationError,
-generic Exception) and the `raise_api_error` helper.
+generic Exception), the `raise_api_error` helper, and the integration
+contract between `RequestIDMiddleware`, `AuthUtils.auth_middleware`, and the
+exception handlers.
 
-Uses a minimal FastAPI app — no service startup, no Azure clients, no
-RequestIDMiddleware (the handler's auto-UUID fallback path is exercised
-directly when no middleware sets `request.state.request_id`).
+Uses minimal FastAPI apps — no service startup, no Azure clients. The
+unit-level tests omit the middleware stack to exercise the handler's
+auto-UUID fallback. The integration tests at the bottom mount real
+middleware to prove the full stack produces enveloped responses.
 """
 
-import logging
+import os
 import pathlib
 import sys
 import uuid
@@ -17,6 +20,22 @@ import pytest
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
+
+# ---------------------------------------------------------------------------
+# Env setup — required BEFORE any `src.core.auth` import, because the
+# config module enforces a fixed env-var contract at import time. Values
+# are deliberately fake; no Azure call is ever attempted in these tests.
+# ---------------------------------------------------------------------------
+os.environ.setdefault("AzureOpenaiAccountEndpoint", "https://fake.openai.example.com")
+os.environ.setdefault("TocdocOpenAIKey", "fake-openai-key")
+os.environ.setdefault("AzureOpenaiApiVersion", "2024-02-01")
+os.environ.setdefault("AZURE_OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+os.environ.setdefault("AzureSearchEndpoint", "https://fake.search.example.com")
+os.environ.setdefault("AzureSearchKey", "fake-search-key")
+os.environ.setdefault("INDEX_NAME", "fake-index")
+os.environ.setdefault("AZURE_KEY_VAULT", "fakevault")
+os.environ.setdefault("TocdocSPTenantID", "11111111-1111-1111-1111-111111111111")
+os.environ.setdefault("AUDIENCE_ID", "api://fake-audience")
 
 # Make src/ importable when running pytest from services/qna/
 _QNA_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -28,6 +47,8 @@ from src.core.errors import (  # noqa: E402
     raise_api_error,
     ApiErrorCode,
 )
+from src.core.observability import RequestIDMiddleware  # noqa: E402
+from src.core.auth import AuthUtils  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -255,3 +276,143 @@ class TestApiErrorCodeStability:
         assert ApiErrorCode.VALIDATION_ERROR == "VALIDATION_ERROR"
         assert ApiErrorCode.UPSTREAM_UNAVAILABLE == "UPSTREAM_UNAVAILABLE"
         assert ApiErrorCode.INTERNAL_ERROR == "INTERNAL_ERROR"
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — real middleware stack
+# ---------------------------------------------------------------------------
+# Per architect review on PR #10: the unit tests above use a minimal app
+# without RequestIDMiddleware or auth. These integration tests mount the
+# actual middleware classes to verify:
+#   1. RequestIDMiddleware sets request.state.request_id BEFORE the
+#      exception handlers run, so handler responses carry the same ID in
+#      body and header.
+#   2. Auth middleware uses build_error_response (not legacy JSONResponse
+#      with {"detail": ...}) — its responses are envelope-shaped.
+#   3. Client-supplied X-Request-ID propagates end-to-end through every
+#      error path.
+
+class TestRequestIdMiddlewareIntegration:
+    """RequestIDMiddleware + register_exception_handlers — full stack."""
+
+    @pytest.fixture
+    def app(self) -> FastAPI:
+        a = FastAPI()
+        register_exception_handlers(a)
+        a.add_middleware(RequestIDMiddleware)
+
+        @a.get("/boom")
+        def boom():
+            raise RuntimeError("simulated unhandled failure")
+
+        @a.get("/bad")
+        def bad():
+            raise HTTPException(status_code=400, detail="bot_tag cannot be empty")
+
+        return a
+
+    @pytest.fixture
+    def client(self, app: FastAPI) -> TestClient:
+        return TestClient(app, raise_server_exceptions=False)
+
+    def test_unhandled_500_carries_request_id_from_middleware(
+        self, client: TestClient,
+    ):
+        r = client.get("/boom")
+        assert r.status_code == 500
+        rid_header = r.headers["X-Request-ID"]
+        rid_body = r.json()["error"]["request_id"]
+        # The middleware set request.state.request_id; the handler resolved
+        # the same value for both the header and the body.
+        assert rid_header == rid_body
+        # Server-generated → UUID4
+        assert uuid.UUID(rid_header).version == 4
+
+    def test_client_supplied_request_id_flows_to_500(self, client: TestClient):
+        r = client.get("/boom", headers={"X-Request-ID": "client-supplied-001"})
+        assert r.status_code == 500
+        assert r.headers["X-Request-ID"] == "client-supplied-001"
+        assert r.json()["error"]["request_id"] == "client-supplied-001"
+
+    def test_client_supplied_request_id_flows_to_400(self, client: TestClient):
+        r = client.get("/bad", headers={"X-Request-ID": "client-supplied-002"})
+        assert r.status_code == 400
+        assert r.headers["X-Request-ID"] == "client-supplied-002"
+        assert r.json()["error"]["request_id"] == "client-supplied-002"
+
+
+class TestAuthMiddlewareEnvelope:
+    """`AuthUtils.auth_middleware` must use the envelope shape for every
+    failure path (architect blocker #1 on PR #10).
+
+    `validate_token` is never invoked in these tests because each case
+    fails before the JWKS path. No network call is made.
+    """
+
+    @pytest.fixture
+    def app(self) -> FastAPI:
+        a = FastAPI()
+        register_exception_handlers(a)
+
+        @a.middleware("http")
+        async def auth_mw(request: Request, call_next):
+            return await AuthUtils.auth_middleware(request, call_next)
+
+        a.add_middleware(RequestIDMiddleware)
+
+        @a.get("/protected")
+        def protected():
+            return {"ok": True}
+
+        return a
+
+    @pytest.fixture
+    def client(self, app: FastAPI) -> TestClient:
+        return TestClient(app, raise_server_exceptions=False)
+
+    def test_missing_authorization_returns_envelope_401(
+        self, client: TestClient,
+    ):
+        r = client.get("/protected")
+        assert r.status_code == 401
+        body = r.json()
+        # CRITICAL: envelope shape, NOT the legacy `{"detail": "..."}`.
+        assert "error" in body
+        assert "detail" not in body
+        assert body["error"]["code"] == ApiErrorCode.UNAUTHORIZED
+        assert "Missing or invalid Authorization header" in body["error"]["message"]
+        # X-Request-ID matches in body + header
+        assert body["error"]["request_id"] == r.headers["X-Request-ID"]
+
+    def test_malformed_authorization_returns_envelope_401(
+        self, client: TestClient,
+    ):
+        # "Basic" header instead of "Bearer" — same 401 envelope path.
+        r = client.get("/protected", headers={"Authorization": "Basic abc123"})
+        assert r.status_code == 401
+        body = r.json()
+        assert body["error"]["code"] == ApiErrorCode.UNAUTHORIZED
+        assert "detail" not in body
+
+    def test_client_supplied_request_id_propagates_to_auth_failure(
+        self, client: TestClient,
+    ):
+        r = client.get(
+            "/protected",
+            headers={"X-Request-ID": "trace-auth-fail-001"},
+        )
+        assert r.status_code == 401
+        body = r.json()
+        assert body["error"]["request_id"] == "trace-auth-fail-001"
+        assert r.headers["X-Request-ID"] == "trace-auth-fail-001"
+
+    def test_health_path_bypasses_auth(self, client: TestClient, app: FastAPI):
+        @app.get("/qna/health")
+        def health():
+            return {"status": "ok"}
+
+        # No auth header — should pass through the middleware's bypass path.
+        r = client.get("/qna/health")
+        assert r.status_code == 200
+        # Even on success, X-Request-ID is set by RequestIDMiddleware.
+        assert "X-Request-ID" in r.headers

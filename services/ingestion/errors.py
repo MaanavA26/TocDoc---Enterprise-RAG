@@ -1,22 +1,26 @@
 """Structured error contract for the ingestion service (P0-6).
 
-Mirror of `services/qna/src/core/errors.py` — kept per-service so each
+Sibling of `services/qna/src/core/errors.py` — kept per-service so each
 service's Docker build context stays self-contained (same pattern as the
-observability modules). Field names and codes MUST remain in sync between
-copies; see `docs/productization_backlog/06_API_Harden_error_contracts_request_validation_and_response_schema.md`
+observability modules). Field names, codes, helper names, and public
+behavior MUST remain in sync between the two copies; they are not
+byte-identical (the status-to-code map differs because ingestion has 413
+upload-size responses that QnA doesn't). See
+`docs/productization_backlog/06_API_Harden_error_contracts_request_validation_and_response_schema.md`
 and `docs/architect_phase_2/02_OBSERVABILITY_SPEC.md`.
 
 Provides:
 - `ErrorEnvelope` / `ErrorBody` — Pydantic response models.
 - `ApiErrorCode` — stable code registry.
 - `raise_api_error(code, message, status_code)` — preferred helper for new code.
+- `build_error_response(request, ...)` — public helper for middleware paths
+  that need to return the envelope directly without raising HTTPException.
+  **Use this from any HTTP middleware** (e.g., `limit_upload_size` below).
+  Raising HTTPException from inside middleware does NOT route through
+  FastAPI's HTTPException handler; the exception can fall through to
+  Starlette's `ServerErrorMiddleware` and produce a non-enveloped 500.
 - `register_exception_handlers(app)` — installs the three handlers on the FastAPI app.
 - `default_error_responses` — OpenAPI responses dict for use via spread.
-
-The exception-handler scope is per the qna module's docstring: handlers
-catch exceptions raised by route handlers and route-level dependencies.
-Exceptions raised by middleware itself (extremely rare) still fall through
-to Starlette's `ServerErrorMiddleware`.
 """
 
 from __future__ import annotations
@@ -106,16 +110,39 @@ def _resolve_request_id(request: Request) -> str:
     return str(uuid.uuid4())
 
 
-def _build_response(
-    *,
+def build_error_response(
     request: Request,
-    status_code: int,
+    *,
     code: str,
     message: str,
+    status_code: int,
     extra_headers: Optional[dict[str, str]] = None,
     validation_errors: Optional[list[dict[str, Any]]] = None,
 ) -> JSONResponse:
-    """Construct the error JSONResponse with envelope body + X-Request-ID."""
+    """Construct an error `JSONResponse` matching the envelope contract.
+
+    Public helper for any code path that needs the envelope shape directly
+    without going through `raise HTTPException`. **Use this from HTTP
+    middleware** — raising HTTPException from inside middleware does NOT
+    route through FastAPI's HTTPException handler.
+
+    Behavior:
+    - Sets `X-Request-ID` from `request.state.request_id` if available;
+      generates a fresh UUID4 otherwise so the header is never missing.
+    - Includes the same `request_id` value in `body.error.request_id`.
+    - Body is the `ErrorEnvelope` shape; `errors` field omitted unless
+      `validation_errors` is provided.
+
+    Args:
+        request: The incoming Starlette/FastAPI request.
+        code: A value from `ApiErrorCode` (or a stable new string).
+        message: Safe human-readable message. Never include raw exception
+            text, secrets, tokens, or user input.
+        status_code: HTTP status code.
+        extra_headers: Optional additional response headers. `X-Request-ID`
+            is added by this helper and overrides any caller-supplied value.
+        validation_errors: Per-field structured errors for VALIDATION_ERROR.
+    """
     request_id = _resolve_request_id(request)
 
     body = ErrorBody(
@@ -126,9 +153,10 @@ def _build_response(
     )
     envelope = ErrorEnvelope(error=body)
 
-    headers: dict[str, str] = {"X-Request-ID": request_id}
+    headers: dict[str, str] = {}
     if extra_headers:
         headers.update(extra_headers)
+    headers["X-Request-ID"] = request_id
 
     return JSONResponse(
         status_code=status_code,
@@ -149,8 +177,8 @@ async def http_exception_handler(
         code = _STATUS_TO_CODE.get(exc.status_code, ApiErrorCode.INTERNAL_ERROR)
         message = detail if isinstance(detail, str) else str(detail or "Error")
 
-    return _build_response(
-        request=request,
+    return build_error_response(
+        request,
         status_code=exc.status_code,
         code=code,
         message=message,
@@ -173,8 +201,8 @@ async def validation_exception_handler(
             "msg": msg,
         })
 
-    return _build_response(
-        request=request,
+    return build_error_response(
+        request,
         status_code=422,
         code=ApiErrorCode.VALIDATION_ERROR,
         message="Request validation failed",
@@ -191,8 +219,8 @@ async def unhandled_exception_handler(
         "Unhandled exception in request handler (request_id=%s, error_class=%s)",
         request_id, type(exc).__name__,
     )
-    return _build_response(
-        request=request,
+    return build_error_response(
+        request,
         status_code=500,
         code=ApiErrorCode.INTERNAL_ERROR,
         message="Internal server error",

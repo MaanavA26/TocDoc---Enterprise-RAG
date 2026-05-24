@@ -1,7 +1,23 @@
+"""JWT authentication middleware for the QnA service.
+
+Validates Azure AD-issued Bearer tokens (RS256, JWKS-backed) on every
+authenticated request. Public routes (CORS preflight, `/qna/health`,
+Swagger assets) bypass auth.
+
+Error contract (P0-6): every auth failure returns the standard
+`ErrorEnvelope` shape via `build_error_response`, including
+`X-Request-ID` in both the body and the response header. We do NOT raise
+`HTTPException` from inside this middleware — that path is unsafe because
+middleware exceptions may bypass FastAPI's HTTPException handler and fall
+through to Starlette's `ServerErrorMiddleware` as a non-enveloped 500.
+"""
+
 import logging
+
 from fastapi import Request
-from fastapi.responses import JSONResponse
+
 from src.config.config import settings
+from src.core.errors import ApiErrorCode, build_error_response
 from src.core.token_validator import validate_token, TokenValidationError
 
 logger = logging.getLogger(__name__)
@@ -12,7 +28,7 @@ class AuthUtils:
     Authentication utilities.
 
     Exposes a FastAPI middleware that:
-      - Skips auth for public routes (CORS preflight, /qna/health, swagger assets).
+      - Skips auth for public routes (CORS preflight, `/qna/health`, swagger assets).
       - Expects an ``Authorization: Bearer <token>`` header.
       - Validates the JWT cryptographically via Azure AD JWKS (RS256).
       - Extracts a user email from common claim names and attaches it to
@@ -33,8 +49,8 @@ class AuthUtils:
             - Attaches ``request.state.email`` for downstream usage.
 
         Returns:
-            starlette.responses.Response: The next handler's response or a JSON
-            401/500 error response.
+            starlette.responses.Response: The next handler's response, or an
+            envelope-shaped error response (401/503/500) for auth failures.
         """
         path = request.url.path or "/"
 
@@ -49,9 +65,11 @@ class AuthUtils:
         # ---- Authorization header presence/shape check ----------------------
         auth_header = request.headers.get("Authorization")
         if not auth_header or not auth_header.startswith("Bearer "):
-            return JSONResponse(
+            return build_error_response(
+                request,
+                code=ApiErrorCode.UNAUTHORIZED,
+                message="Missing or invalid Authorization header",
                 status_code=401,
-                content={"detail": "Missing or invalid Authorization header"},
             )
 
         token = auth_header.split(" ")[1]
@@ -72,24 +90,41 @@ class AuthUtils:
                 or decoded.get("email")
             )
             if not email:
-                return JSONResponse(
+                return build_error_response(
+                    request,
+                    code=ApiErrorCode.UNAUTHORIZED,
+                    message="Email claim not found in token",
                     status_code=401,
-                    content={"detail": "Email claim not found in token"},
                 )
 
             # Attach email to request.state (downstream handlers can rely on it)
             request.state.email = email
 
         except TokenValidationError as e:
-            return JSONResponse(
+            # `e.status_code` is 401 for client-side token issues (expired,
+            # wrong audience, malformed) and 503 for JWKS-unavailable cases.
+            # `e.message` is set by token_validator and is safe to surface.
+            code = (
+                ApiErrorCode.UPSTREAM_UNAVAILABLE
+                if e.status_code == 503
+                else ApiErrorCode.UNAUTHORIZED
+            )
+            return build_error_response(
+                request,
+                code=code,
+                message=e.message,
                 status_code=e.status_code,
-                content={"detail": e.message},
             )
         except Exception as e:
-            logger.error("Auth middleware unexpected error: %s", str(e))
-            return JSONResponse(
+            # Never include `str(e)` in the response — log type only.
+            logger.error(
+                "Auth middleware unexpected error: %s", type(e).__name__
+            )
+            return build_error_response(
+                request,
+                code=ApiErrorCode.INTERNAL_ERROR,
+                message="Authentication error",
                 status_code=500,
-                content={"detail": "Authentication error"},
             )
 
         return await call_next(request)
