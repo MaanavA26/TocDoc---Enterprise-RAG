@@ -94,24 +94,29 @@ Validate ingestion env vars include:
 - `AZURE_SEARCH_KEY`
 - `DOC_INTELLIGENCE_KEY`
 
-Validate QnA env vars include:
-- `AzureOpenaiAccountEndpoint`
-- `AzureOpenaiApiVersion`
-- `AzureOpenaiLlmModel`
+Validate QnA env vars include (canonical UPPER_SNAKE names, per P0-7):
+- `AZURE_OPENAI_ENDPOINT`
+- `AZURE_OPENAI_VERSION`
+- `AZURE_OPENAI_LLM_MODEL`
 - `AZURE_OPENAI_EMBEDDING_MODEL`
-- `AzureSearchEndpoint`
+- `AZURE_SEARCH_ENDPOINT`
 - `INDEX_NAME`
 - `AUDIENCE_ID`
 - `AZURE_KEY_VAULT`
-- `TocdocSPTenantID`
+- `AZURE_TENANT_ID`
 - `LOG_LEVEL`
-- `TocdocOpenAIKey`
-- `AzureSearchKey`
-- `TocdocSPClientID`
-- `TocdocSPSecretValue`
+- `AZURE_OPENAI_KEY`
+- `AZURE_SEARCH_KEY`
+- `AZURE_CLIENT_ID`
+- `AZURE_CLIENT_SECRET`
 
 Important:
 - The script should validate names only, not print secret values.
+- For backward compatibility with deployments that haven't migrated yet, the
+  script may also recognize the pre-P0-7 PascalCase legacy aliases
+  (`AzureOpenaiAccountEndpoint` → `AZURE_OPENAI_ENDPOINT`, etc. — see the
+  full table in `docs/deployment/INSTALLATION.md`) and emit a warning
+  rather than failing. New deployments should match the canonical list above.
 
 ### 5. Container App revision status
 

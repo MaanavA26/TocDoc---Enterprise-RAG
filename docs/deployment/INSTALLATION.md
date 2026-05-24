@@ -93,11 +93,70 @@ az containerapp show \
   --query "properties.template.containers[0].env[].name" -o tsv
 
 # Expected output should include:
-# AzureOpenaiAccountEndpoint, AzureOpenaiApiVersion, AzureOpenaiLlmModel,
-# AZURE_OPENAI_EMBEDDING_MODEL, AzureSearchEndpoint, INDEX_NAME,
-# AUDIENCE_ID, AZURE_KEY_VAULT, TocdocSPTenantID, LOG_LEVEL,
-# TocdocOpenAIKey, AzureSearchKey, TocdocSPClientID, TocdocSPSecretValue
+# AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_VERSION, AZURE_OPENAI_LLM_MODEL,
+# AZURE_OPENAI_EMBEDDING_MODEL, AZURE_SEARCH_ENDPOINT, INDEX_NAME,
+# AUDIENCE_ID, AZURE_KEY_VAULT, AZURE_TENANT_ID, LOG_LEVEL,
+# AZURE_OPENAI_KEY, AZURE_SEARCH_KEY, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET
 ```
+
+## Migrating from a pre-P0-7 deployment
+
+If you deployed TocDoc before the P0-7 env-var normalization landed, your
+Container App's QnA service may still have the legacy PascalCase env var
+names. The service code accepts both forms during the deprecation window —
+the legacy name will work but emit a one-shot WARNING log per name on the
+first request that resolves through it.
+
+To clear the warnings and align with the new contract:
+
+1. **Re-deploy with the updated Bicep template**, which now wires the
+   canonical UPPER_SNAKE names automatically. The
+   `az deployment group create` command in Step 1 above is unchanged —
+   only the Bicep template internals have moved to canonical names.
+
+2. **Or, patch the existing Container App in place** (no redeploy):
+   ```bash
+   az containerapp update \
+     --name tocdoc-qna-prod \
+     --resource-group rg-tocdoc-<client-name> \
+     --set-env-vars \
+       AZURE_OPENAI_ENDPOINT=<openai-endpoint> \
+       AZURE_OPENAI_VERSION=2024-02-01 \
+       AZURE_OPENAI_LLM_MODEL=gpt-4o-mini \
+       AZURE_SEARCH_ENDPOINT=<search-endpoint> \
+       AZURE_TENANT_ID=<tenant-id> \
+     --remove-env-vars \
+       AzureOpenaiAccountEndpoint AzureOpenaiApiVersion AzureOpenaiLlmModel \
+       AzureSearchEndpoint TocdocSPTenantID
+   ```
+   Mirror the same pattern for the secret-backed env vars
+   (`TocdocOpenAIKey` → `AZURE_OPENAI_KEY`, etc.) via
+   `az containerapp secret set` + `az containerapp update`.
+
+3. **If you store the SP credentials in Key Vault**, the config module's
+   dual-read upgrades them transparently: the loader tries the canonical
+   secret name first, falls back to the legacy name, and writes the value
+   into `os.environ` under the canonical name. You can rename the Key
+   Vault secrets at your leisure; they're already being read correctly.
+
+Full rename table (legacy → canonical):
+
+| Pre-P0-7 (legacy)              | P0-7 canonical              |
+|---                              |---                          |
+| `AzureOpenaiAccountEndpoint`    | `AZURE_OPENAI_ENDPOINT`     |
+| `TocdocOpenAIKey`               | `AZURE_OPENAI_KEY`          |
+| `AzureOpenaiApiVersion`         | `AZURE_OPENAI_VERSION`      |
+| `AzureOpenaiLlmModel`           | `AZURE_OPENAI_LLM_MODEL`    |
+| `AzureSearchEndpoint`           | `AZURE_SEARCH_ENDPOINT`     |
+| `AzureSearchKey`                | `AZURE_SEARCH_KEY`          |
+| `TocdocSPClientID`              | `AZURE_CLIENT_ID`           |
+| `TocdocSPSecretValue`           | `AZURE_CLIENT_SECRET`       |
+| `TocdocSPTenantID`              | `AZURE_TENANT_ID`           |
+
+The `AZURE_CLIENT_*` / `AZURE_TENANT_ID` names align with Azure SDK
+`DefaultAzureCredential` conventions, so a future switch from
+`ClientSecretCredential` to `DefaultAzureCredential` will require no
+further rename.
 
 ## Step 3: Build and deploy container images
 

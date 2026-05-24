@@ -14,9 +14,9 @@ Azure Bicep templates for deploying TocDoc into a client Azure resource group.
 |---|---|
 | OpenAI / Search / Doc Intelligence endpoints | Computed from deployed resources → wired as plain env vars |
 | API version, model names, index name | Parameters with sensible defaults → wired as plain env vars |
-| `AUDIENCE_ID`, `TocdocSPTenantID`, `AZURE_KEY_VAULT` | Parameters → wired as plain env vars |
+| `AUDIENCE_ID`, `AZURE_TENANT_ID`, `AZURE_KEY_VAULT` | Parameters → wired as plain env vars |
 | API keys (`openAiApiKey`, `searchApiKey`, `docIntelApiKey`) | Passed as `@secure()` params → stored as Container App secrets, never in plain config |
-| SP credentials (`spClientId`, `spClientSecret`) | Passed as `@secure()` params → stored as Container App secrets (current QnA auth path for Key Vault) |
+| SP credentials (`spClientId`, `spClientSecret`) | Passed as `@secure()` params → stored as Container App secrets (current QnA auth path for Key Vault, surfaced as `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` env vars) |
 
 > **Auth model note**: The QnA service currently uses `ClientSecretCredential`
 > (service principal) to load secrets from Key Vault at startup. System-assigned
