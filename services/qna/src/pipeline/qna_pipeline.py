@@ -287,14 +287,15 @@ async def generate_answer(
         }
 
     except Exception as e:
-        logger.error(f"[{request_id}] Error in generate_answer: {e}")
+        # Log with full traceback for server-side debugging, then re-raise.
+        # Previously this path returned a 200 response with an `error`-shaped
+        # payload masquerading as a successful answer — a P0-6 contract bug.
+        # The re-raise propagates to the global exception handler
+        # (`services/qna/src/core/errors.py`) which produces a 500
+        # ErrorEnvelope with `code=INTERNAL_ERROR` plus X-Request-ID in the
+        # body and the response header.
+        logger.error(
+            f"[{request_id}] Error in generate_answer: {type(e).__name__}"
+        )
         logger.error(f"[{request_id}] Traceback: {traceback.format_exc()}")
-        return {
-            "answer": (
-                "An error occurred while generating the answer. "
-                "Please try again."
-            ),
-            "citation": {},
-            "error": str(e),
-            "request_id": request_id,
-        }
+        raise

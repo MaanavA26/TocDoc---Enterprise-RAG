@@ -10,6 +10,12 @@ from typing import Optional
 
 from observability import RequestIDMiddleware
 from admin.routes import router as admin_router
+from errors import (
+    register_exception_handlers,
+    default_error_responses,
+    raise_api_error,
+    ApiErrorCode,
+)
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 # Stdout always; file logging only if LOG_FILE env var is set (local dev)
@@ -96,6 +102,14 @@ async def limit_upload_size(request: Request, call_next):
 # including future auth.
 app.add_middleware(RequestIDMiddleware)
 
+# Structured error contract (P0-6). Installs three handlers:
+# - HTTPException → ErrorEnvelope (back-compat with string-detail callsites)
+# - RequestValidationError → 422 ErrorEnvelope with structured `errors` list
+# - Exception (catch-all) → 500 ErrorEnvelope with X-Request-ID header
+# New code should `raise_api_error(code, message, status_code)` from `errors`
+# rather than `HTTPException(status, detail="msg")` so the `code` field stays meaningful.
+register_exception_handlers(app)
+
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
@@ -106,7 +120,7 @@ async def health_check():
     return {"status": "healthy"}
 
 
-@app.post("/upload", summary="Ingest a PDF document or folder")
+@app.post("/upload", summary="Ingest a PDF document or folder", responses=default_error_responses)
 async def upload_file(
     bot_tag: str = Query(..., description="Tenant / bot identifier"),
     filepath: str = Query(..., description="Absolute file or folder path on the server"),
