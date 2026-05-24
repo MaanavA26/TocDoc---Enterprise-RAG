@@ -14,17 +14,29 @@ release through a dual-read fallback that:
   rewritten into `os.environ` under the **canonical** name so downstream
   code reads the canonical name uniformly.
 
-Migration mapping (legacy → canonical):
+Migration mapping (legacy env → canonical env → Key Vault secret name):
 
-    AzureOpenaiAccountEndpoint → AZURE_OPENAI_ENDPOINT
-    TocdocOpenAIKey            → AZURE_OPENAI_KEY
-    AzureOpenaiApiVersion      → AZURE_OPENAI_VERSION
-    AzureOpenaiLlmModel        → AZURE_OPENAI_LLM_MODEL
-    AzureSearchEndpoint        → AZURE_SEARCH_ENDPOINT
-    AzureSearchKey             → AZURE_SEARCH_KEY
-    TocdocSPClientID           → AZURE_CLIENT_ID
-    TocdocSPSecretValue        → AZURE_CLIENT_SECRET
-    TocdocSPTenantID           → AZURE_TENANT_ID
+    AzureOpenaiAccountEndpoint → AZURE_OPENAI_ENDPOINT    (KV: azure-openai-endpoint)
+    TocdocOpenAIKey            → AZURE_OPENAI_KEY         (KV: azure-openai-key)
+    AzureOpenaiApiVersion      → AZURE_OPENAI_VERSION     (KV: azure-openai-version)
+    AzureOpenaiLlmModel        → AZURE_OPENAI_LLM_MODEL   (KV: azure-openai-llm-model)
+    AzureSearchEndpoint        → AZURE_SEARCH_ENDPOINT    (KV: azure-search-endpoint)
+    AzureSearchKey             → AZURE_SEARCH_KEY         (KV: azure-search-key)
+    TocdocSPClientID           → AZURE_CLIENT_ID          (KV: azure-client-id)
+    TocdocSPSecretValue        → AZURE_CLIENT_SECRET      (KV: azure-client-secret)
+    TocdocSPTenantID           → AZURE_TENANT_ID          (KV: azure-tenant-id)
+
+Why three name spaces:
+
+- Env var names use UPPER_SNAKE per the Python / Azure SDK
+  `DefaultAzureCredential` convention (`AZURE_OPENAI_KEY`).
+- Key Vault secret names are restricted to `^[a-zA-Z0-9-]+$` — underscores
+  are NOT permitted — so the KV form is hyphenated-lowercase
+  (`azure-openai-key`). Calling `client.get_secret("AZURE_OPENAI_KEY")`
+  would return a 400 (invalid resource name), not `ResourceNotFoundError`.
+- The legacy PascalCase form (`TocdocOpenAIKey`) is alphanumeric so it
+  remains a valid KV secret name. Pre-P0-7 vaults storing PascalCase
+  secret names continue to work via the loader's fallback path.
 
 Already-canonical (unchanged):
 
@@ -77,6 +89,33 @@ _LEGACY_ENV_ALIASES: dict[str, str] = {
     "AZURE_CLIENT_ID":          "TocdocSPClientID",
     "AZURE_CLIENT_SECRET":      "TocdocSPSecretValue",
     "AZURE_TENANT_ID":          "TocdocSPTenantID",
+}
+
+# Maps canonical env name → Azure Key Vault secret name.
+#
+# Key Vault secret names are restricted to `^[a-zA-Z0-9-]+$` — underscores
+# are NOT permitted. The canonical env var names contain underscores
+# (`AZURE_OPENAI_KEY`), so we cannot use them as KV secret names. The
+# hyphenated-lowercase form matches Container Apps secret naming and is
+# the recommended convention for KV secrets backing UPPER_SNAKE env vars.
+#
+# Lookup precedence inside `load_secrets_from_keyvault`:
+#   1. Canonical KV secret (hyphenated-lowercase, e.g., "azure-openai-key")
+#   2. Legacy KV secret  (PascalCase from `_LEGACY_ENV_ALIASES`, e.g., "TocdocOpenAIKey")
+#   3. Recorded as not-found
+#
+# Whichever path resolves, the value is written into `os.environ[canonical]`
+# so downstream code reads canonical env names uniformly.
+_KV_SECRET_NAMES: dict[str, str] = {
+    "AZURE_OPENAI_ENDPOINT":    "azure-openai-endpoint",
+    "AZURE_OPENAI_KEY":         "azure-openai-key",
+    "AZURE_OPENAI_VERSION":     "azure-openai-version",
+    "AZURE_OPENAI_LLM_MODEL":   "azure-openai-llm-model",
+    "AZURE_SEARCH_ENDPOINT":    "azure-search-endpoint",
+    "AZURE_SEARCH_KEY":         "azure-search-key",
+    "AZURE_CLIENT_ID":          "azure-client-id",
+    "AZURE_CLIENT_SECRET":      "azure-client-secret",
+    "AZURE_TENANT_ID":          "azure-tenant-id",
 }
 
 # One-shot guard so the same deprecation message doesn't flood the logs on
@@ -183,18 +222,38 @@ class Settings:
     async def load_secrets_from_keyvault(cls) -> dict[str, bool]:
         """Populate process env vars from Azure Key Vault.
 
-        Dual-read behavior:
-            - Fetches each `secret_names` entry under its canonical name first.
-            - If `ResourceNotFoundError` is raised (KV secret doesn't exist),
-              tries the pre-P0-7 legacy alias instead.
-            - On either path, writes the fetched value into `os.environ`
-              under the **canonical** name. Downstream readers see the
-              canonical name uniformly; legacy KV secrets are silently
-              upgraded as long as both names live in the migration table.
-            - Other AzureErrors (network, auth) are recorded as `False`
-              without re-trying — this matches the pre-P0-7 coarse failure
-              signal and avoids masking transient infra problems with an
-              incorrect "secret missing" reading.
+        Lookup precedence per canonical env name (e.g., `AZURE_OPENAI_KEY`):
+
+            1. Canonical KV secret name (hyphenated-lowercase, e.g.,
+               `azure-openai-key`) — the recommended P0-7 form for new
+               deployments. Mapped via `_KV_SECRET_NAMES`.
+            2. Legacy KV secret name (PascalCase from `_LEGACY_ENV_ALIASES`,
+               e.g., `TocdocOpenAIKey`) — preserved so pre-P0-7 vaults
+               work without operator action. A one-shot deprecation
+               warning fires per legacy secret hit.
+            3. Recorded as not-found.
+
+        Whichever path resolves, the value is written into
+        `os.environ[canonical]` so downstream code reads the canonical
+        env name uniformly.
+
+        Why two name spaces (canonical env vs KV secret):
+            Azure Key Vault secret names are restricted to `^[a-zA-Z0-9-]+$`
+            — underscores are NOT permitted. `AZURE_OPENAI_KEY` is therefore
+            not a valid KV secret name. Calling `get_secret` with an
+            underscore-containing name returns a 400 (invalid resource
+            name), NOT `ResourceNotFoundError`. So the loader uses a
+            separate hyphenated mapping for KV lookups; env vars stay
+            UPPER_SNAKE.
+
+        Error handling:
+            - `ResourceNotFoundError` on either lookup falls through to the
+              next step in precedence.
+            - Other `AzureError` (network, auth) records `False` without
+              re-trying. Preserves the pre-P0-7 coarse failure signal and
+              avoids masking transient infra problems with an incorrect
+              "secret missing" reading.
+            - Any other exception type also records `False`.
 
         Returns:
             dict[str, bool]: Per-canonical-name success flags.
@@ -212,30 +271,37 @@ class Settings:
 
         async def fetch_secret(canonical: str) -> None:
             async with semaphore:
-                try:
-                    secret = await client.get_secret(canonical)
-                    os.environ[canonical] = secret.value
-                    results[canonical] = True
-                    return
-                except ResourceNotFoundError:
-                    # Canonical secret doesn't exist; try the legacy alias.
-                    pass
-                except AzureError:
-                    results[canonical] = False
-                    return
-                except Exception:
-                    results[canonical] = False
-                    return
+                # Step 1: try the canonical KV secret name (hyphenated).
+                canonical_kv_name = _KV_SECRET_NAMES.get(canonical)
+                if canonical_kv_name:
+                    try:
+                        secret = await client.get_secret(canonical_kv_name)
+                        os.environ[canonical] = secret.value
+                        results[canonical] = True
+                        return
+                    except ResourceNotFoundError:
+                        # Fall through to legacy lookup.
+                        pass
+                    except AzureError:
+                        # Network / auth / other Azure failure — don't try
+                        # the legacy path either; the failure is upstream,
+                        # not a missing secret.
+                        results[canonical] = False
+                        return
+                    except Exception:
+                        results[canonical] = False
+                        return
 
+                # Step 2: try the legacy PascalCase KV secret name.
                 legacy = _LEGACY_ENV_ALIASES.get(canonical)
                 if not legacy:
                     results[canonical] = False
                     return
                 try:
                     secret = await client.get_secret(legacy)
-                    # CRITICAL: write under canonical name so downstream
+                    # CRITICAL: write under canonical env name so downstream
                     # code reads consistently. The legacy KV secret name is
-                    # only honored at this fetch site.
+                    # honored only at this fetch site.
                     os.environ[canonical] = secret.value
                     _warn_deprecated_alias(legacy, canonical, kv_secret=True)
                     results[canonical] = True

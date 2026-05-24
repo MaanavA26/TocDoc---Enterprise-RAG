@@ -104,8 +104,11 @@ az containerapp show \
 If you deployed TocDoc before the P0-7 env-var normalization landed, your
 Container App's QnA service may still have the legacy PascalCase env var
 names. The service code accepts both forms during the deprecation window —
-the legacy name will work but emit a one-shot WARNING log per name on the
-first request that resolves through it.
+the legacy name will work but emit a one-shot WARNING log per name when
+the value is first resolved. For most variables this happens at app
+**import time** (the `required_env_vars` check and the `Settings` class
+attribute initialization run when `src.config.config` is imported), so
+warnings typically appear in container startup logs rather than per-request.
 
 To clear the warnings and align with the new contract:
 
@@ -133,11 +136,35 @@ To clear the warnings and align with the new contract:
    (`TocdocOpenAIKey` → `AZURE_OPENAI_KEY`, etc.) via
    `az containerapp secret set` + `az containerapp update`.
 
-3. **If you store the SP credentials in Key Vault**, the config module's
-   dual-read upgrades them transparently: the loader tries the canonical
-   secret name first, falls back to the legacy name, and writes the value
-   into `os.environ` under the canonical name. You can rename the Key
-   Vault secrets at your leisure; they're already being read correctly.
+3. **If you store secrets in Key Vault**, the loader's dual-read handles
+   them transparently. **Key Vault secret naming is different from env-var
+   naming** — Azure Key Vault only allows `^[a-zA-Z0-9-]+$` in secret
+   names, so the canonical KV form is hyphenated-lowercase, not the
+   UPPER_SNAKE env-var form. The loader looks up each canonical env var
+   under the following KV name precedence:
+
+   | Canonical env var       | Canonical KV secret name  | Legacy KV secret name (P0-7 fallback) |
+   |---                       |---                         |---                                     |
+   | `AZURE_OPENAI_ENDPOINT`  | `azure-openai-endpoint`    | `AzureOpenaiAccountEndpoint`           |
+   | `AZURE_OPENAI_KEY`       | `azure-openai-key`         | `TocdocOpenAIKey`                      |
+   | `AZURE_OPENAI_VERSION`   | `azure-openai-version`     | `AzureOpenaiApiVersion`                |
+   | `AZURE_OPENAI_LLM_MODEL` | `azure-openai-llm-model`   | `AzureOpenaiLlmModel`                  |
+   | `AZURE_SEARCH_ENDPOINT` | `azure-search-endpoint`    | `AzureSearchEndpoint`                  |
+   | `AZURE_SEARCH_KEY`       | `azure-search-key`         | `AzureSearchKey`                       |
+   | `AZURE_CLIENT_ID`        | `azure-client-id`          | `TocdocSPClientID`                     |
+   | `AZURE_CLIENT_SECRET`    | `azure-client-secret`      | `TocdocSPSecretValue`                  |
+   | `AZURE_TENANT_ID`        | `azure-tenant-id`          | `TocdocSPTenantID`                     |
+
+   The loader tries the hyphenated canonical name first, then the legacy
+   PascalCase name on `ResourceNotFoundError`, then records the secret as
+   missing. The resolved value is written into `os.environ` under the
+   canonical UPPER_SNAKE name regardless of which KV name matched.
+
+   **Do not create Key Vault secrets with underscores** (e.g.,
+   `AZURE_OPENAI_KEY` as the KV secret name) — Azure will reject the
+   request with a 400, and the loader will not see the value. Use the
+   hyphenated canonical form when creating new KV secrets; existing
+   PascalCase secrets keep working without rename.
 
 Full rename table (legacy → canonical):
 
