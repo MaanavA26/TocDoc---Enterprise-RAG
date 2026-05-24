@@ -10,6 +10,7 @@ from datetime import datetime
 import traceback
 from src.utils.util import Payload, _as_turn
 from src.core.auth import AuthUtils
+from src.core.observability import RequestIDMiddleware
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +89,13 @@ async def auth_middleware(request: Request, call_next):
     if request.method == "OPTIONS":
         return await call_next(request)
     return await AuthUtils.auth_middleware(request, call_next)
+
+
+# Request-ID / correlation middleware. Registered LAST so it becomes the
+# OUTERMOST layer in Starlette's stack — that way it runs first on incoming
+# requests and `request.state.request_id` is set before auth runs (auth-failure
+# logs can include the request_id).
+app.add_middleware(RequestIDMiddleware)
 
 
 # ---------------------------------------------------------------------------
