@@ -18,6 +18,11 @@ from typing import Annotated
 from azure.core.exceptions import AzureError
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 
+# Absolute import — `errors` is a top-level module under services/ingestion/,
+# not inside the `admin/` package. Works in both runtime (uvicorn cwd =
+# services/ingestion/) and tests (sys.path includes services/ingestion/).
+from errors import default_error_responses
+
 from .auth import require_admin_token
 from .models import (
     DocumentDetailResponse,
@@ -28,9 +33,13 @@ from .search_admin_service import SearchAdminService, get_admin_service
 
 logger = logging.getLogger(__name__)
 
+# `responses=default_error_responses` documents the standard ErrorEnvelope
+# shape for every admin route in OpenAPI. Per-route decorators inherit it
+# automatically (FastAPI merges router-level responses with route-level).
 router = APIRouter(
     tags=["admin"],
     dependencies=[Depends(require_admin_token)],
+    responses=default_error_responses,
 )
 
 # Bounded executor — admin operations are read-heavy but not request-rate-bound.

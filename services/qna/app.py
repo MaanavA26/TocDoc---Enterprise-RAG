@@ -1,16 +1,21 @@
 import os
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from src.core.lifecycle import startup_event, shutdown_event
 import src.pipeline.qna_pipeline
 import logging
 import time
 from datetime import datetime
-import traceback
 from src.utils.util import Payload, _as_turn
 from src.core.auth import AuthUtils
 from src.core.observability import RequestIDMiddleware
+from src.core.errors import (
+    register_exception_handlers,
+    default_error_responses,
+    raise_api_error,
+    ApiErrorCode,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +102,16 @@ async def auth_middleware(request: Request, call_next):
 # logs can include the request_id).
 app.add_middleware(RequestIDMiddleware)
 
+# Structured error contract (P0-6). Installs three handlers:
+# - HTTPException → ErrorEnvelope (back-compat with string-detail callsites)
+# - RequestValidationError → 422 ErrorEnvelope with structured `errors` list
+# - Exception (catch-all) → 500 ErrorEnvelope with X-Request-ID header
+# All error responses include `request_id` in the body AND `X-Request-ID` header.
+# New code should `raise_api_error(code, message, status_code)` from
+# `src.core.errors` rather than `HTTPException(status, detail="msg")` so the
+# `code` field stays meaningful.
+register_exception_handlers(app)
+
 
 # ---------------------------------------------------------------------------
 # Health check
@@ -128,13 +143,13 @@ async def health_check():
 # ---------------------------------------------------------------------------
 # QnA endpoint
 # ---------------------------------------------------------------------------
-@app.post("/qna")
+@app.post("/qna", responses=default_error_responses)
 async def custom_rag_qna(payload: Payload, request: Request):
     """
     QnA handler endpoint.
 
     Accepts a `Payload` (see `src.utils.util.Payload`) and uses the normalized
-    conversation history to invoke `src.qna_pipeline.generate_answer`.
+    conversation history to invoke `src.pipeline.qna_pipeline.generate_answer`.
 
     Behavior:
         - Validates presence of required fields (query, bot_tag, fr_tag).
@@ -143,24 +158,22 @@ async def custom_rag_qna(payload: Payload, request: Request):
         - Passes `bot_tag` explicitly so the search layer enforces tenant isolation.
         - Calls the pipeline to obtain an answer and returns it verbatim.
 
-    Args:
-        payload: Request body containing conversation context and tags.
-        request: FastAPI request (used to access `request.app.state.azure`).
-
-    Returns:
-        The response returned by `src.qna_pipeline.generate_answer`.
+    Error contract (P0-6): all 4xx/5xx responses follow the `ErrorEnvelope`
+    shape with a stable `code` field. Internal pipeline failures now produce
+    a 500 with `code=INTERNAL_ERROR` — previously they leaked a 200 response
+    containing an `error` field. See `src.core.errors`.
 
     Raises:
-        HTTPException: 400 on validation errors; 500 on processing failures.
+        HTTPException: 400 on user errors; the global handler envelopes it.
     """
-    request_id = f"qna_{int(time.time() * 1000)}"
+    request_id = getattr(request.state, "request_id", None) or f"qna_{int(time.time() * 1000)}"
 
     # Retrieve activated Azure clients (OpenAI, Embeddings, AI Search).
     azure = request.app.state.azure
 
     # Basic payload presence validation (shape checked later).
     if payload is None:
-        raise HTTPException(status_code=400, detail="Missing request body")
+        raise_api_error(ApiErrorCode.INVALID_REQUEST, "Missing request body", 400)
 
     bot_tag = (payload.bot_tag or "").strip()
     fr_tag = (payload.fr_tag or "").strip()
@@ -170,7 +183,7 @@ async def custom_rag_qna(payload: Payload, request: Request):
     history = [_as_turn(t) for t in raw_history if t is not None]
 
     if not history:
-        raise HTTPException(status_code=400, detail="Bot list cannot be empty!")
+        raise_api_error(ApiErrorCode.INVALID_REQUEST, "Bot list cannot be empty", 400)
 
     query = history[-1]["user_query"]
 
@@ -179,39 +192,33 @@ async def custom_rag_qna(payload: Payload, request: Request):
     logger.info(f"[{request_id}] Bot tag: {bot_tag!r}")
     logger.info(f"[{request_id}] FR tag: {fr_tag!r}")
 
-    try:
-        start = time.time()
+    # Required field validations (kept explicit for clear 400s).
+    if not query:
+        raise_api_error(ApiErrorCode.INVALID_REQUEST, "Query cannot be empty", 400)
+    if not bot_tag:
+        raise_api_error(ApiErrorCode.INVALID_REQUEST, "Bot tag cannot be empty", 400)
+    if not fr_tag:
+        raise_api_error(ApiErrorCode.INVALID_REQUEST, "FR tag cannot be empty", 400)
 
-        # Required field validations (kept explicit for clear 400s).
-        if not query:
-            raise HTTPException(status_code=400, detail="Query cannot be empty")
-        if not bot_tag:
-            raise HTTPException(status_code=400, detail="Bot tag cannot be empty")
-        if not fr_tag:
-            raise HTTPException(status_code=400, detail="FR tag cannot be empty")
+    start = time.time()
+    logger.info(f"[{request_id}] Calling qna.generate_answer...")
 
-        logger.info(f"[{request_id}] Calling qna.generate_answer...")
-        ans = await src.pipeline.qna_pipeline.generate_answer(
-            query=query,
-            fr_mode=fr_tag,
-            bot_tag=bot_tag,
-            history=history,
-            azure=azure,
-        )
+    # No local exception swallowing — any pipeline failure propagates to the
+    # global handler, which produces an envelope-shaped 500 with X-Request-ID.
+    # The previous `raise HTTPException(500, f"QnA processing failed: {e}")`
+    # leaked exception text to the client; this path no longer does.
+    ans = await src.pipeline.qna_pipeline.generate_answer(
+        query=query,
+        fr_mode=fr_tag,
+        bot_tag=bot_tag,
+        history=history,
+        azure=azure,
+    )
 
-        elapsed = time.time() - start
-        logger.info(f"[{request_id}] QnA processing completed in {elapsed:.4f}s")
-        logger.info(f"[{request_id}] Response generated successfully")
-        return ans
-
-    except HTTPException:
-        # Re-raise FastAPI validation errors as-is for correct status propagation.
-        raise
-    except Exception as e:
-        # Preserve original error context in logs; return generic 500 outward.
-        logger.error(f"[{request_id}] Error in qna.generate_answer: {e}")
-        logger.error(f"[{request_id}] Traceback: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"QnA processing failed: {e}")
+    elapsed = time.time() - start
+    logger.info(f"[{request_id}] QnA processing completed in {elapsed:.4f}s")
+    logger.info(f"[{request_id}] Response generated successfully")
+    return ans
 
 
 # ---------------------------------------------------------------------------

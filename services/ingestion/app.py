@@ -10,6 +10,8 @@ from typing import Optional
 
 from observability import RequestIDMiddleware
 from admin.routes import router as admin_router
+from errors import register_exception_handlers, default_error_responses
+from middleware import limit_upload_size
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 # Stdout always; file logging only if LOG_FILE env var is set (local dev)
@@ -70,24 +72,11 @@ app.add_middleware(
 app.include_router(admin_router, prefix="/admin")
 
 
-@app.middleware("http")
-async def limit_upload_size(request: Request, call_next):
-    """Reject requests that exceed the configured upload size limit."""
-    max_size = 300 * 1024 * 1024  # 300 MB
-
-    if request.headers.get("content-length"):
-        content_length = int(request.headers["content-length"])
-        logger.info(f"Request content-length: {content_length} bytes")
-        if content_length > max_size:
-            logger.warning(
-                f"Request too large: {content_length} bytes exceeds {max_size} bytes"
-            )
-            raise HTTPException(
-                status_code=413,
-                detail="File too large. Maximum size is 300 MB.",
-            )
-
-    return await call_next(request)
+# `limit_upload_size` is defined in `middleware.py` so it can be imported by
+# tests without dragging in `custom_rag`'s heavy deps (PyMuPDF, langchain).
+# Registering via the decorator factory keeps the FastAPI semantics identical
+# to a top-level `@app.middleware("http")` decoration.
+app.middleware("http")(limit_upload_size)
 
 
 # Request-ID / correlation middleware. Registered LAST so it becomes the
@@ -95,6 +84,14 @@ async def limit_upload_size(request: Request, call_next):
 # `request.state.request_id` is available to all downstream middleware,
 # including future auth.
 app.add_middleware(RequestIDMiddleware)
+
+# Structured error contract (P0-6). Installs three handlers:
+# - HTTPException → ErrorEnvelope (back-compat with string-detail callsites)
+# - RequestValidationError → 422 ErrorEnvelope with structured `errors` list
+# - Exception (catch-all) → 500 ErrorEnvelope with X-Request-ID header
+# New code should `raise_api_error(code, message, status_code)` from `errors`
+# rather than `HTTPException(status, detail="msg")` so the `code` field stays meaningful.
+register_exception_handlers(app)
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -106,7 +103,7 @@ async def health_check():
     return {"status": "healthy"}
 
 
-@app.post("/upload", summary="Ingest a PDF document or folder")
+@app.post("/upload", summary="Ingest a PDF document or folder", responses=default_error_responses)
 async def upload_file(
     bot_tag: str = Query(..., description="Tenant / bot identifier"),
     filepath: str = Query(..., description="Absolute file or folder path on the server"),

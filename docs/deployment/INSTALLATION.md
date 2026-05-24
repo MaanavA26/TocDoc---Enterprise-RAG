@@ -242,12 +242,13 @@ curl -i -H "X-Request-ID: ;bad;value" \
 #  → expect: a fresh UUID4 (NOT `;bad;value`).
 ```
 
-A direct check that `X-Request-ID` rides 4xx is not always trivial post-deploy
-(the public endpoints require auth tokens for non-`/health` paths), so the
-2xx smoke checks above plus inspection of `request_started` /
-`request_completed` log records in Log Analytics are the canonical
-verification path. The known unhandled-exception 5xx gap above is not
-operator-debuggable until P0-6 lands.
+A direct check that `X-Request-ID` rides 4xx/5xx is not always trivial
+post-deploy (the public endpoints require auth tokens for non-`/health`
+paths), so the 2xx smoke checks above plus inspection of `request_started`
+/ `request_completed` log records in Log Analytics are the canonical
+verification path. With P0-6 (error-contract layer) shipped, every error
+response — including unhandled-exception 500s — carries `X-Request-ID` in
+both the body (`error.request_id`) and the response header.
 
 ### Querying logs by request ID
 
@@ -278,6 +279,76 @@ By design, the structured events do not contain:
 
 If you need richer per-request debugging in development, set `LOG_LEVEL=DEBUG`
 on the container app — but **never** in production.
+
+## Error responses
+
+Every 4xx and 5xx response from both services follows a single envelope:
+
+```json
+{
+  "error": {
+    "code": "INVALID_REQUEST",
+    "message": "Human-readable safe message",
+    "request_id": "0d9c8d0e-8f7b-4a4e-9f6f-2a8a3e6f4d12"
+  }
+}
+```
+
+The accompanying response also includes `X-Request-ID` in the headers,
+with the same value as `error.request_id`. Operators correlate a client
+report with server logs by grepping Log Analytics for that ID.
+
+### Error codes
+
+The `code` field is part of the public API contract. The following codes
+are returned today; new codes are added only when concrete callsites need
+to distinguish a new failure category:
+
+| Code | Typical status | Meaning |
+|---|---|---|
+| `INVALID_REQUEST` | 400, 413 | User-supplied input violates a required constraint (empty bot_tag, file too large, etc.) |
+| `UNAUTHORIZED` | 401, 403 | Missing/invalid authentication credentials (JWT, admin token) |
+| `NOT_FOUND` | 404 | The requested resource does not exist in the caller's scope |
+| `VALIDATION_ERROR` | 422 | Request body or query parameters failed Pydantic validation. Includes a structured `errors` field with per-field detail. |
+| `UPSTREAM_UNAVAILABLE` | 503 | An Azure dependency (OpenAI, Cognitive Search, Document Intelligence) is unreachable or returning errors |
+| `INTERNAL_ERROR` | 500 | Unhandled server-side failure. Raw exception text is never returned; the structured `request_failed` log event in Log Analytics carries the matching `request_id` for server-side debugging. |
+
+### Validation-error shape
+
+For 422 responses only, the envelope includes a structured `errors` field:
+
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Request validation failed",
+    "request_id": "...",
+    "errors": [
+      {
+        "loc": ["body", "bot_tag"],
+        "type": "string_type",
+        "msg": "Input should be a valid string"
+      }
+    ]
+  }
+}
+```
+
+The per-field messages are length-capped (200 chars) and **never echo
+back the input value** — only the field location, error type, and a
+safe message.
+
+### What does NOT appear in error responses
+
+- Raw exception text or stack traces (those go to server logs only)
+- Azure AD tokens, API keys, or any secret values
+- The user's request body, conversation history, or document content
+- The user's identity claims (`upn`, `email`, etc.)
+
+If client tooling treated the pre-P0-6 QnA response as a success on
+internal failure (a 200 with an `error` field embedded in the answer
+shape), it must now handle a 500 with the envelope above — that is a
+deliberate contract correction.
 
 ## Estimated installation time
 
