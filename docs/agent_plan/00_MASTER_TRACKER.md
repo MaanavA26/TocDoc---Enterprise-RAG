@@ -9,14 +9,14 @@
 
 ---
 
-## Current codebase state (as of 2026-05-09)
+## Current codebase state (as of 2026-05-25)
 
 | Service | Entry point | Key concern |
 |---------|-------------|-------------|
 | `services/ingestion` | `app.py` → `custom_rag.py` | PDF ingestion, chunking, Azure Search indexing |
 | `services/qna` | `app.py` → `src/pipeline/qna_pipeline.py` | Hybrid retrieval, rephrasal, LLM answer generation |
 
-Both services are functional and have been hardened against most of the original P0 blockers (6 of 8 shipped). Two P0 items (P0-6 API hardening, P0-7 env-naming normalization) and the P1 workstreams below remain open.
+All 8 original P0 blockers have shipped. Phase 2 read-only workstreams (Admin API, Observability) are on `main`. The structured error contract and env-var normalization landed in PRs #10 and #11. Active work continues on Phase 2 destructive endpoints, pipeline-stage observability events, deployment validation, and CI gates.
 
 ---
 
@@ -24,19 +24,20 @@ Both services are functional and have been hardened against most of the original
 
 | Phase | Description | Items | Status |
 |-------|-------------|-------|--------|
-| **P0** | Security, correctness, and production hardening | 8 | `6/8 SHIPPED` (P0-6, P0-7 remaining) |
-| **P1** | Enterprise feature completeness | 5 | `1/5 SHIPPED` (P1-4 IaC) |
+| **P0** | Security, correctness, and production hardening | 8 | `8/8 SHIPPED` ✅ |
+| **P1** | Enterprise feature completeness | 5 | `2/5 SHIPPED` (P1-1 read-only piece, P1-4 Bicep) |
+| **Phase 2** | Operability (Admin API, Observability, Deployment Validation, bot_tag scope) | 4 | `A PR-1 + B PR-1 SHIPPED` · A PR-2 / B PR-2 / C / D pending |
 | **P2** | Product differentiation and commercial packaging | 2 | `BLOCKED on P1` |
 | **P3** | Agentic AI layer (LangGraph) | 6 | `PLANNED` |
 | **P4** | Platform completeness (connectors, SDK, Teams bot) | 4 | `PLANNED` |
 
-Phase 2 productization workstreams (Admin API, Observability, Deployment Validation, scoping decisions) are specified under `docs/architect_phase_2/` and are tracked through their individual PRs while open. They will appear on this dashboard once merged.
+Phase 2 workstream specs live under `docs/architect_phase_2/`; entries appear in this tracker only after the corresponding PR merges to `main`.
 
 ---
 
 ## P0 — Production blockers (fix before any client delivery)
 
-**6 of 8 shipped. P0-6 and P0-7 remain.**
+**8 of 8 shipped.** ✅
 
 | # | Backlog ref | Title | Primary files | Status |
 |---|-------------|-------|---------------|--------|
@@ -45,11 +46,11 @@ Phase 2 productization workstreams (Admin API, Observability, Deployment Validat
 | P0-3 | `03_CONCURRENCY` | Remove global `bot_queries` request state | `services/qna/src/pipeline/qna_pipeline.py`, `app.py` | `SHIPPED (PR #2)` |
 | P0-4 | `04_INGESTION` | Deterministic chunk IDs and document lifecycle | `services/ingestion/custom_rag.py` | `SHIPPED (PR #1)` |
 | P0-5 | `05_RETRIEVAL` | True token-aware chunking (replace word-count) | `services/ingestion/custom_rag.py` | `SHIPPED (PR #1)` |
-| P0-6 | `06_API` | Pydantic response contracts, structured errors | `services/qna/app.py`, `services/ingestion/app.py` | `TODO` |
-| P0-7 | `07_CONFIG` | Normalize env var naming across both services | `services/qna/src/config/config.py`, both `.env.example` files | `TODO` |
+| P0-6 | `06_API` | Structured error envelope, X-Request-ID on every error, no exception text leaked | `services/qna/src/core/errors.py`, `services/ingestion/errors.py`, `app.py` in both services | `SHIPPED (PR #10)` |
+| P0-7 | `07_CONFIG` | Canonical UPPER_SNAKE env vars + legacy dual-read + KV secret-name mapping | `services/qna/src/config/config.py`, `infra/main.bicep`, `.env.example` files | `SHIPPED (PR #11)` |
 | P0-8 | `08_RUNTIME` | Production-safe CORS, logging, container defaults | `services/qna/app.py`, both `Dockerfile`s | `SHIPPED (PR #3)` |
 
-See `01_P0_HARDENING.md` for exact file locations, line numbers, and implementation detail.
+See `01_P0_HARDENING.md` for the original planning detail.
 
 ---
 
@@ -57,13 +58,26 @@ See `01_P0_HARDENING.md` for exact file locations, line numbers, and implementat
 
 | # | Backlog ref | Title | Primary files | Status |
 |---|-------------|-------|---------------|--------|
-| P1-1 | `09_OBSERVABILITY` | Azure Monitor telemetry, audit logs, correlation IDs | new module in each service | `TODO` |
-| P1-2 | `10_PRODUCT` | Admin APIs for index and tenant management | new `services/ingestion/admin/` package | `TODO` |
+| P1-1 | `09_OBSERVABILITY` | Azure Monitor telemetry, audit logs, correlation IDs | `services/qna/src/core/observability.py`, `services/ingestion/observability.py` | `PARTIAL — SHIPPED (PR #8)` for request-ID middleware + `log_event` helper; pipeline-stage events still pending |
+| P1-2 | `10_PRODUCT` | Admin APIs for index and tenant management | `services/ingestion/admin/` package | `PARTIAL — SHIPPED (PR #7)` for read-only endpoints; destructive endpoints + reindex still pending |
 | P1-3 | `11_CONNECTORS` | Blob Storage + SharePoint connector ingestion | new `services/ingestion/connectors/` | `PENDING` |
 | P1-4 | `12_PLATFORM` | Azure Bicep IaC, GitHub Actions CI/CD, ACA deployment | `infra/main.bicep`, `infra/parameters/`, `docs/deployment/INSTALLATION.md` | `PARTIAL — SHIPPED (PR #5)` for Bicep + install runbook; CI/CD GitHub Actions still pending |
-| P1-5 | `13_QUALITY` | Expanded test suite, CI quality gates, release checks | `services/qna/test/`, `services/ingestion/test/` | `PENDING` (per-PR tests added on the merged P0 work; no CI quality gates yet) |
+| P1-5 | `13_QUALITY` | Expanded test suite, CI quality gates, release checks | `services/qna/test/`, `services/ingestion/test/`, `.github/workflows/` | `PENDING` |
 
-See `02_P1_ENTERPRISE.md` for implementation guides and `docs/architect_phase_2/` for the active Phase 2 specs covering P1-1 and P1-2.
+See `02_P1_ENTERPRISE.md` for original implementation guides and `docs/architect_phase_2/` for the active Phase 2 specs covering P1-1 and P1-2.
+
+---
+
+## Phase 2 — Operability, control plane, product readiness
+
+Active workstream specs in `docs/architect_phase_2/`. Entries appear here only when the corresponding PR merges to `main`.
+
+| Workstream | Spec | Status |
+|---|---|---|
+| **A** Admin API | `01_ADMIN_API_SPEC.md` | `PR-1 SHIPPED (PR #7)` — read-only `GET /admin/documents`, `/admin/documents/{id}`, `/admin/index/stats` with `bot_tag` scope, `X-Admin-Token` interim auth, pagination via `.by_page()`, OData filter escape. PR-2 (destructive endpoints) pending. |
+| **B** Observability baseline | `02_OBSERVABILITY_SPEC.md` | `PR-1 SHIPPED (PR #8)` — `RequestIDMiddleware` in both services, `log_event` helper, lifecycle events. P0-6 (PR #10) closed the deferred X-Request-ID-on-5xx gap. PR-2 (pipeline-stage events) pending. |
+| **C** Deployment validation | `03_DEPLOYMENT_VALIDATION_SPEC.md` | `PENDING` (`scripts/validate_deployment.sh`) |
+| **D** bot_tag scope/naming | `04_BOT_TAG_DECISION_RECORD.md` | `DECIDED` — keep `bot_tag` internally; expose as `workspace_id` in future public APIs. Validation regex enforced in admin routes (PR #7). |
 
 ---
 
@@ -149,10 +163,14 @@ See `05_CODEBASE_CONTEXT.md` for a complete file-by-file guide.
 
 | Path | What it does |
 |------|-------------|
-| `services/qna/src/core/auth.py` | JWT middleware (RS256 validation lives here after P0-1) |
-| `services/qna/src/pipeline/qna_pipeline.py` | Main QnA orchestration (request-scoped after P0-3) |
+| `services/qna/src/core/auth.py` | JWT middleware (RS256 validation after P0-1; envelope shape after P0-6) |
+| `services/qna/src/core/errors.py` / `services/ingestion/errors.py` | Structured error contract — `ErrorEnvelope`, `ApiErrorCode`, `raise_api_error`, `build_error_response`, exception handlers (P0-6) |
+| `services/qna/src/core/observability.py` / `services/ingestion/observability.py` | `RequestIDMiddleware` + `log_event` (Phase 2 B PR-1) |
+| `services/qna/src/config/config.py` | Canonical UPPER_SNAKE env vars + legacy dual-read + KV secret-name mapping (P0-7) |
+| `services/qna/src/pipeline/qna_pipeline.py` | Main QnA orchestration (request-scoped after P0-3; raises on internal failure after P0-6) |
 | `services/qna/src/services/search_service.py` | Hybrid Azure Search call (filters by `bot_tag` after P0-2) |
-| `services/qna/src/config/config.py` | Pydantic Settings — env var naming still inconsistent (P0-7 open) |
 | `services/ingestion/custom_rag.py` | Chunking + indexing (deterministic IDs + token chunking after P0-4 / P0-5) |
-| `services/qna/app.py` | FastAPI app — Pydantic response models + structured errors still open (P0-6) |
-| `services/ingestion/app.py` | FastAPI app — Pydantic response models + structured errors still open (P0-6) |
+| `services/ingestion/admin/` | Read-only admin API (Phase 2 A PR-1) — routes, models, service layer, X-Admin-Token auth |
+| `services/ingestion/middleware.py` | Upload size limit middleware (extracted from app.py during P0-6 for testability) |
+| `services/qna/app.py` / `services/ingestion/app.py` | FastAPI apps — full middleware stack: CORS → auth (qna) / upload-limit (ingestion) → RequestIDMiddleware (outermost) → routes; error handlers registered via `register_exception_handlers(app)` |
+| `infra/main.bicep` | Container Apps + supporting Azure resources; env vars wire to canonical names |
