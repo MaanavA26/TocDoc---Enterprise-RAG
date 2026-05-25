@@ -26,15 +26,15 @@ from pydantic import BaseModel
 # config module enforces a fixed env-var contract at import time. Values
 # are deliberately fake; no Azure call is ever attempted in these tests.
 # ---------------------------------------------------------------------------
-os.environ.setdefault("AzureOpenaiAccountEndpoint", "https://fake.openai.example.com")
-os.environ.setdefault("TocdocOpenAIKey", "fake-openai-key")
-os.environ.setdefault("AzureOpenaiApiVersion", "2024-02-01")
+os.environ.setdefault("AZURE_OPENAI_ENDPOINT", "https://fake.openai.example.com")
+os.environ.setdefault("AZURE_OPENAI_KEY", "fake-openai-key")
+os.environ.setdefault("AZURE_OPENAI_VERSION", "2024-02-01")
 os.environ.setdefault("AZURE_OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
-os.environ.setdefault("AzureSearchEndpoint", "https://fake.search.example.com")
-os.environ.setdefault("AzureSearchKey", "fake-search-key")
+os.environ.setdefault("AZURE_SEARCH_ENDPOINT", "https://fake.search.example.com")
+os.environ.setdefault("AZURE_SEARCH_KEY", "fake-search-key")
 os.environ.setdefault("INDEX_NAME", "fake-index")
 os.environ.setdefault("AZURE_KEY_VAULT", "fakevault")
-os.environ.setdefault("TocdocSPTenantID", "11111111-1111-1111-1111-111111111111")
+os.environ.setdefault("AZURE_TENANT_ID", "11111111-1111-1111-1111-111111111111")
 os.environ.setdefault("AUDIENCE_ID", "api://fake-audience")
 
 # Make src/ importable when running pytest from services/qna/

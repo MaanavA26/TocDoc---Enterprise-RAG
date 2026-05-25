@@ -251,13 +251,15 @@ resource ingestionApp 'Microsoft.App/containerApps@2023-11-02-preview' = {
 }
 
 // ── QnA Container App ─────────────────────────────────────────────────────────
-// Env var names match exactly what services/qna/src/config/config.py reads.
-// The QnA service validates AzureOpenaiAccountEndpoint, TocdocOpenAIKey,
-// AzureOpenaiApiVersion, AZURE_OPENAI_EMBEDDING_MODEL, AzureSearchEndpoint,
-// AzureSearchKey, and INDEX_NAME at import time (before Key Vault loading).
-// SP credentials (TocdocSPClientID / TocdocSPSecretValue) are the current
-// auth path for Key Vault; managed identity role assignment below is
-// future-ready for a ManagedIdentityCredential migration.
+// Env var names are canonical UPPER_SNAKE — matches services/qna/src/config/
+// config.py and the ingestion service. Pre-P0-7 deployments using PascalCase
+// (AzureOpenaiAccountEndpoint, TocdocOpenAIKey, etc.) still work because the
+// config module's _get_env helper accepts the legacy names with a one-shot
+// deprecation warning. New deployments should use the canonical names only.
+//
+// AZURE_CLIENT_ID / AZURE_CLIENT_SECRET / AZURE_TENANT_ID match the Azure SDK
+// DefaultAzureCredential conventions, so a future switch from
+// ClientSecretCredential to DefaultAzureCredential requires no rename.
 resource qnaApp 'Microsoft.App/containerApps@2023-11-02-preview' = {
   name: qnaAppName
   location: location
@@ -266,10 +268,10 @@ resource qnaApp 'Microsoft.App/containerApps@2023-11-02-preview' = {
     managedEnvironmentId: containerEnv.id
     configuration: {
       secrets: [
-        { name: 'tocdoc-openai-key',   value: openAiApiKey    }
+        { name: 'azure-openai-key',    value: openAiApiKey    }
         { name: 'azure-search-key',    value: searchApiKey    }
-        { name: 'sp-client-id',        value: spClientId      }
-        { name: 'sp-client-secret',    value: spClientSecret  }
+        { name: 'azure-client-id',     value: spClientId      }
+        { name: 'azure-client-secret', value: spClientSecret  }
       ]
       ingress: {
         external: true
@@ -283,22 +285,22 @@ resource qnaApp 'Microsoft.App/containerApps@2023-11-02-preview' = {
           image: 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
           resources: { cpu: json('0.5'), memory: '1Gi' }
           env: [
-            // ── Plain env vars ──
-            { name: 'AzureOpenaiAccountEndpoint',    value: openAi.properties.endpoint }
-            { name: 'AzureOpenaiApiVersion',         value: openAiApiVersion }
-            { name: 'AzureOpenaiLlmModel',           value: openAiLlmModel }
+            // ── Plain env vars (canonical UPPER_SNAKE) ──
+            { name: 'AZURE_OPENAI_ENDPOINT',         value: openAi.properties.endpoint }
+            { name: 'AZURE_OPENAI_VERSION',          value: openAiApiVersion }
+            { name: 'AZURE_OPENAI_LLM_MODEL',        value: openAiLlmModel }
             { name: 'AZURE_OPENAI_EMBEDDING_MODEL',  value: openAiEmbeddingModel }
-            { name: 'AzureSearchEndpoint',           value: 'https://${search.name}.search.windows.net' }
+            { name: 'AZURE_SEARCH_ENDPOINT',         value: 'https://${search.name}.search.windows.net' }
             { name: 'INDEX_NAME',                    value: searchIndexName }
             { name: 'AUDIENCE_ID',                   value: audienceClientId }
             { name: 'AZURE_KEY_VAULT',               value: keyVault.name }
-            { name: 'TocdocSPTenantID',              value: tenantId }
+            { name: 'AZURE_TENANT_ID',               value: tenantId }
             { name: 'LOG_LEVEL',                     value: 'INFO' }
-            // ── Secret env vars ──
-            { name: 'TocdocOpenAIKey',      secretRef: 'tocdoc-openai-key'  }
-            { name: 'AzureSearchKey',       secretRef: 'azure-search-key'   }
-            { name: 'TocdocSPClientID',     secretRef: 'sp-client-id'       }
-            { name: 'TocdocSPSecretValue',  secretRef: 'sp-client-secret'   }
+            // ── Secret env vars (canonical UPPER_SNAKE) ──
+            { name: 'AZURE_OPENAI_KEY',     secretRef: 'azure-openai-key'    }
+            { name: 'AZURE_SEARCH_KEY',     secretRef: 'azure-search-key'    }
+            { name: 'AZURE_CLIENT_ID',      secretRef: 'azure-client-id'     }
+            { name: 'AZURE_CLIENT_SECRET',  secretRef: 'azure-client-secret' }
           ]
         }
       ]
@@ -311,8 +313,9 @@ resource qnaApp 'Microsoft.App/containerApps@2023-11-02-preview' = {
 // ── Key Vault role assignments (future ManagedIdentityCredential migration) ───
 // Grants each app's system-assigned identity the ability to read secret values.
 // The current QnA code path still uses ClientSecretCredential (wired above as
-// TocdocSPClientID / TocdocSPSecretValue). These assignments are infrastructure
-// preparation for a future code migration — they do not affect current behavior.
+// AZURE_CLIENT_ID / AZURE_CLIENT_SECRET / AZURE_TENANT_ID). These assignments
+// are infrastructure preparation for a future code migration — they do not
+// affect current behavior.
 
 resource kvRoleIngestion 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(keyVault.id, ingestionApp.id, kvSecretsUserRoleId)

@@ -107,11 +107,11 @@ def url(p:str) -> str:
 
 def _set_kv_env(monkeypatch):
     """Set the Key Vault style envs the Azure client expects."""
-    monkeypatch.setenv("AzureOpenaiApiVersion", "2024-06-01")
-    monkeypatch.setenv("AzureOpenaiAccountEndpoint", "https://fake-openai.example.com")
-    monkeypatch.setenv("TocdocOpenAIKey", "fake-openai-key")
-    monkeypatch.setenv("AzureSearchEndpoint", "https://fake-search.example.com")
-    monkeypatch.setenv("AzureSearchKey", "fake-search-key")
+    monkeypatch.setenv("AZURE_OPENAI_VERSION", "2024-06-01")
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://fake-openai.example.com")
+    monkeypatch.setenv("AZURE_OPENAI_KEY", "fake-openai-key")
+    monkeypatch.setenv("AZURE_SEARCH_ENDPOINT", "https://fake-search.example.com")
+    monkeypatch.setenv("AZURE_SEARCH_KEY", "fake-search-key")
 
 # ---------------------------------------------------------------------------
 # Global fixtures: prevent real cloud calls and attach FakeAzure
@@ -390,7 +390,7 @@ async def test_azure_clients_missing_required_config(monkeypatch):
     from src.clients.azure_clients import AzureOpenAIHandler
 
     _set_kv_env(monkeypatch)
-    monkeypatch.delenv("AzureOpenaiApiVersion", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_VERSION", raising=False)
 
     h = AzureOpenAIHandler()
 
