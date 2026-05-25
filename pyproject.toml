@@ -1,0 +1,35 @@
+# Root-level config for tooling that spans both services.
+# Each service still has its own requirements.txt and (optionally) pytest.ini;
+# this file holds only the cross-cutting lint/format configuration so a single
+# CI step covers both services.
+
+[tool.ruff]
+target-version = "py310"
+line-length = 110
+extend-exclude = [
+    # Test fixtures and tiny scripts that don't benefit from lint pressure.
+    "services/*/test/__init__.py",
+]
+
+[tool.ruff.lint]
+# Intentionally narrow ruleset for the "turn CI on" PR:
+#   E9   — syntax errors
+#   F63  — invalid percent format / f-string issues
+#   F7   — syntax errors in code blocks (else after for-else, etc.)
+#   F82  — undefined name (the most common importability bug)
+# This catches every error that would crash imports or hide undefined names
+# without flagging style preferences across hundreds of existing lines.
+# Future PRs can expand to E,F,W,I,UP once the suite is green and we have
+# time to clean up the inevitable findings.
+select = ["E9", "F63", "F7", "F82"]
+
+# A few well-known directories/files where strict rules don't add value.
+[tool.ruff.lint.per-file-ignores]
+"**/test/*.py" = ["F841"]  # local unused vars in test fixtures are common and harmless
+
+[tool.ruff.format]
+# Match `black`'s default behavior for new files; the format step runs in
+# `--check` mode so existing files are not rewritten on PR — only flagged.
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"

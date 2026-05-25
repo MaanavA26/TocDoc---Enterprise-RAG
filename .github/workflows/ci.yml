@@ -1,0 +1,98 @@
+name: ci
+
+# Runs on every PR targeting main and every push to main. Two jobs:
+#   - lint  → ruff (minimal ruleset; ratchet up in a follow-up PR)
+#   - test  → pytest across both services in parallel
+#
+# Cancels superseded runs on the same ref so push-storms don't queue.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint (ruff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      # ruff replaces flake8 + isort + pyupgrade + black-format-check in one tool.
+      # Pin the version so a new ruff release can't fail an unrelated PR with new rules.
+      - name: Install ruff
+        run: pip install ruff==0.6.9
+
+      # Initial ruleset is intentionally minimal — only true errors that block
+      # importability. Style nits and refactor suggestions land in a follow-up
+      # PR after the suite is green on at least two merges. See pyproject.toml.
+      - name: Lint
+        run: ruff check services/qna services/ingestion
+
+      - name: Format check
+        run: ruff format --check services/qna services/ingestion
+
+  test:
+    name: test (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [qna, ingestion]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          # Per-service pip cache keyed on each service's requirements files.
+          cache-dependency-path: |
+            services/${{ matrix.service }}/requirements.txt
+            services/${{ matrix.service }}/requirements-dev.txt
+
+      # PyMuPDF + langchain image pipeline drag in libs that need system
+      # packages on stock Ubuntu runners. Only the ingestion leg needs them;
+      # qna's deps are pure-Python after wheels.
+      - name: Install ingestion system deps
+        if: matrix.service == 'ingestion'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgl1 libglib2.0-0
+
+      - name: Install service requirements
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r services/${{ matrix.service }}/requirements.txt
+          # ingestion has a requirements-dev.txt; qna has pytest in requirements.txt
+          if [ -f services/${{ matrix.service }}/requirements-dev.txt ]; then
+            python -m pip install -r services/${{ matrix.service }}/requirements-dev.txt
+          fi
+          # Ensure pytest is present even if requirements.txt did not pin it.
+          python -m pip install pytest pytest-asyncio
+
+      # `-q` keeps output compact; failures still show full traceback.
+      # No coverage gate in this PR (deferred — see PR body).
+      - name: Run pytest
+        working-directory: services/${{ matrix.service }}
+        run: pytest -q
