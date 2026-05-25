@@ -1,35 +1,118 @@
-# Root-level config for tooling that spans both services.
-# Each service still has its own requirements.txt and (optionally) pytest.ini;
-# this file holds only the cross-cutting lint/format configuration so a single
-# CI step covers both services.
+# Root-level configuration for tooling that spans both services:
+#   - ruff (lint + format)
+#   - bandit (security)
+#   - coverage (output config)
+#
+# Each service still has its own requirements.txt and pytest.ini; this file
+# holds only the cross-cutting tool configuration.
 
+# ---------------------------------------------------------------------------
+# ruff — lint + format
+# ---------------------------------------------------------------------------
 [tool.ruff]
 target-version = "py310"
 line-length = 110
 extend-exclude = [
-    # Test fixtures and tiny scripts that don't benefit from lint pressure.
+    # Test fixtures whose lint noise is not load-bearing.
     "services/*/test/__init__.py",
 ]
 
 [tool.ruff.lint]
-# Intentionally narrow ruleset for the "turn CI on" PR:
-#   E9   — syntax errors
-#   F63  — invalid percent format / f-string issues
-#   F7   — syntax errors in code blocks (else after for-else, etc.)
-#   F82  — undefined name (the most common importability bug)
-# This catches every error that would crash imports or hide undefined names
-# without flagging style preferences across hundreds of existing lines.
-# Future PRs can expand to E,F,W,I,UP once the suite is green and we have
-# time to clean up the inevitable findings.
-select = ["E9", "F63", "F7", "F82"]
+# Production-grade rule selection matching common public Python projects:
+#   E    — pycodestyle errors (whitespace, indentation)
+#   F    — pyflakes (unused imports, undefined names — load-bearing)
+#   W    — pycodestyle warnings
+#   I    — isort (import ordering)
+#   UP   — pyupgrade (modern syntax: dict[str,str], `X | None`, f-strings)
+#   B    — flake8-bugbear (common bug patterns: B008 mutable default, B904 raise from)
+#   SIM  — flake8-simplify (constant-folding, single-statement collapsing)
+#
+# Findings that fire on legacy files (notably the older custom_rag.py and
+# qna_pipeline.py) are addressed in this PR either by direct fix or by a
+# scoped per-file-ignore below — never by a blanket repo-wide ignore.
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 
-# A few well-known directories/files where strict rules don't add value.
+# Targeted ignores for known patterns the codebase explicitly endorses.
+# Each must have a justification comment; reviewers should push back on
+# any unjustified ignore added later.
+ignore = [
+    # E501 — line-too-long. Long log lines and structured-event JSON payloads
+    # are common and unhelpful to wrap. We still enforce line-length=110 at
+    # the format step, so this only suppresses lint *complaints* about a few
+    # long URL/literal lines.
+    "E501",
+]
+
 [tool.ruff.lint.per-file-ignores]
-"**/test/*.py" = ["F841"]  # local unused vars in test fixtures are common and harmless
+# Test fixtures legitimately use unused locals, `assert` statements
+# without value-binding, and other patterns that don't apply to
+# production code.
+"**/test/*.py" = [
+    "F841",  # local variable assigned but never used (common in mock setups)
+    "B011",  # `assert False` (used intentionally as guard rails)
+    "E402",  # module-level import not at top — tests set env vars before imports by design
+]
+
+# custom_rag.py imports the langchain ecosystem with patterns that ruff's
+# bugbear flags (mutable defaults inside dependency code). Allow these
+# narrowly until a follow-up refactor PR.
+"services/ingestion/custom_rag.py" = [
+    "B008",  # function-call-in-default-argument (legacy LangChain initialization)
+]
+
+# Older qna_pipeline file uses pattern shrugs ruff dislikes. Targeted, not blanket.
+"services/qna/src/pipeline/qna_pipeline.py" = [
+    "SIM117",  # combine `with` statements — readability call, not always right
+]
 
 [tool.ruff.format]
-# Match `black`'s default behavior for new files; the format step runs in
-# `--check` mode so existing files are not rewritten on PR — only flagged.
 quote-style = "double"
 indent-style = "space"
 line-ending = "lf"
+
+# ---------------------------------------------------------------------------
+# bandit — Python AST security scan
+# ---------------------------------------------------------------------------
+[tool.bandit]
+# Test files frequently use patterns that look like security issues but
+# aren't (e.g., hard-coded fake tokens in fixtures, MD5 in test data).
+# Production code does NOT get these passes.
+exclude_dirs = ["**/test", "**/__pycache__"]
+
+# Suppress findings that have a documented context in the source. Each
+# `# nosec B<id>: <reason>` line in code must be reviewed; this section
+# only enumerates rule-class suppressions for known false-positive
+# categories.
+skips = [
+    # B404 / B603 — `subprocess` imports / usage. Neither service uses
+    # subprocess at runtime; if a future test fixture does, it will get
+    # a per-line `# nosec` rather than a blanket skip. Listed for clarity
+    # so reviewers know what is NOT suppressed.
+]
+
+# ---------------------------------------------------------------------------
+# coverage — output config (no threshold this PR; see ci.yml)
+# ---------------------------------------------------------------------------
+[tool.coverage.run]
+branch = true
+source = ["."]
+omit = [
+    "*/test/*",
+    "*/__pycache__/*",
+    "*/.venv/*",
+]
+
+[tool.coverage.report]
+# `show_missing` in the terminal report so reviewers can spot uncovered
+# branches without downloading the artifact.
+show_missing = true
+skip_covered = false
+precision = 1
+# These exclusion patterns let intentionally unreachable code (defensive
+# branches, `if TYPE_CHECKING:` blocks) avoid dragging the score down.
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]

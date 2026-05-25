@@ -1,10 +1,17 @@
 name: ci
 
-# Runs on every PR targeting main and every push to main. Two jobs:
-#   - lint  → ruff (minimal ruleset; ratchet up in a follow-up PR)
-#   - test  → pytest across both services in parallel
+# Production-grade CI gates for TocDoc.
 #
-# Cancels superseded runs on the same ref so push-storms don't queue.
+# Job graph:
+#   lint       → ruff lint + format (production ruleset)
+#   security   → bandit (Python AST scan) + pip-audit (CVE check on installed deps)
+#   bicep      → az bicep build (validate IaC compiles)
+#   shell      → shellcheck (validate any scripts/*.sh in the repo)
+#   test       → matrix over {qna, ingestion}; pytest with coverage, artifact uploaded
+#
+# Coverage is computed but NOT gated this round. The architect can set a
+# threshold in a follow-up PR after the baseline is observable. Concurrency
+# cancels superseded runs on the same ref.
 
 on:
   pull_request:
@@ -19,7 +26,17 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  PYTHON_VERSION: "3.10"
+  RUFF_VERSION: "0.6.9"
+  BANDIT_VERSION: "1.7.10"
+  PIP_AUDIT_VERSION: "2.7.3"
+  PYTEST_COV_VERSION: "5.0.0"
+
 jobs:
+  # ---------------------------------------------------------------------------
+  # Lint — ruff (lint + format check)
+  # ---------------------------------------------------------------------------
   lint:
     name: lint (ruff)
     runs-on: ubuntu-latest
@@ -31,27 +48,111 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
-      # ruff replaces flake8 + isort + pyupgrade + black-format-check in one tool.
-      # Pin the version so a new ruff release can't fail an unrelated PR with new rules.
       - name: Install ruff
-        run: pip install ruff==0.6.9
+        run: pip install "ruff==${{ env.RUFF_VERSION }}"
 
-      # Initial ruleset is intentionally minimal — only true errors that block
-      # importability. Style nits and refactor suggestions land in a follow-up
-      # PR after the suite is green on at least two merges. See pyproject.toml.
-      - name: Lint
+      - name: ruff check
         run: ruff check services/qna services/ingestion
 
-      - name: Format check
+      - name: ruff format --check
         run: ruff format --check services/qna services/ingestion
 
+  # ---------------------------------------------------------------------------
+  # Security — bandit + pip-audit
+  # ---------------------------------------------------------------------------
+  security:
+    name: security (bandit + pip-audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install security tools
+        run: pip install "bandit==${{ env.BANDIT_VERSION }}" "pip-audit==${{ env.PIP_AUDIT_VERSION }}"
+
+      # bandit static analysis. `-r` recursive; skip the test directories
+      # (those are allowed to use `# nosec` patterns like hardcoded test
+      # tokens, MD5 in fixtures, etc.). Config in pyproject.toml `[tool.bandit]`.
+      - name: bandit (Python AST security scan)
+        run: bandit -r services/qna services/ingestion -x '*/test/*'
+
+      # pip-audit checks INSTALLED packages against the GitHub Advisory
+      # Database. Runs against each service's requirements.txt separately
+      # so a CVE in one service's dep doesn't mask the other.
+      # Use `--strict` to fail the job on any known vulnerability.
+      - name: pip-audit (QnA dependencies)
+        run: pip-audit --requirement services/qna/requirements.txt --strict
+        continue-on-error: false
+
+      - name: pip-audit (ingestion dependencies)
+        # libgl1 / libglib2.0-0 not needed here — pip-audit only inspects the
+        # requirements file, doesn't import the packages.
+        run: pip-audit --requirement services/ingestion/requirements.txt --strict
+        continue-on-error: false
+
+  # ---------------------------------------------------------------------------
+  # Bicep — validate IaC template compiles
+  # ---------------------------------------------------------------------------
+  bicep:
+    name: bicep build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # az CLI is preinstalled on ubuntu-latest. Ensure bicep is current
+      # (preinstalled bicep can lag); this is fast and avoids cryptic
+      # "BCP000" version-mismatch errors during build.
+      - name: Upgrade az bicep
+        run: az bicep upgrade || az bicep install
+
+      # Verifies the template parses and compiles to ARM JSON. Does NOT
+      # deploy. Output goes to /tmp so the workspace stays clean.
+      - name: az bicep build
+        run: az bicep build --file infra/main.bicep --outfile /tmp/main.json
+
+  # ---------------------------------------------------------------------------
+  # Shell — shellcheck on any *.sh in scripts/
+  # ---------------------------------------------------------------------------
+  shell:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # shellcheck is preinstalled on ubuntu-latest. Use `find -print0` +
+      # `xargs -0` so paths with spaces are safe. The check is conditional
+      # so this job passes when the scripts/ directory doesn't exist yet
+      # (e.g., before PR #14 merges) without a separate "no files" branch.
+      - name: ShellCheck (scripts/*.sh)
+        run: |
+          if [ -d scripts ]; then
+            find scripts -type f -name '*.sh' -print0 \
+              | xargs -0 --no-run-if-empty shellcheck --severity=warning
+          else
+            echo "scripts/ directory does not exist; nothing to lint."
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Test — pytest with coverage (matrix over services)
+  # ---------------------------------------------------------------------------
   test:
     name: test (${{ matrix.service }})
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     needs: lint
     strategy:
       fail-fast: false
@@ -64,16 +165,14 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-          # Per-service pip cache keyed on each service's requirements files.
           cache-dependency-path: |
             services/${{ matrix.service }}/requirements.txt
             services/${{ matrix.service }}/requirements-dev.txt
 
       # PyMuPDF + langchain image pipeline drag in libs that need system
-      # packages on stock Ubuntu runners. Only the ingestion leg needs them;
-      # qna's deps are pure-Python after wheels.
+      # packages. Only the ingestion leg needs them.
       - name: Install ingestion system deps
         if: matrix.service == 'ingestion'
         run: |
@@ -84,15 +183,31 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r services/${{ matrix.service }}/requirements.txt
-          # ingestion has a requirements-dev.txt; qna has pytest in requirements.txt
           if [ -f services/${{ matrix.service }}/requirements-dev.txt ]; then
             python -m pip install -r services/${{ matrix.service }}/requirements-dev.txt
           fi
-          # Ensure pytest is present even if requirements.txt did not pin it.
-          python -m pip install pytest pytest-asyncio
+          python -m pip install pytest pytest-asyncio "pytest-cov==${{ env.PYTEST_COV_VERSION }}"
 
-      # `-q` keeps output compact; failures still show full traceback.
-      # No coverage gate in this PR (deferred — see PR body).
-      - name: Run pytest
+      # Coverage report emitted to coverage.xml (Cobertura format — broadly
+      # supported by GitHub annotations and external tools). No
+      # `--cov-fail-under` gate this PR; threshold lands in a follow-up
+      # after the baseline is observable from the artifact.
+      - name: Run pytest with coverage
         working-directory: services/${{ matrix.service }}
-        run: pytest -q
+        run: |
+          pytest -q -ra \
+            --cov=. \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            --cov-report=html:htmlcov
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.service }}
+          path: |
+            services/${{ matrix.service }}/coverage.xml
+            services/${{ matrix.service }}/htmlcov/
+          retention-days: 14
+          if-no-files-found: warn
