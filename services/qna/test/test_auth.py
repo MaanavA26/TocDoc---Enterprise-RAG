@@ -197,7 +197,7 @@ async def test_missing_auth_header_returns_401(app):
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         r = await ac.post("/qna/qna", json={})
     assert r.status_code == 401
-    assert "Missing or invalid Authorization header" in r.json()["detail"]
+    assert "Missing or invalid Authorization header" in r.json()["error"]["message"]
 
 
 @pytest.mark.asyncio
@@ -211,7 +211,7 @@ async def test_invalid_bearer_format_returns_401(app):
             headers={"Authorization": "Token not-a-bearer"},
         )
     assert r.status_code == 401
-    assert "Missing or invalid Authorization header" in r.json()["detail"]
+    assert "Missing or invalid Authorization header" in r.json()["error"]["message"]
 
 
 @pytest.mark.asyncio
@@ -223,7 +223,7 @@ async def test_expired_token_returns_401(app, rsa_keypair):
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         r = await ac.post("/qna/qna", json={}, headers=_bearer(token))
     assert r.status_code == 401
-    body = r.json()["detail"]
+    body = r.json()["error"]["message"]
     assert "expired" in body.lower() or "Token validation failed" in body
 
 
@@ -236,7 +236,7 @@ async def test_wrong_audience_returns_401(app, rsa_keypair):
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         r = await ac.post("/qna/qna", json={}, headers=_bearer(token))
     assert r.status_code == 401
-    assert r.json()["detail"] != ""
+    assert r.json()["error"]["message"] != ""
 
 
 @pytest.mark.asyncio
@@ -251,7 +251,7 @@ async def test_wrong_issuer_returns_401(app, rsa_keypair):
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         r = await ac.post("/qna/qna", json={}, headers=_bearer(token))
     assert r.status_code == 401
-    assert r.json()["detail"] != ""
+    assert r.json()["error"]["message"] != ""
 
 
 @pytest.mark.asyncio
@@ -263,7 +263,7 @@ async def test_missing_email_claim_returns_401(app, rsa_keypair):
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         r = await ac.post("/qna/qna", json={}, headers=_bearer(token))
     assert r.status_code == 401
-    assert r.json()["detail"] == "Email claim not found in token"
+    assert r.json()["error"]["message"] == "Email claim not found in token"
 
 
 @pytest.mark.asyncio

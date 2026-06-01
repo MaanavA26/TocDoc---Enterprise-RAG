@@ -194,7 +194,7 @@ async def test_qna_401_without_bearer():
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         r = await ac.post(url("/qna"), json={})
     assert r.status_code == 401
-    assert r.json()["detail"] in {"Missing or invalid Authorization header", "Invalid token"}
+    assert r.json()["error"]["message"] in {"Missing or invalid Authorization header", "Invalid token"}
 
 
 @pytest.mark.asyncio
@@ -206,7 +206,7 @@ async def test_qna_401_missing_email_claim():
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         r = await ac.post(url("/qna"), headers=headers, json=payload)
     assert r.status_code == 401
-    assert r.json()["detail"] == "Email claim not found in token"
+    assert r.json()["error"]["message"] == "Email claim not found in token"
 
 
 @pytest.mark.asyncio
@@ -381,9 +381,11 @@ async def test_pipeline_handles_non_string_model_response(monkeypatch):
     history = [_as_turn({"user_query": "q1"})]
 
     # Call pipeline directly (bypassing HTTP) for this edge case
-    result = await generate_answer("q1", "read", bot_tag="toc", history=history, azure=app.state.azure)
-    assert "answer" in result and "citation" in result
-    assert "error" in result  # pipeline returns an error payload on TypeError
+    # P0-6 contract: the pipeline RE-RAISES internal failures (it no longer
+    # returns an error payload). The global exception handler — not the
+    # pipeline — renders the safe structured envelope at the HTTP boundary.
+    with pytest.raises(TypeError):
+        await generate_answer("q1", "read", bot_tag="toc", history=history, azure=app.state.azure)
 
 
 ##################################################################################################
@@ -568,7 +570,10 @@ async def test_settings_load_secrets_marks_success_and_failure(monkeypatch):
 
     async def fake_get_secret(name):
         calls[name] = calls.get(name, 0) + 1
-        if name.endswith("Endpoint"):
+        # P0-7 renamed KV secrets to hyphenated-lowercase (e.g.
+        # `azure-openai-endpoint`); match case-insensitively so endpoint
+        # secrets resolve and the rest record a failure.
+        if "endpoint" in name.lower():
             return _Secret("https://fake.example.com")
 
         # simulate AzureError for others
