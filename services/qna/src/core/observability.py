@@ -157,8 +157,10 @@ def log_event(
 
     try:
         line = json.dumps(payload, default=str, ensure_ascii=False)
-    except (TypeError, ValueError):
-        # Last-ditch fallback so log_event NEVER raises.
+    except Exception:
+        # Last-ditch fallback so log_event NEVER raises. Broad by design: a
+        # field value whose own __str__/__repr__ raises would otherwise escape
+        # `default=str` as an arbitrary exception type (not just TypeError).
         line = f"event={event} request_id={rid} (json_serialization_failed)"
 
     logger.log(level, line)
