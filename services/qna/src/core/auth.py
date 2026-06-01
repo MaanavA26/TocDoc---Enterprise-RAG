@@ -1,7 +1,7 @@
 """JWT authentication middleware for the QnA service.
 
 Validates Azure AD-issued Bearer tokens (RS256, JWKS-backed) on every
-authenticated request. Public routes (CORS preflight, `/qna/health`,
+authenticated request. Public routes (CORS preflight, `/health`,
 Swagger assets) bypass auth.
 
 Error contract (P0-6): every auth failure returns the standard
@@ -28,7 +28,7 @@ class AuthUtils:
     Authentication utilities.
 
     Exposes a FastAPI middleware that:
-      - Skips auth for public routes (CORS preflight, `/qna/health`, swagger assets).
+      - Skips auth for public routes (CORS preflight, `/health`, swagger assets).
       - Expects an ``Authorization: Bearer <token>`` header.
       - Validates the JWT cryptographically via Azure AD JWKS (RS256).
       - Extracts a user email from common claim names and attaches it to
@@ -41,7 +41,7 @@ class AuthUtils:
         FastAPI HTTP middleware for JWT-based authentication.
 
         Behavior:
-            - Allows CORS preflight/health routes to pass when path is ``/qna/health``.
+            - Allows CORS preflight/health routes to pass when path is ``/health``.
             - Validates presence and shape of Authorization header.
             - Decodes and verifies the token via ``validate_token()`` using RS256
               against the Azure AD JWKS endpoint.
@@ -57,7 +57,7 @@ class AuthUtils:
         # ---- Public routes / methods ----------------------------------------
         if (
             request.method == "OPTIONS"  # CORS preflight
-            or path.endswith("/qna/health")  # health endpoint
+            or path.endswith("/health")  # health endpoint
             or path in {"/docs", "/redoc", "/openapi.json"}  # swagger assets
         ):
             return await call_next(request)
