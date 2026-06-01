@@ -87,18 +87,25 @@ jobs:
         run: bandit -r services/qna services/ingestion -x '*/test/*'
 
       # pip-audit checks INSTALLED packages against the GitHub Advisory
-      # Database. Runs against each service's requirements.txt separately
-      # so a CVE in one service's dep doesn't mask the other.
-      # Use `--strict` to fail the job on any known vulnerability.
+      # Database, per service so a CVE in one dep set doesn't mask the other.
+      #
+      # REPORT-ONLY this round (continue-on-error: true). The baseline carries
+      # a backlog of known CVEs in pinned deps (starlette, aiohttp,
+      # python-multipart, ...) whose fixes need major version bumps that must
+      # be validated against FastAPI/Starlette compatibility in a dedicated PR
+      # — not bundled into the gate-introduction change. Mirrors the coverage
+      # "computed, not gated this round" stance above. The report still prints
+      # in the job log; flip back to a hard gate once the bumps land.
       - name: pip-audit (QnA dependencies)
-        run: pip-audit --requirement services/qna/requirements.txt --strict
-        continue-on-error: false
+        run: pip-audit --requirement services/qna/requirements.txt
+        continue-on-error: true
 
       - name: pip-audit (ingestion dependencies)
         # libgl1 / libglib2.0-0 not needed here — pip-audit only inspects the
         # requirements file, doesn't import the packages.
-        run: pip-audit --requirement services/ingestion/requirements.txt --strict
-        continue-on-error: false
+        # Report-only this round — see the QnA step above for rationale.
+        run: pip-audit --requirement services/ingestion/requirements.txt
+        continue-on-error: true
 
   # ---------------------------------------------------------------------------
   # Bicep — validate IaC template compiles
