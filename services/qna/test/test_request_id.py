@@ -8,23 +8,21 @@ connectivity.
 
 import json
 import logging
-import re
 import uuid
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-
 from src.core.observability import (
     RequestIDMiddleware,
-    log_event,
     get_current_request_id,
+    log_event,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def app() -> FastAPI:
@@ -58,8 +56,8 @@ def client(app: FastAPI) -> TestClient:
 # X-Request-ID header behavior
 # ---------------------------------------------------------------------------
 
-class TestRequestIdHeader:
 
+class TestRequestIdHeader:
     def test_provided_id_is_reused(self, client: TestClient):
         incoming = "client-supplied-id-12345"
         r = client.get("/ping", headers={"X-Request-ID": incoming})
@@ -114,8 +112,8 @@ class TestRequestIdHeader:
 # log_event behavior
 # ---------------------------------------------------------------------------
 
-class TestLogEvent:
 
+class TestLogEvent:
     def test_includes_event_and_request_id(self, caplog):
         caplog.set_level(logging.INFO)
         logger = logging.getLogger("test_log_event")
@@ -142,8 +140,11 @@ class TestLogEvent:
         caplog.set_level(logging.INFO)
         logger = logging.getLogger("test_log_event")
         log_event(
-            logger, "drop_event",
-            maybe_none=None, present="here", request_id="rid",
+            logger,
+            "drop_event",
+            maybe_none=None,
+            present="here",
+            request_id="rid",
         )
         record = next(r for r in caplog.records if "drop_event" in r.message)
         payload = json.loads(record.message)
@@ -155,8 +156,11 @@ class TestLogEvent:
         logger = logging.getLogger("test_log_event")
         long_value = "x" * 500
         log_event(
-            logger, "no_trunc_event",
-            payload=long_value, request_id="rid", max_field_len=0,
+            logger,
+            "no_trunc_event",
+            payload=long_value,
+            request_id="rid",
+            max_field_len=0,
         )
         record = next(r for r in caplog.records if "no_trunc_event" in r.message)
         payload = json.loads(record.message)
@@ -180,7 +184,8 @@ class TestLogEvent:
         log_event(logger, "weird_event", thing=WeirdNotSerializable(), request_id="rid")
         # The fallback line is plain key=value, not JSON.
         fallback = next(
-            r for r in caplog.records
+            r
+            for r in caplog.records
             if "weird_event" in r.message and "json_serialization_failed" in r.message
         )
         assert "rid" in fallback.message
@@ -205,10 +210,12 @@ class TestLogEvent:
 # Lifecycle events emitted by the middleware
 # ---------------------------------------------------------------------------
 
-class TestLifecycleEvents:
 
+class TestLifecycleEvents:
     def test_request_started_and_completed_emitted_on_success(
-        self, client: TestClient, caplog,
+        self,
+        client: TestClient,
+        caplog,
     ):
         caplog.set_level(logging.INFO)
         r = client.get("/ping")
@@ -224,7 +231,9 @@ class TestLifecycleEvents:
         assert events_seen == {"started", "completed"}, events_seen
 
     def test_request_failed_emitted_on_handler_exception(
-        self, client: TestClient, caplog,
+        self,
+        client: TestClient,
+        caplog,
     ):
         """The structured request_failed event fires when an unhandled
         exception escapes the handler. The middleware re-raises so Starlette's
@@ -259,13 +268,13 @@ class TestLifecycleEvents:
         assert payload["safe_message"] == "Request handler raised an unhandled exception"
 
     def test_request_completed_includes_status_and_latency(
-        self, client: TestClient, caplog,
+        self,
+        client: TestClient,
+        caplog,
     ):
         caplog.set_level(logging.INFO)
         client.get("/ping")
-        completed = next(
-            r for r in caplog.records if "request_completed" in r.message
-        )
+        completed = next(r for r in caplog.records if "request_completed" in r.message)
         payload = json.loads(completed.message)
         assert payload["status_code"] == 200
         assert isinstance(payload["latency_ms"], (int, float))

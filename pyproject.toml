@@ -51,6 +51,7 @@ ignore = [
     "F841",  # local variable assigned but never used (common in mock setups)
     "B011",  # `assert False` (used intentionally as guard rails)
     "E402",  # module-level import not at top — tests set env vars before imports by design
+    "SIM117",  # stacked `with patch(...)` blocks read clearer kept separate in tests
 ]
 
 # custom_rag.py imports the langchain ecosystem with patterns that ruff's
@@ -63,6 +64,20 @@ ignore = [
 # Older qna_pipeline file uses pattern shrugs ruff dislikes. Targeted, not blanket.
 "services/qna/src/pipeline/qna_pipeline.py" = [
     "SIM117",  # combine `with` statements — readability call, not always right
+]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI parameter markers (File/Query/Path/Depends/...) are deliberately
+# called in argument defaults — that is the framework's documented idiom, not
+# the mutable-default bug B008 targets. Treat them as immutable so B008 only
+# fires on genuine mutable defaults.
+extend-immutable-calls = [
+    "fastapi.File",
+    "fastapi.Form",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.Depends",
 ]
 
 [tool.ruff.format]

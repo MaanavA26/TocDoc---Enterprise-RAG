@@ -1,9 +1,9 @@
 import asyncio
 import time
-from typing import List
-from src.core.logger import logger
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+
+from src.core.logger import logger
 
 # ---------------------------------------------------------------------------
 # Thread pool for CPU/IO-bound embedding calls
@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 embedding_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="embedding")
 
 
-async def get_embedding(azure, text: str) -> List[float]:
+async def get_embedding(azure, text: str) -> list[float]:
     """
     Generate an embedding vector for the provided text using the configured Azure client.
 

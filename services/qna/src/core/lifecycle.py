@@ -1,7 +1,9 @@
 import logging
+
 from fastapi import FastAPI
-from src.config.config import settings
+
 from src.clients.azure_clients import AzureOpenAIHandler
+from src.config.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -60,4 +62,3 @@ async def shutdown_event(app: FastAPI):
         logger.info("Application shutdown completed")
     except Exception as e:
         logger.error(f"Error during shutdown: {e}")
- 

@@ -1,9 +1,9 @@
-import re
 import asyncio
 import inspect
-from typing import List, Tuple
-from src.core.logger import logger
+import re
 from concurrent.futures import ThreadPoolExecutor
+
+from src.core.logger import logger
 
 # ---------------------------------------------------------------------------
 # Thread pool for CPU-bound text parsing (kept as-is)
@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 text_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="text")
 
 
-async def extract_answer_and_filenames_from_text(text: str) -> Tuple[str, List[str]]:
+async def extract_answer_and_filenames_from_text(text: str) -> tuple[str, list[str]]:
     """
     Extract the final answer text and referenced filenames from a model response.
 
@@ -55,7 +55,7 @@ async def extract_answer_and_filenames_from_text(text: str) -> Tuple[str, List[s
         return text.strip(), []
 
 
-def _extract_sync(text: str) -> Tuple[str, List[str]]:
+def _extract_sync(text: str) -> tuple[str, list[str]]:
     """
     Synchronous, CPU-bound parser. MUST return (answer_text, filenames) and NOT a coroutine.
 
@@ -68,7 +68,6 @@ def _extract_sync(text: str) -> Tuple[str, List[str]]:
         * Bracket blocks: [a.md; b.pdf]
         * Plain lines (strips bullets/numbers), one per line.
     """
-    import re
 
     # --- 1) Find the split point (answer vs sources block) ---
     # Header variants we accept:
@@ -85,16 +84,16 @@ def _extract_sync(text: str) -> Tuple[str, List[str]]:
 
     # --- 2) Extract filenames from common formats ---
 
-    filenames: List[str] = []
+    filenames: list[str] = []
 
     # 2a) Markdown links: [filename](url)
-    md_links = re.findall(r'\[([^\]]+?)\]\([^)]+?\)', filenames_raw)
+    md_links = re.findall(r"\[([^\]]+?)\]\([^)]+?\)", filenames_raw)
     filenames.extend(md_links)
 
     # 2b) Bracket-blocks: [a.md; b.pdf]  (split on ';' inside the block)
-    bracket_blocks = re.findall(r'\[([^\]]+)\]', filenames_raw)
+    bracket_blocks = re.findall(r"\[([^\]]+)\]", filenames_raw)
     for blk in bracket_blocks:
-        parts = [p.strip() for p in blk.split(';')]
+        parts = [p.strip() for p in blk.split(";")]
         for p in parts:
             if p:
                 filenames.append(p)
@@ -104,10 +103,10 @@ def _extract_sync(text: str) -> Tuple[str, List[str]]:
         lines = [ln.strip() for ln in filenames_raw.splitlines() if ln.strip()]
         for ln in lines:
             # remove common list markers
-            ln = re.sub(r'^\s*[-*]\s*', '', ln)        # - item / * item
-            ln = re.sub(r'^\s*\d+[\.\)]\s*', '', ln)    # 1. item / 1) item
+            ln = re.sub(r"^\s*[-*]\s*", "", ln)  # - item / * item
+            ln = re.sub(r"^\s*\d+[\.\)]\s*", "", ln)  # 1. item / 1) item
             # if still a markdown link-ish "[text]" remains, keep text inside []
-            m2 = re.match(r'\[([^\]]+)\]', ln)
+            m2 = re.match(r"\[([^\]]+)\]", ln)
             if m2:
                 ln = m2.group(1)
             if ln:
@@ -116,7 +115,7 @@ def _extract_sync(text: str) -> Tuple[str, List[str]]:
     # Final sanitize: trim quotes/backticks and trailing punctuation that often sneaks in
     clean = []
     for f in filenames:
-        f = f.strip().strip('`"\'').rstrip('.,;:')
+        f = f.strip().strip("`\"'").rstrip(".,;:")
         if f:
             clean.append(f)
 

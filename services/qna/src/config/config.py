@@ -59,7 +59,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Optional
 
 from azure.core.exceptions import AzureError, ResourceNotFoundError
 from azure.identity.aio import ClientSecretCredential
@@ -80,15 +79,15 @@ logger = logging.getLogger(__name__)
 # table to drop a legacy name (after the deprecation window). DO NOT use
 # this dict to remap CANONICAL → CANONICAL; it's a one-way migration aid.
 _LEGACY_ENV_ALIASES: dict[str, str] = {
-    "AZURE_OPENAI_ENDPOINT":    "AzureOpenaiAccountEndpoint",
-    "AZURE_OPENAI_KEY":         "TocdocOpenAIKey",
-    "AZURE_OPENAI_VERSION":     "AzureOpenaiApiVersion",
-    "AZURE_OPENAI_LLM_MODEL":   "AzureOpenaiLlmModel",
-    "AZURE_SEARCH_ENDPOINT":    "AzureSearchEndpoint",
-    "AZURE_SEARCH_KEY":         "AzureSearchKey",
-    "AZURE_CLIENT_ID":          "TocdocSPClientID",
-    "AZURE_CLIENT_SECRET":      "TocdocSPSecretValue",
-    "AZURE_TENANT_ID":          "TocdocSPTenantID",
+    "AZURE_OPENAI_ENDPOINT": "AzureOpenaiAccountEndpoint",
+    "AZURE_OPENAI_KEY": "TocdocOpenAIKey",
+    "AZURE_OPENAI_VERSION": "AzureOpenaiApiVersion",
+    "AZURE_OPENAI_LLM_MODEL": "AzureOpenaiLlmModel",
+    "AZURE_SEARCH_ENDPOINT": "AzureSearchEndpoint",
+    "AZURE_SEARCH_KEY": "AzureSearchKey",
+    "AZURE_CLIENT_ID": "TocdocSPClientID",
+    "AZURE_CLIENT_SECRET": "TocdocSPSecretValue",
+    "AZURE_TENANT_ID": "TocdocSPTenantID",
 }
 
 # Maps canonical env name → Azure Key Vault secret name.
@@ -107,15 +106,15 @@ _LEGACY_ENV_ALIASES: dict[str, str] = {
 # Whichever path resolves, the value is written into `os.environ[canonical]`
 # so downstream code reads canonical env names uniformly.
 _KV_SECRET_NAMES: dict[str, str] = {
-    "AZURE_OPENAI_ENDPOINT":    "azure-openai-endpoint",
-    "AZURE_OPENAI_KEY":         "azure-openai-key",
-    "AZURE_OPENAI_VERSION":     "azure-openai-version",
-    "AZURE_OPENAI_LLM_MODEL":   "azure-openai-llm-model",
-    "AZURE_SEARCH_ENDPOINT":    "azure-search-endpoint",
-    "AZURE_SEARCH_KEY":         "azure-search-key",
-    "AZURE_CLIENT_ID":          "azure-client-id",
-    "AZURE_CLIENT_SECRET":      "azure-client-secret",
-    "AZURE_TENANT_ID":          "azure-tenant-id",
+    "AZURE_OPENAI_ENDPOINT": "azure-openai-endpoint",
+    "AZURE_OPENAI_KEY": "azure-openai-key",
+    "AZURE_OPENAI_VERSION": "azure-openai-version",
+    "AZURE_OPENAI_LLM_MODEL": "azure-openai-llm-model",
+    "AZURE_SEARCH_ENDPOINT": "azure-search-endpoint",
+    "AZURE_SEARCH_KEY": "azure-search-key",
+    "AZURE_CLIENT_ID": "azure-client-id",
+    "AZURE_CLIENT_SECRET": "azure-client-secret",
+    "AZURE_TENANT_ID": "azure-tenant-id",
 }
 
 # One-shot guard so the same deprecation message doesn't flood the logs on
@@ -135,11 +134,13 @@ def _warn_deprecated_alias(legacy: str, canonical: str, *, kv_secret: bool = Fal
         "Deprecated %s %r in use; rename to %r. "
         "Legacy name will be removed in a later release. "
         "See docs/deployment/INSTALLATION.md for the full migration table.",
-        location, legacy, canonical,
+        location,
+        legacy,
+        canonical,
     )
 
 
-def _get_env(canonical: str, default: Optional[str] = None) -> Optional[str]:
+def _get_env(canonical: str, default: str | None = None) -> str | None:
     """Resolve an env value, preferring the canonical name; fall back to the
     pre-P0-7 legacy alias if present (with a one-shot deprecation warning).
 

@@ -17,7 +17,7 @@ blocking the FastAPI event loop, matching the convention in
 
 import logging
 import os
-from typing import Iterable, Optional
+from collections.abc import Iterable
 
 from azure.core.credentials import AzureKeyCredential
 from azure.search.documents import SearchClient
@@ -82,7 +82,7 @@ class SearchAdminService:
         return value.replace("'", "''")
 
     @staticmethod
-    def _strip_fr_prefix(fr_tag: Optional[str]) -> Optional[str]:
+    def _strip_fr_prefix(fr_tag: str | None) -> str | None:
         """Strip the `fr_` prefix from an indexed `fr_tag` value.
 
         The index stores `fr_read` / `fr_layout`, but the admin API spec returns
@@ -93,7 +93,7 @@ class SearchAdminService:
         return fr_tag
 
     @staticmethod
-    def _extract_chunk_index(chunk_id: str) -> Optional[int]:
+    def _extract_chunk_index(chunk_id: str) -> int | None:
         """Parse the trailing zero-padded index from a deterministic chunk ID.
 
         Chunk IDs follow the format set in `custom_rag.py`:
@@ -110,9 +110,7 @@ class SearchAdminService:
             pass
         return None
 
-    def _paged_search(
-        self, filter_expr: str, select: list[str]
-    ) -> Iterable[dict]:
+    def _paged_search(self, filter_expr: str, select: list[str]) -> Iterable[dict]:
         """Yield every result matching `filter_expr`, walking all pages.
 
         Pagination is handled entirely by `SearchItemPaged.by_page()` and the
@@ -125,8 +123,7 @@ class SearchAdminService:
             select=select,
         )
         for page in result.by_page():
-            for item in page:
-                yield item
+            yield from page
 
     def list_documents(self, bot_tag: str) -> DocumentListResponse:
         """Return one row per indexed document in the given bot_tag scope."""
@@ -155,15 +152,9 @@ class SearchAdminService:
             else:
                 existing["chunk_count"] += 1
                 if ts:
-                    if (
-                        not existing["first_ingested_at"]
-                        or ts < existing["first_ingested_at"]
-                    ):
+                    if not existing["first_ingested_at"] or ts < existing["first_ingested_at"]:
                         existing["first_ingested_at"] = ts
-                    if (
-                        not existing["last_ingested_at"]
-                        or ts > existing["last_ingested_at"]
-                    ):
+                    if not existing["last_ingested_at"] or ts > existing["last_ingested_at"]:
                         existing["last_ingested_at"] = ts
 
         documents = [DocumentSummary(**d) for d in docs.values()]
@@ -173,9 +164,7 @@ class SearchAdminService:
             documents=documents,
         )
 
-    def get_document(
-        self, bot_tag: str, document_id: str
-    ) -> Optional[DocumentDetailResponse]:
+    def get_document(self, bot_tag: str, document_id: str) -> DocumentDetailResponse | None:
         """Return the detail summary for one document, or None if absent.
 
         Returns None (caller maps to 404) when no chunks exist for the given
@@ -185,21 +174,13 @@ class SearchAdminService:
         """
         safe_tag = self._escape_odata(bot_tag)
         safe_doc = self._escape_odata(document_id)
-        filter_expr = (
-            f"bot_tag eq '{safe_tag}' and document_id eq '{safe_doc}'"
-        )
+        filter_expr = f"bot_tag eq '{safe_tag}' and document_id eq '{safe_doc}'"
 
         chunks = list(self._paged_search(filter_expr, _GET_DOC_SELECT))
         if not chunks:
             return None
 
-        timestamps = sorted(
-            {
-                c.get("ingestion_timestamp")
-                for c in chunks
-                if c.get("ingestion_timestamp")
-            }
-        )
+        timestamps = sorted({c.get("ingestion_timestamp") for c in chunks if c.get("ingestion_timestamp")})
         # Cap sample at 5 to keep the response small; first 5 ordered by SDK
         # return order is sufficient for an operator quick-look.
         sample_chunks = [
@@ -275,7 +256,7 @@ class SearchAdminService:
 # Module-level singleton + FastAPI dependency
 # ---------------------------------------------------------------------------
 
-_service_singleton: Optional[SearchAdminService] = None
+_service_singleton: SearchAdminService | None = None
 
 
 def get_admin_service() -> SearchAdminService:
@@ -306,11 +287,13 @@ def get_admin_service() -> SearchAdminService:
             # to the client. Each missing var is named in the log so operators
             # can fix the deployment without reading source.
             missing = [
-                name for name, value in (
+                name
+                for name, value in (
                     ("AZURE_SEARCH_ENDPOINT", endpoint),
                     ("AZURE_SEARCH_KEY", key),
                     ("INDEX_NAME", index_name),
-                ) if not value
+                )
+                if not value
             ]
             logger.error(
                 "Admin service misconfigured — missing env vars: %s",

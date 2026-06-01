@@ -1,7 +1,8 @@
-from azure.search.documents import SearchClient
 from azure.core.credentials import AzureKeyCredential
+from azure.search.documents import SearchClient
 from langchain_openai import AzureOpenAIEmbeddings
 from openai import AzureOpenAI
+
 from src.config.config import AzureConfig, LocalConfig
 from src.core.logger import logger
 
@@ -86,9 +87,7 @@ class AzureOpenAIHandler:
                 )
                 logger.info("Azure OpenAI Embeddings client initialized successfully")
             except Exception as e:
-                logger.error(
-                    f"Failed to initialize Azure OpenAI Embeddings client: {e}"
-                )
+                logger.error(f"Failed to initialize Azure OpenAI Embeddings client: {e}")
                 raise
 
         if self.openai_client is None:

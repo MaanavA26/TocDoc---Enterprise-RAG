@@ -1,6 +1,6 @@
 """Tests for env-driven runtime configuration (CORS, logging)."""
+
 import os
-import pytest
 
 
 def test_cors_empty_env_produces_no_origins(monkeypatch):
@@ -30,6 +30,7 @@ def test_cors_env_multiple_origins(monkeypatch):
 def test_log_level_env_defaults_to_info(monkeypatch):
     """When LOG_LEVEL is unset, the default level must be INFO."""
     import logging
+
     monkeypatch.delenv("LOG_LEVEL", raising=False)
     level_name = os.getenv("LOG_LEVEL", "INFO").upper()
     assert getattr(logging, level_name, None) == logging.INFO

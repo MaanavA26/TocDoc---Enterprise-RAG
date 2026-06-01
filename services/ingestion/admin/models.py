@@ -5,8 +5,6 @@ Field nullability reflects the reality that older indexed chunks may not have
 the metadata fields added in P0-4 (deterministic chunk IDs PR).
 """
 
-from typing import Optional
-
 from pydantic import BaseModel, Field
 
 
@@ -14,12 +12,12 @@ class DocumentSummary(BaseModel):
     """One row in the document list — aggregated from chunk metadata."""
 
     document_id: str
-    source_path: Optional[str] = None
-    source_type: Optional[str] = None
-    fr_tag: Optional[str] = None
+    source_path: str | None = None
+    source_type: str | None = None
+    fr_tag: str | None = None
     chunk_count: int = Field(ge=0)
-    first_ingested_at: Optional[str] = None
-    last_ingested_at: Optional[str] = None
+    first_ingested_at: str | None = None
+    last_ingested_at: str | None = None
 
 
 class DocumentListResponse(BaseModel):
@@ -34,7 +32,7 @@ class ChunkSample(BaseModel):
     """A small per-chunk payload returned in the document detail response."""
 
     id: str
-    chunk_index: Optional[int] = None
+    chunk_index: int | None = None
 
 
 class DocumentDetailResponse(BaseModel):
@@ -42,9 +40,9 @@ class DocumentDetailResponse(BaseModel):
 
     bot_tag: str
     document_id: str
-    source_path: Optional[str] = None
-    source_type: Optional[str] = None
-    fr_tag: Optional[str] = None
+    source_path: str | None = None
+    source_type: str | None = None
+    fr_tag: str | None = None
     chunk_count: int = Field(ge=0)
     ingestion_timestamps: list[str]
     sample_chunks: list[ChunkSample]

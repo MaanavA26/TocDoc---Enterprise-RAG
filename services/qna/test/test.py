@@ -1,10 +1,9 @@
 # test.py
 import os
+
 import pytest
-from typing import Any
+from httpx import ASGITransport, AsyncClient
 from jose import jwt
-from httpx import AsyncClient, ASGITransport
-from unittest.mock import AsyncMock, patch
 
 # ---------------------------------------------------------------------------
 # Ensure required env vars exist BEFORE importing the app
@@ -89,6 +88,7 @@ class FakeAzure:
         self.openai_client = _FakeOpenAIClient()
         self.search_client = _FakeSearchClient()
 
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -101,9 +101,11 @@ def make_token(email: str | None = "user@acme.com") -> str:
     # Signature is irrelevant: your middleware disables signature verification.
     return jwt.encode(payload, key="dummy", algorithm="HS256")
 
-def url(p:str) -> str:
+
+def url(p: str) -> str:
     # prepending the "/qna" (root endpoint)
     return f"{app.root_path}{p}"
+
 
 def _set_kv_env(monkeypatch):
     """Set the Key Vault style envs the Azure client expects."""
@@ -113,6 +115,7 @@ def _set_kv_env(monkeypatch):
     monkeypatch.setenv("AZURE_SEARCH_ENDPOINT", "https://fake-search.example.com")
     monkeypatch.setenv("AZURE_SEARCH_KEY", "fake-search-key")
 
+
 # ---------------------------------------------------------------------------
 # Global fixtures: prevent real cloud calls and attach FakeAzure
 # ---------------------------------------------------------------------------
@@ -121,7 +124,9 @@ def _patch_startup(monkeypatch):
     # Avoid Key Vault network call at startup
     async def _no_kv():
         return {}
+
     from src.config import config as cfg
+
     monkeypatch.setattr(cfg.settings, "load_secrets_from_keyvault", _no_kv, raising=True)
     yield
 
@@ -144,6 +149,7 @@ def _patch_validate_token(monkeypatch):
         # Decode the test HS256 token without verification to extract claims.
         # This mirrors what the old middleware did with verify_signature=False.
         from jose import jwt as jose_jwt
+
         try:
             claims = jose_jwt.decode(
                 token,
@@ -152,10 +158,11 @@ def _patch_validate_token(monkeypatch):
                 options={"verify_signature": False, "verify_aud": False},
             )
         except Exception:
-            raise tv.TokenValidationError("Invalid token")
+            raise tv.TokenValidationError("Invalid token") from None
         return claims
 
     import src.core.auth as auth_module
+
     monkeypatch.setattr(auth_module, "validate_token", _fake_validate, raising=True)
     yield
 
@@ -225,7 +232,8 @@ async def test_qna_400_empty_query(monkeypatch):
         r = await ac.post(url("/qna"), headers=headers, json=payload)
     assert r.status_code == 400
     assert "Query cannot be empty" in r.text
- 
+
+
 # ---------------------------------------------------------------------------
 # Functional flow tests (pipeline) with targeted monkeypatching
 # ---------------------------------------------------------------------------
@@ -382,6 +390,7 @@ async def test_pipeline_handles_non_string_model_response(monkeypatch):
 # File-wise test cases to achieve 80%+ coverage individually!
 ##################################################################################################
 
+
 # --------------------------
 # azure_clients.py coverage
 # --------------------------
@@ -400,6 +409,7 @@ async def test_azure_clients_missing_required_config(monkeypatch):
     with pytest.raises(ValueError):
         h._ensure_client()
 
+
 @pytest.mark.asyncio
 async def test_azure_clients_success_initialization(monkeypatch):
     from src.clients.azure_clients import AzureOpenAIHandler
@@ -409,8 +419,10 @@ async def test_azure_clients_success_initialization(monkeypatch):
     # fake constructors so we don't hit the network
     class _E:  # Embeddings
         pass
+
     class _O:  # OpenAI
         pass
+
     class _S:  # SearchClient
         pass
 
@@ -428,6 +440,7 @@ async def test_azure_clients_success_initialization(monkeypatch):
     assert isinstance(h.openai_client, _O)
     assert isinstance(h.search_client, _S)
 
+
 @pytest.mark.asyncio
 async def test_azure_clients_embedding_init_failure(monkeypatch):
     from src.clients.azure_clients import AzureOpenAIHandler
@@ -436,6 +449,7 @@ async def test_azure_clients_embedding_init_failure(monkeypatch):
 
     def boom(**kw):  # raise from embedding ctor
         raise RuntimeError("embeddings init failed")
+
     monkeypatch.setattr("src.clients.azure_clients.AzureOpenAIEmbeddings", boom, raising=True)
 
     # stub the others so we never reach them
@@ -446,14 +460,20 @@ async def test_azure_clients_embedding_init_failure(monkeypatch):
     with pytest.raises(RuntimeError):
         h._ensure_client()
 
+
 @pytest.mark.asyncio
 async def test_azure_clients_openai_init_failure(monkeypatch):
     from src.clients.azure_clients import AzureOpenAIHandler
 
     _set_kv_env(monkeypatch)
 
-    monkeypatch.setattr("src.clients.azure_clients.AzureOpenAIEmbeddings", lambda **kw: object(), raising=True)
-    def boom(**kw): raise RuntimeError("openai init failed")
+    monkeypatch.setattr(
+        "src.clients.azure_clients.AzureOpenAIEmbeddings", lambda **kw: object(), raising=True
+    )
+
+    def boom(**kw):
+        raise RuntimeError("openai init failed")
+
     monkeypatch.setattr("src.clients.azure_clients.AzureOpenAI", boom, raising=True)
     monkeypatch.setattr("src.clients.azure_clients.SearchClient", lambda **kw: object(), raising=True)
 
@@ -461,15 +481,21 @@ async def test_azure_clients_openai_init_failure(monkeypatch):
     with pytest.raises(RuntimeError):
         h._ensure_client()
 
+
 @pytest.mark.asyncio
 async def test_azure_clients_search_init_failure(monkeypatch):
     from src.clients.azure_clients import AzureOpenAIHandler
 
     _set_kv_env(monkeypatch)
 
-    monkeypatch.setattr("src.clients.azure_clients.AzureOpenAIEmbeddings", lambda **kw: object(), raising=True)
+    monkeypatch.setattr(
+        "src.clients.azure_clients.AzureOpenAIEmbeddings", lambda **kw: object(), raising=True
+    )
     monkeypatch.setattr("src.clients.azure_clients.AzureOpenAI", lambda **kw: object(), raising=True)
-    def boom(**kw): raise RuntimeError("search init failed")
+
+    def boom(**kw):
+        raise RuntimeError("search init failed")
+
     monkeypatch.setattr("src.clients.azure_clients.SearchClient", boom, raising=True)
 
     h = AzureOpenAIHandler()
@@ -482,11 +508,13 @@ async def test_azure_clients_search_init_failure(monkeypatch):
 # --------------------------
 @pytest.mark.asyncio
 async def test_lifecycle_startup_success(monkeypatch):
-    from src.core.lifecycle import startup_event
     from src.clients.azure_clients import AzureOpenAIHandler
+    from src.core.lifecycle import startup_event
 
     # avoid real keyvault and client creation
-    async def _no_kv(): return {}
+    async def _no_kv():
+        return {}
+
     monkeypatch.setattr("src.config.config.settings.load_secrets_from_keyvault", _no_kv, raising=True)
     monkeypatch.setattr(AzureOpenAIHandler, "_ensure_client", lambda self: None, raising=True)
 
@@ -495,26 +523,34 @@ async def test_lifecycle_startup_success(monkeypatch):
     assert hasattr(app.state, "azure")
     assert app.state.azure is not None
 
+
 @pytest.mark.asyncio
 async def test_lifecycle_startup_failure(monkeypatch):
-    from src.core.lifecycle import startup_event
     from src.clients.azure_clients import AzureOpenAIHandler
+    from src.core.lifecycle import startup_event
 
-    async def _no_kv(): return {}
+    async def _no_kv():
+        return {}
+
     monkeypatch.setattr("src.config.config.settings.load_secrets_from_keyvault", _no_kv, raising=True)
-    def boom(self): raise RuntimeError("boom")
+
+    def boom(self):
+        raise RuntimeError("boom")
+
     monkeypatch.setattr(AzureOpenAIHandler, "_ensure_client", boom, raising=True)
 
     with pytest.raises(RuntimeError):
         await startup_event(app)
 
+
 @pytest.mark.asyncio
 async def test_lifecycle_shutdown_sets_state(monkeypatch):
     from src.core.lifecycle import shutdown_event
+
     app.state.azure = object()
     await shutdown_event(app)
     assert app.state.azure is None
- 
+
 
 # --------------------------
 # config.py coverage
@@ -524,27 +560,38 @@ async def test_settings_load_secrets_marks_success_and_failure(monkeypatch):
     from src.config.config import Settings
 
     # fake SecretClient.get_secret behavior: succeed on one key, fail on another
-    class _Secret: 
-        def __init__(self, v): self.value = v
+    class _Secret:
+        def __init__(self, v):
+            self.value = v
 
     calls = {}
+
     async def fake_get_secret(name):
         calls[name] = calls.get(name, 0) + 1
         if name.endswith("Endpoint"):
             return _Secret("https://fake.example.com")
+
         # simulate AzureError for others
-        class _AzureErr(Exception): pass
+        class _AzureErr(Exception):
+            pass
+
         raise _AzureErr("nope")
 
     class _FakeSecretClient:
-        async def get_secret(self, name): return await fake_get_secret(name)
-        async def close(self): return None
+        async def get_secret(self, name):
+            return await fake_get_secret(name)
+
+        async def close(self):
+            return None
 
     class _FakeCredential:
-        async def close(self): return None
+        async def close(self):
+            return None
 
     monkeypatch.setattr("src.config.config.SecretClient", lambda **kw: _FakeSecretClient(), raising=True)
-    monkeypatch.setattr("src.config.config.ClientSecretCredential", lambda *a, **k: _FakeCredential(), raising=True)
+    monkeypatch.setattr(
+        "src.config.config.ClientSecretCredential", lambda *a, **k: _FakeCredential(), raising=True
+    )
 
     results = await Settings.load_secrets_from_keyvault()
     assert isinstance(results, dict)
@@ -552,26 +599,33 @@ async def test_settings_load_secrets_marks_success_and_failure(monkeypatch):
     assert True in results.values()
     assert False in results.values()
 
+
 def test_run_async_handles_existing_loop(monkeypatch):
-    from src.config.config import run_async
     import asyncio
 
-    async def coro(): return "ok"
+    from src.config.config import run_async
+
+    async def coro():
+        return "ok"
 
     # case 1: no running loop → asyncio.run is used
     assert run_async(coro()) == "ok"
 
     # case 2: running loop → create_task is used
     captured = {}
+
     class _Loop:
         def create_task(self, c):
             captured["type"] = type(c).__name__
             return "TASK"
-    def fake_get_running_loop(): return _Loop()
+
+    def fake_get_running_loop():
+        return _Loop()
+
     monkeypatch.setattr(asyncio, "get_running_loop", fake_get_running_loop, raising=True)
     assert run_async(coro()) == "TASK"
     assert captured["type"] in ("coroutine", "coro")  # impl detail varies by py version
- 
+
 
 # --------------------------
 # text_processor.py coverage
@@ -579,44 +633,55 @@ def test_run_async_handles_existing_loop(monkeypatch):
 @pytest.mark.asyncio
 async def test_text_processor_no_sources_section():
     from src.services.text_processor import extract_answer_and_filenames_from_text
+
     txt = "Only answer text with no marker."
     ans, files = await extract_answer_and_filenames_from_text(txt)
     assert ans == "Only answer text with no marker."
     assert files == []
 
+
 @pytest.mark.asyncio
 async def test_text_processor_bracketed_sources():
     from src.services.text_processor import extract_answer_and_filenames_from_text
+
     txt = "A\n\n**Sources:\n[one.md; two.pdf]"
     ans, files = await extract_answer_and_filenames_from_text(txt)
     assert ans == "A"
     assert files == ["one.md", "two.pdf"]
 
+
 @pytest.mark.asyncio
 async def test_text_processor_lines_sources():
     from src.services.text_processor import extract_answer_and_filenames_from_text
+
     txt = "A\n\n**Sources:\none.md\ntwo.pdf"
     ans, files = await extract_answer_and_filenames_from_text(txt)
     assert ans == "A"
     assert files == ["one.md", "two.pdf"]
+
 
 @pytest.mark.asyncio
 async def test_text_processor_bad_return_type(monkeypatch):
     from src.services import text_processor as tp
 
     # make the sync extractor return something invalid
-    def bad(_): return "not-a-tuple"
+    def bad(_):
+        return "not-a-tuple"
+
     monkeypatch.setattr(tp, "_extract_sync", bad, raising=True)
 
     ans, files = await tp.extract_answer_and_filenames_from_text("Hello")
     assert ans == "Hello"
     assert files == []
 
+
 @pytest.mark.asyncio
 async def test_text_processor_sync_raises(monkeypatch):
     from src.services import text_processor as tp
 
-    def boom(_): raise RuntimeError("x")
+    def boom(_):
+        raise RuntimeError("x")
+
     monkeypatch.setattr(tp, "_extract_sync", boom, raising=True)
 
     ans, files = await tp.extract_answer_and_filenames_from_text("Hello")

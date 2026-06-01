@@ -28,11 +28,11 @@ if str(_INGESTION_ROOT) not in sys.path:
     sys.path.insert(0, str(_INGESTION_ROOT))
 
 from errors import (  # noqa: E402
-    register_exception_handlers,
-    raise_api_error,
     ApiErrorCode,
+    raise_api_error,
+    register_exception_handlers,
 )
-from middleware import limit_upload_size, MAX_UPLOAD_BYTES  # noqa: E402
+from middleware import MAX_UPLOAD_BYTES, limit_upload_size  # noqa: E402
 from observability import RequestIDMiddleware  # noqa: E402
 
 
@@ -92,7 +92,6 @@ def client(app: FastAPI) -> TestClient:
 
 
 class TestHttpExceptionHandling:
-
     def test_string_detail_400_envelope(self, client: TestClient):
         r = client.get("/string-detail-400")
         assert r.status_code == 400
@@ -132,7 +131,6 @@ class TestHttpExceptionHandling:
 
 
 class TestUnhandledException:
-
     def test_returns_500_envelope(self, client: TestClient):
         r = client.get("/unhandled")
         assert r.status_code == 500
@@ -157,7 +155,6 @@ class TestUnhandledException:
 
 
 class TestValidationError:
-
     def test_returns_422_envelope_with_errors_list(self, client: TestClient):
         r = client.post("/validate", json={"name": "x"})
         assert r.status_code == 422
@@ -170,15 +167,12 @@ class TestValidationError:
         assert set(err0.keys()) == {"loc", "type", "msg"}
         assert isinstance(err0["loc"], list)
 
-    def test_errors_field_absent_on_non_validation_responses(
-        self, client: TestClient
-    ):
+    def test_errors_field_absent_on_non_validation_responses(self, client: TestClient):
         r = client.get("/string-detail-400")
         assert "errors" not in r.json()["error"]
 
 
 class TestRequestIdPropagation:
-
     def test_uses_preset_state_request_id(self, client: TestClient):
         r = client.get("/preset-request-id")
         body = r.json()
@@ -193,7 +187,6 @@ class TestRequestIdPropagation:
 
 
 class TestRaiseApiError:
-
     def test_raises_http_exception_with_dict_detail(self):
         with pytest.raises(HTTPException) as excinfo:
             raise_api_error("CUSTOM_CODE", "the message", 418)
@@ -202,7 +195,6 @@ class TestRaiseApiError:
 
 
 class TestApiErrorCodeStability:
-
     def test_codes_unchanged(self):
         assert ApiErrorCode.INVALID_REQUEST == "INVALID_REQUEST"
         assert ApiErrorCode.UNAUTHORIZED == "UNAUTHORIZED"
@@ -224,6 +216,7 @@ class TestApiErrorCodeStability:
 #   2. limit_upload_size middleware uses build_error_response (NOT
 #      `raise HTTPException`) — its 413 response is envelope-shaped.
 #   3. Client-supplied X-Request-ID propagates through every error path.
+
 
 class TestRequestIdMiddlewareIntegration:
     """RequestIDMiddleware + register_exception_handlers — full stack."""
@@ -249,7 +242,8 @@ class TestRequestIdMiddlewareIntegration:
         return TestClient(app, raise_server_exceptions=False)
 
     def test_unhandled_500_carries_request_id_from_middleware(
-        self, client: TestClient,
+        self,
+        client: TestClient,
     ):
         r = client.get("/boom")
         assert r.status_code == 500
@@ -259,7 +253,8 @@ class TestRequestIdMiddlewareIntegration:
         assert uuid.UUID(rid_header).version == 4
 
     def test_client_supplied_request_id_flows_to_500(
-        self, client: TestClient,
+        self,
+        client: TestClient,
     ):
         r = client.get("/boom", headers={"X-Request-ID": "client-supplied-001"})
         assert r.status_code == 500
@@ -267,7 +262,8 @@ class TestRequestIdMiddlewareIntegration:
         assert r.json()["error"]["request_id"] == "client-supplied-001"
 
     def test_client_supplied_request_id_flows_to_400(
-        self, client: TestClient,
+        self,
+        client: TestClient,
     ):
         r = client.get("/bad", headers={"X-Request-ID": "client-supplied-002"})
         assert r.status_code == 400
@@ -300,7 +296,8 @@ class TestUploadSizeMiddlewareEnvelope:
         return TestClient(app, raise_server_exceptions=False)
 
     def test_oversized_content_length_returns_413_envelope(
-        self, client: TestClient,
+        self,
+        client: TestClient,
     ):
         # Send a content-length one byte over the limit. We use a 1-byte body
         # but lie about content-length so the middleware fires on the header
@@ -323,7 +320,8 @@ class TestUploadSizeMiddlewareEnvelope:
         assert body["error"]["request_id"] == r.headers["X-Request-ID"]
 
     def test_oversized_with_client_supplied_request_id_propagates(
-        self, client: TestClient,
+        self,
+        client: TestClient,
     ):
         oversized = MAX_UPLOAD_BYTES + 1
         r = client.post(

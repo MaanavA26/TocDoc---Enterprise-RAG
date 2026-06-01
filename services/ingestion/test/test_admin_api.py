@@ -11,8 +11,8 @@ without network access.
 """
 
 import os
-import sys
 import pathlib
+import sys
 from unittest.mock import MagicMock
 
 import pytest
@@ -31,26 +31,25 @@ _INGESTION_ROOT = pathlib.Path(__file__).resolve().parent.parent
 if str(_INGESTION_ROOT) not in sys.path:
     sys.path.insert(0, str(_INGESTION_ROOT))
 
-from fastapi import FastAPI  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
-
+from admin.models import (  # noqa: E402
+    ChunkSample,
+    DocumentDetailResponse,
+    DocumentListResponse,
+    DocumentSummary,
+    IndexStatsResponse,
+)
 from admin.routes import router  # noqa: E402
 from admin.search_admin_service import (  # noqa: E402
     SearchAdminService,
     get_admin_service,
 )
-from admin.models import (  # noqa: E402
-    DocumentDetailResponse,
-    DocumentListResponse,
-    DocumentSummary,
-    IndexStatsResponse,
-    ChunkSample,
-)
-
+from fastapi import FastAPI  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def mock_svc() -> MagicMock:
@@ -74,6 +73,7 @@ VALID_HEADERS = {"X-Admin-Token": "test-admin-token"}
 # Auth tests
 # ---------------------------------------------------------------------------
 
+
 class TestAdminServiceMisconfiguration:
     """When required search env vars are missing, the admin dependency must
     return a clean 503 — NOT escape as a generic 500 via RuntimeError."""
@@ -81,6 +81,7 @@ class TestAdminServiceMisconfiguration:
     def test_missing_search_env_returns_503(self, monkeypatch: pytest.MonkeyPatch):
         # Reset the module-level singleton so get_admin_service re-evaluates env.
         import admin.search_admin_service as svc_module
+
         monkeypatch.setattr(svc_module, "_service_singleton", None)
 
         # Unset the required vars
@@ -98,7 +99,6 @@ class TestAdminServiceMisconfiguration:
 
 
 class TestAdminTokenAuth:
-
     def test_missing_token_returns_401(self, client: TestClient):
         r = client.get("/admin/documents", params={"bot_tag": "client_a"})
         assert r.status_code == 401
@@ -112,9 +112,7 @@ class TestAdminTokenAuth:
         )
         assert r.status_code == 401
 
-    def test_unset_server_token_returns_503(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_unset_server_token_returns_503(self, client: TestClient, monkeypatch: pytest.MonkeyPatch):
         """When ADMIN_API_TOKEN is unset on the server we refuse rather than bypass."""
         monkeypatch.delenv("ADMIN_API_TOKEN", raising=False)
         r = client.get("/admin/documents", params={"bot_tag": "client_a"}, headers=VALID_HEADERS)
@@ -126,8 +124,8 @@ class TestAdminTokenAuth:
 # Input validation tests
 # ---------------------------------------------------------------------------
 
-class TestInputValidation:
 
+class TestInputValidation:
     def test_missing_bot_tag_returns_422(self, client: TestClient):
         r = client.get("/admin/documents", headers=VALID_HEADERS)
         assert r.status_code == 422
@@ -169,8 +167,8 @@ class TestInputValidation:
 # Route-layer behavior tests (mocked SearchAdminService)
 # ---------------------------------------------------------------------------
 
-class TestListDocuments:
 
+class TestListDocuments:
     def test_returns_grouped_response(self, client: TestClient, mock_svc: MagicMock):
         mock_svc.list_documents.return_value = DocumentListResponse(
             bot_tag="client_a",
@@ -211,7 +209,6 @@ class TestListDocuments:
 
 
 class TestGetDocument:
-
     def test_returns_detail_when_found(self, client: TestClient, mock_svc: MagicMock):
         mock_svc.get_document.return_value = DocumentDetailResponse(
             bot_tag="client_a",
@@ -233,9 +230,7 @@ class TestGetDocument:
         assert body["document_id"] == "abc123"
         assert body["chunk_count"] == 24
 
-    def test_returns_404_when_doc_in_different_bot_tag(
-        self, client: TestClient, mock_svc: MagicMock
-    ):
+    def test_returns_404_when_doc_in_different_bot_tag(self, client: TestClient, mock_svc: MagicMock):
         # Service returns None when filter matches nothing.
         mock_svc.get_document.return_value = None
         r = client.get(
@@ -250,7 +245,6 @@ class TestGetDocument:
 
 
 class TestIndexStats:
-
     def test_returns_stats(self, client: TestClient, mock_svc: MagicMock):
         mock_svc.get_index_stats.return_value = IndexStatsResponse(
             bot_tag="client_a",
@@ -275,6 +269,7 @@ class TestIndexStats:
 # ---------------------------------------------------------------------------
 # Service layer tests (mocked SearchClient)
 # ---------------------------------------------------------------------------
+
 
 def _make_paged_search_result(pages: list[list[dict]]) -> MagicMock:
     """Build a mock search result whose `.by_page()` yields the given pages."""
@@ -347,9 +342,7 @@ class TestPagination:
 
         assert result.count == 3
         chunk_total = sum(d.chunk_count for d in result.documents)
-        assert chunk_total == 2500, (
-            f"Expected to visit all 2500 chunks across pages, got {chunk_total}"
-        )
+        assert chunk_total == 2500, f"Expected to visit all 2500 chunks across pages, got {chunk_total}"
 
     def test_index_stats_counts_per_document_not_per_chunk(self):
         # 5 chunks across 2 documents. source_types/fr_modes should count docs not chunks.
@@ -410,12 +403,7 @@ class TestChunkIndexExtraction:
     """Defensive parsing of chunk_index from the deterministic ID format."""
 
     def test_extracts_index_from_well_formed_id(self):
-        assert (
-            SearchAdminService._extract_chunk_index(
-                "client_a_abc123_layout_00042"
-            )
-            == 42
-        )
+        assert SearchAdminService._extract_chunk_index("client_a_abc123_layout_00042") == 42
 
     def test_returns_none_for_malformed_id(self):
         assert SearchAdminService._extract_chunk_index("malformed") is None

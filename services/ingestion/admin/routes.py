@@ -16,12 +16,12 @@ from functools import partial
 from typing import Annotated
 
 from azure.core.exceptions import AzureError
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 
 # Absolute import — `errors` is a top-level module under services/ingestion/,
 # not inside the `admin/` package. Works in both runtime (uvicorn cwd =
 # services/ingestion/) and tests (sys.path includes services/ingestion/).
 from errors import default_error_responses
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 
 from .auth import require_admin_token
 from .models import (
@@ -69,18 +69,18 @@ async def list_documents(
     """List one row per indexed document, grouped from chunk-level data."""
     loop = asyncio.get_running_loop()
     try:
-        return await loop.run_in_executor(
-            _executor, partial(svc.list_documents, bot_tag)
-        )
+        return await loop.run_in_executor(_executor, partial(svc.list_documents, bot_tag))
     except AzureError as e:
         logger.error(
             "Azure Search failure in list_documents for bot_tag=%r: %s",
-            bot_tag, e, exc_info=True,
+            bot_tag,
+            e,
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Search index temporarily unavailable",
-        )
+        ) from e
 
 
 @router.get(
@@ -102,18 +102,19 @@ async def get_document(
     """Return summary for one document; 404 if not in this bot_tag scope."""
     loop = asyncio.get_running_loop()
     try:
-        result = await loop.run_in_executor(
-            _executor, partial(svc.get_document, bot_tag, document_id)
-        )
+        result = await loop.run_in_executor(_executor, partial(svc.get_document, bot_tag, document_id))
     except AzureError as e:
         logger.error(
             "Azure Search failure in get_document for bot_tag=%r document_id=%r: %s",
-            bot_tag, document_id, e, exc_info=True,
+            bot_tag,
+            document_id,
+            e,
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Search index temporarily unavailable",
-        )
+        ) from e
 
     if result is None:
         # Spec: 404 when no chunks exist for this document in this bot scope.
@@ -139,15 +140,15 @@ async def index_stats(
     """Return document and chunk counts plus per-source-type/per-mode breakdowns."""
     loop = asyncio.get_running_loop()
     try:
-        return await loop.run_in_executor(
-            _executor, partial(svc.get_index_stats, bot_tag)
-        )
+        return await loop.run_in_executor(_executor, partial(svc.get_index_stats, bot_tag))
     except AzureError as e:
         logger.error(
             "Azure Search failure in index_stats for bot_tag=%r: %s",
-            bot_tag, e, exc_info=True,
+            bot_tag,
+            e,
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Search index temporarily unavailable",
-        )
+        ) from e

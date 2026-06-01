@@ -42,18 +42,18 @@ _QNA_ROOT = pathlib.Path(__file__).resolve().parent.parent
 if str(_QNA_ROOT) not in sys.path:
     sys.path.insert(0, str(_QNA_ROOT))
 
+from src.core.auth import AuthUtils  # noqa: E402
 from src.core.errors import (  # noqa: E402
-    register_exception_handlers,
-    raise_api_error,
     ApiErrorCode,
+    raise_api_error,
+    register_exception_handlers,
 )
 from src.core.observability import RequestIDMiddleware  # noqa: E402
-from src.core.auth import AuthUtils  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 class _Item(BaseModel):
     name: str
@@ -112,6 +112,7 @@ def client(app: FastAPI) -> TestClient:
 # HTTPException handling — back-compat (string detail) + new (dict detail)
 # ---------------------------------------------------------------------------
 
+
 class TestHttpExceptionHandling:
     """Back-compat string-detail callsites still produce the envelope."""
 
@@ -159,8 +160,8 @@ class TestHttpExceptionHandling:
 # Unhandled exception → 500 envelope WITH X-Request-ID — closes PR #8 debt
 # ---------------------------------------------------------------------------
 
-class TestUnhandledException:
 
+class TestUnhandledException:
     def test_returns_500_envelope(self, client: TestClient):
         r = client.get("/unhandled")
         assert r.status_code == 500
@@ -194,8 +195,8 @@ class TestUnhandledException:
 # RequestValidationError → 422 envelope with structured `errors` list
 # ---------------------------------------------------------------------------
 
-class TestValidationError:
 
+class TestValidationError:
     def test_returns_422_envelope_with_errors_list(self, client: TestClient):
         r = client.post("/validate", json={"name": "x"})  # missing 'count'
         assert r.status_code == 422
@@ -209,9 +210,7 @@ class TestValidationError:
         # Verify `loc` is a list (FastAPI's structured field location).
         assert isinstance(err0["loc"], list)
 
-    def test_errors_field_absent_on_non_validation_responses(
-        self, client: TestClient
-    ):
+    def test_errors_field_absent_on_non_validation_responses(self, client: TestClient):
         """`errors` is exclude_none in the response — only validation 422s carry it."""
         r = client.get("/string-detail-400")
         body = r.json()
@@ -222,8 +221,8 @@ class TestValidationError:
 # X-Request-ID propagation
 # ---------------------------------------------------------------------------
 
-class TestRequestIdPropagation:
 
+class TestRequestIdPropagation:
     def test_uses_preset_state_request_id(self, client: TestClient):
         """When `request.state.request_id` is set (in production, by
         RequestIDMiddleware), the handler reuses it for both the body
@@ -245,8 +244,8 @@ class TestRequestIdPropagation:
 # raise_api_error helper
 # ---------------------------------------------------------------------------
 
-class TestRaiseApiError:
 
+class TestRaiseApiError:
     def test_raises_http_exception_with_dict_detail(self):
         with pytest.raises(HTTPException) as excinfo:
             raise_api_error("CUSTOM_CODE", "the message", 418)
@@ -256,7 +255,9 @@ class TestRaiseApiError:
     def test_preserves_headers_arg(self):
         with pytest.raises(HTTPException) as excinfo:
             raise_api_error(
-                "UNAUTHORIZED", "bad", 401,
+                "UNAUTHORIZED",
+                "bad",
+                401,
                 headers={"WWW-Authenticate": "Bearer"},
             )
         assert excinfo.value.headers == {"WWW-Authenticate": "Bearer"}
@@ -265,6 +266,7 @@ class TestRaiseApiError:
 # ---------------------------------------------------------------------------
 # ApiErrorCode stability — codes are part of the public API contract
 # ---------------------------------------------------------------------------
+
 
 class TestApiErrorCodeStability:
     """Guard against accidental renames of the public code values."""
@@ -292,6 +294,7 @@ class TestApiErrorCodeStability:
 #   3. Client-supplied X-Request-ID propagates end-to-end through every
 #      error path.
 
+
 class TestRequestIdMiddlewareIntegration:
     """RequestIDMiddleware + register_exception_handlers — full stack."""
 
@@ -316,7 +319,8 @@ class TestRequestIdMiddlewareIntegration:
         return TestClient(app, raise_server_exceptions=False)
 
     def test_unhandled_500_carries_request_id_from_middleware(
-        self, client: TestClient,
+        self,
+        client: TestClient,
     ):
         r = client.get("/boom")
         assert r.status_code == 500
@@ -371,7 +375,8 @@ class TestAuthMiddlewareEnvelope:
         return TestClient(app, raise_server_exceptions=False)
 
     def test_missing_authorization_returns_envelope_401(
-        self, client: TestClient,
+        self,
+        client: TestClient,
     ):
         r = client.get("/protected")
         assert r.status_code == 401
@@ -385,7 +390,8 @@ class TestAuthMiddlewareEnvelope:
         assert body["error"]["request_id"] == r.headers["X-Request-ID"]
 
     def test_malformed_authorization_returns_envelope_401(
-        self, client: TestClient,
+        self,
+        client: TestClient,
     ):
         # "Basic" header instead of "Bearer" — same 401 envelope path.
         r = client.get("/protected", headers={"Authorization": "Basic abc123"})
@@ -395,7 +401,8 @@ class TestAuthMiddlewareEnvelope:
         assert "detail" not in body
 
     def test_client_supplied_request_id_propagates_to_auth_failure(
-        self, client: TestClient,
+        self,
+        client: TestClient,
     ):
         r = client.get(
             "/protected",

@@ -1,8 +1,8 @@
 ######### Utils.py ##########
 
-from pydantic import BaseModel, ConfigDict
-from typing import Optional, List
 import re
+
+from pydantic import BaseModel, ConfigDict
 
 
 class BotQuery(BaseModel):
@@ -18,9 +18,10 @@ class BotQuery(BaseModel):
         - `model_config.extra = "allow"` permits additional fields without validation errors,
           preserving backward/forward compatibility with upstream payloads.
     """
+
     user_query: str
-    bot_response: Optional[str] = None
-    answer: Optional[str] = None
+    bot_response: str | None = None
+    answer: str | None = None
     model_config = ConfigDict(extra="allow")
 
 
@@ -34,8 +35,9 @@ class Payload(BaseModel):
         fr_tag: Feature/retrieval tag (e.g., 'read'/'layout' upstream).
         bot_tag: Bot identifier/tag.
     """
+
     session_id: str
-    bot: List[BotQuery]
+    bot: list[BotQuery]
     fr_tag: str
     bot_tag: str
 
@@ -117,6 +119,7 @@ def _latest_three_and_reply(history):
 
     return latest_q, (prev_q or None), (prev_prev_q or None), last_resp
 
+
 def _norm_name(s: str) -> str:
     """
     Normalize a filename-ish string to improve matching robustness.
@@ -131,19 +134,20 @@ def _norm_name(s: str) -> str:
         return ""
     s = s.strip()
     # strip common leading list markers
-    s = re.sub(r'^\s*(?:[-*•]\s+|\d+[\.\)]\s+)', '', s)
+    s = re.sub(r"^\s*(?:[-*•]\s+|\d+[\.\)]\s+)", "", s)
     # collapse whitespace and lowercase
-    s = re.sub(r'\s+', ' ', s).lower()
+    s = re.sub(r"\s+", " ", s).lower()
     # drop surrounding quotes/backticks
-    s = s.strip('`"\'')
+    s = s.strip("`\"'")
     # drop trailing punctuation that LLMs sometimes leave
-    s = s.rstrip('.,;:')
+    s = s.rstrip(".,;:")
     # remove any characters except letters/digits/space/._-
-    s = re.sub(r'[^a-z0-9\.\- _]+', '', s)
+    s = re.sub(r"[^a-z0-9\.\- _]+", "", s)
     return s
+
 
 def _stem(n: str) -> str:
     """
     A lightweight 'stem' (filename without extension) without importing os/pathlib.
     """
-    return re.sub(r'\.[a-z0-9]{1,6}$', '', n)  # handles .pdf/.docx/.xlsx/etc.
+    return re.sub(r"\.[a-z0-9]{1,6}$", "", n)  # handles .pdf/.docx/.xlsx/etc.

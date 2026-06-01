@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Any, Optional
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -67,11 +67,11 @@ class ErrorBody(BaseModel):
 
     code: str = Field(..., description="Stable error code; see ApiErrorCode.")
     message: str = Field(..., description="Human-readable safe message.")
-    request_id: Optional[str] = Field(
+    request_id: str | None = Field(
         None,
         description="Correlation ID; matches the X-Request-ID response header when available.",
     )
-    errors: Optional[list[dict[str, Any]]] = Field(
+    errors: list[dict[str, Any]] | None = Field(
         None,
         description="Structured per-field validation errors (only present for VALIDATION_ERROR).",
     )
@@ -87,7 +87,7 @@ def raise_api_error(
     code: str,
     message: str,
     status_code: int,
-    headers: Optional[dict[str, str]] = None,
+    headers: dict[str, str] | None = None,
 ) -> None:
     """Raise an `HTTPException` whose detail dict carries the error code.
 
@@ -116,8 +116,8 @@ def build_error_response(
     code: str,
     message: str,
     status_code: int,
-    extra_headers: Optional[dict[str, str]] = None,
-    validation_errors: Optional[list[dict[str, Any]]] = None,
+    extra_headers: dict[str, str] | None = None,
+    validation_errors: list[dict[str, Any]] | None = None,
 ) -> JSONResponse:
     """Construct an error `JSONResponse` matching the envelope contract.
 
@@ -165,9 +165,7 @@ def build_error_response(
     )
 
 
-async def http_exception_handler(
-    request: Request, exc: HTTPException
-) -> JSONResponse:
+async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
     """Convert any HTTPException into the envelope (string- or dict-detail)."""
     detail = exc.detail
     if isinstance(detail, dict) and "code" in detail and "message" in detail:
@@ -186,20 +184,20 @@ async def http_exception_handler(
     )
 
 
-async def validation_exception_handler(
-    request: Request, exc: RequestValidationError
-) -> JSONResponse:
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     """422 handler — exposes safe structured per-field errors."""
     safe_errors: list[dict[str, Any]] = []
     for err in exc.errors():
         msg = err.get("msg", "")
         if isinstance(msg, str) and len(msg) > _MAX_ERROR_FIELD_LEN:
             msg = msg[:_MAX_ERROR_FIELD_LEN] + "..."
-        safe_errors.append({
-            "loc": list(err.get("loc", [])),
-            "type": err.get("type", ""),
-            "msg": msg,
-        })
+        safe_errors.append(
+            {
+                "loc": list(err.get("loc", [])),
+                "type": err.get("type", ""),
+                "msg": msg,
+            }
+        )
 
     return build_error_response(
         request,
@@ -210,14 +208,13 @@ async def validation_exception_handler(
     )
 
 
-async def unhandled_exception_handler(
-    request: Request, exc: Exception
-) -> JSONResponse:
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Catch-all — unhandled exceptions become 500 envelopes with X-Request-ID."""
     request_id = getattr(request.state, "request_id", None)
     logger.exception(
         "Unhandled exception in request handler (request_id=%s, error_class=%s)",
-        request_id, type(exc).__name__,
+        request_id,
+        type(exc).__name__,
     )
     return build_error_response(
         request,
