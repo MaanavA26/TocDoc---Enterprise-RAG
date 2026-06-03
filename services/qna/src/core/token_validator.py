@@ -6,22 +6,22 @@ configurable TTL, and validates incoming JWTs with full cryptographic
 signature verification.
 """
 
-import time
+import asyncio
 import json
 import logging
-import asyncio
+import time
 from functools import partial
-from typing import Optional
 from urllib import request as urllib_request
 from urllib.error import URLError
 
-from jose import jwt, JWTError, ExpiredSignatureError
+from jose import ExpiredSignatureError, JWTError, jwt
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Custom exception
 # ---------------------------------------------------------------------------
+
 
 class TokenValidationError(Exception):
     """Raised when a JWT cannot be validated. Carries an HTTP status code."""
@@ -43,8 +43,12 @@ _CACHE_TTL = 3600  # seconds
 
 def _fetch_jwks_sync(url: str) -> list:
     """Fetch JWKS keys synchronously using urllib (stdlib, no extra deps)."""
+    # Defensive: signing keys are only ever fetched over HTTPS. Without this
+    # guard urlopen would also accept file:// or other local schemes (bandit B310).
+    if not url.lower().startswith("https://"):
+        raise TokenValidationError("JWKS URL must use HTTPS", status_code=500)
     try:
-        with urllib_request.urlopen(url, timeout=10) as resp:
+        with urllib_request.urlopen(url, timeout=10) as resp:  # nosec B310 - https scheme enforced above; fixed Azure AD JWKS endpoint
             body = resp.read()
         data = json.loads(body)
         keys = data.get("keys", [])
@@ -55,14 +59,10 @@ def _fetch_jwks_sync(url: str) -> list:
         raise
     except URLError as exc:
         logger.error("Failed to fetch JWKS from %s: %s", url, exc)
-        raise TokenValidationError(
-            "Unable to retrieve Azure AD signing keys", status_code=503
-        ) from exc
+        raise TokenValidationError("Unable to retrieve Azure AD signing keys", status_code=503) from exc
     except Exception as exc:
         logger.error("Unexpected error fetching JWKS from %s: %s", url, exc)
-        raise TokenValidationError(
-            "Unable to retrieve Azure AD signing keys", status_code=503
-        ) from exc
+        raise TokenValidationError("Unable to retrieve Azure AD signing keys", status_code=503) from exc
 
 
 async def _get_jwks(tenant_id: str) -> list:
@@ -80,9 +80,7 @@ async def _get_jwks(tenant_id: str) -> list:
     if cached and (now - cached["fetched_at"]) < _CACHE_TTL:
         return cached["keys"]
 
-    jwks_url = (
-        f"https://login.microsoftonline.com/{tenant_id}/discovery/v2.0/keys"
-    )
+    jwks_url = f"https://login.microsoftonline.com/{tenant_id}/discovery/v2.0/keys"
     logger.info("Fetching JWKS from %s", jwks_url)
 
     # Run the synchronous urllib call in a thread executor so we don't block
@@ -97,6 +95,7 @@ async def _get_jwks(tenant_id: str) -> list:
 # ---------------------------------------------------------------------------
 # Public validation function
 # ---------------------------------------------------------------------------
+
 
 async def validate_token(token: str, tenant_id: str, audience: str) -> dict:
     """
@@ -144,7 +143,7 @@ async def validate_token(token: str, tenant_id: str, audience: str) -> dict:
     except TokenValidationError:
         raise
 
-    matching_key: Optional[dict] = None
+    matching_key: dict | None = None
     for key in jwks_keys:
         if key.get("kid") == kid:
             matching_key = key
@@ -164,9 +163,7 @@ async def validate_token(token: str, tenant_id: str, audience: str) -> dict:
                 break
 
     if matching_key is None:
-        raise TokenValidationError(
-            "No matching signing key found for token 'kid'"
-        )
+        raise TokenValidationError("No matching signing key found for token 'kid'")
 
     # ------------------------------------------------------------------
     # Step 4: Decode and verify with python-jose.  Signature verification

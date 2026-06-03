@@ -1,12 +1,14 @@
 import asyncio
 import time
-from typing import List, Dict, Any
-from azure.search.documents.models import VectorizedQuery
-from src.config.config import LocalConfig
-from src.core.logger import logger
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
+from typing import Any
+
+from azure.search.documents.models import VectorizedQuery
+
+from src.config.config import LocalConfig
+from src.core.logger import logger
 
 # ---------------------------------------------------------------------------
 # Executors / local config
@@ -15,7 +17,9 @@ search_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="search")
 localconfig = LocalConfig()
 
 
-async def perform_search(azure, query: str, vector: List[float], fr_mode: str, bot_tag: str) -> List[Dict[str, Any]]:
+async def perform_search(
+    azure, query: str, vector: list[float], fr_mode: str, bot_tag: str
+) -> list[dict[str, Any]]:
     """
     Execute a hybrid (text + vector) search against Azure Cognitive Search.
 
@@ -70,7 +74,9 @@ async def perform_search(azure, query: str, vector: List[float], fr_mode: str, b
         raise
 
 
-def _search_sync(azure, query: str, vector: List[float], fr_mode: str, bot_tag: str, top: int) -> List[Dict[str, Any]]:
+def _search_sync(
+    azure, query: str, vector: list[float], fr_mode: str, bot_tag: str, top: int
+) -> list[dict[str, Any]]:
     """
     Synchronous helper that performs the actual Azure Cognitive Search call.
 

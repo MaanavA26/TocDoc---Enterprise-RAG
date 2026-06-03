@@ -35,7 +35,7 @@ import sys
 import time
 import uuid
 from contextvars import ContextVar
-from typing import Any, Optional
+from typing import Any
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -53,9 +53,7 @@ _MIDDLEWARE_LOGGER_NAME = "observability.middleware"
 
 # ContextVar so background tasks and helpers can resolve the current
 # request_id without it being threaded through every function signature.
-_current_request_id: ContextVar[Optional[str]] = ContextVar(
-    "tocdoc_current_request_id", default=None
-)
+_current_request_id: ContextVar[str | None] = ContextVar("tocdoc_current_request_id", default=None)
 
 
 def _ensure_handler_attached(logger: logging.Logger) -> None:
@@ -83,16 +81,14 @@ def _ensure_handler_attached(logger: logging.Logger) -> None:
         current = current.parent
 
     handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(
-        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-    )
+    handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
     logger.addHandler(handler)
     # Honor LOG_LEVEL env if set; default INFO so request lifecycle events ship.
     level_name = os.getenv("LOG_LEVEL", "INFO").upper()
     logger.setLevel(getattr(logging, level_name, logging.INFO))
 
 
-def _validate_request_id(value: Optional[str]) -> Optional[str]:
+def _validate_request_id(value: str | None) -> str | None:
     """Return value if it matches the allowed pattern, else None."""
     if value and _REQUEST_ID_PATTERN.match(value):
         return value
@@ -104,7 +100,7 @@ def _generate_request_id() -> str:
     return str(uuid.uuid4())
 
 
-def get_current_request_id() -> Optional[str]:
+def get_current_request_id() -> str | None:
     """Return the current request's ID if any (set by RequestIDMiddleware)."""
     return _current_request_id.get()
 
@@ -120,7 +116,7 @@ def log_event(
     logger: logging.Logger,
     event: str,
     *,
-    request_id: Optional[str] = None,
+    request_id: str | None = None,
     level: int = logging.INFO,
     max_field_len: int = _MAX_FIELD_LEN,
     **fields: Any,
@@ -161,8 +157,10 @@ def log_event(
 
     try:
         line = json.dumps(payload, default=str, ensure_ascii=False)
-    except (TypeError, ValueError):
-        # Last-ditch fallback so log_event NEVER raises.
+    except Exception:
+        # Last-ditch fallback so log_event NEVER raises. Broad by design: a
+        # field value whose own __str__/__repr__ raises would otherwise escape
+        # `default=str` as an arbitrary exception type (not just TypeError).
         line = f"event={event} request_id={rid} (json_serialization_failed)"
 
     logger.log(level, line)
@@ -190,7 +188,7 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
       logs can include it).
     """
 
-    def __init__(self, app, logger: Optional[logging.Logger] = None) -> None:
+    def __init__(self, app, logger: logging.Logger | None = None) -> None:
         super().__init__(app)
         self._logger = logger or logging.getLogger(_MIDDLEWARE_LOGGER_NAME)
         # Ensure events ship to stdout even when consumers haven't configured
@@ -232,9 +230,9 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
             # can debug; do NOT include this in the response or in the
             # structured event below.
             self._logger.exception(
-                "Unhandled exception in request handler "
-                "(request_id=%s, error_class=%s)",
-                request_id, type(exc).__name__,
+                "Unhandled exception in request handler (request_id=%s, error_class=%s)",
+                request_id,
+                type(exc).__name__,
             )
             log_event(
                 self._logger,

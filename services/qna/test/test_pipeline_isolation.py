@@ -7,10 +7,12 @@ P0-3: Verifies that generate_answer() no longer uses a module-level global
 P0-2: Verifies that perform_search() enforces bot_tag filtering and rejects
       empty bot_tag values before any search executes.
 """
-import os
-import pytest
+
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch, call
+import os
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 # ---------------------------------------------------------------------------
 # Required env vars must be set before any local imports
@@ -32,6 +34,7 @@ os.environ.setdefault("AUDIENCE_ID", "api://fake-audience-id")
 # ---------------------------------------------------------------------------
 class _FakeSearchResultItem(dict):
     """dict subclass that also looks like an Azure SDK result object."""
+
     pass
 
 
@@ -41,13 +44,15 @@ class _FakeSearchClient:
 
     def search(self, **kwargs):
         self._calls.append(kwargs)
-        yield _FakeSearchResultItem({
-            "id": "1",
-            "content": "fake content",
-            "section_header": "sec",
-            "filename": "doc.md",
-            "filepath": "/docs/doc.md",
-        })
+        yield _FakeSearchResultItem(
+            {
+                "id": "1",
+                "content": "fake content",
+                "section_header": "sec",
+                "filename": "doc.md",
+                "filepath": "/docs/doc.md",
+            }
+        )
 
 
 class FakeAzure:
@@ -60,6 +65,7 @@ class FakeAzure:
 # ===========================================================================
 # P0-2: search_service tests
 # ===========================================================================
+
 
 @pytest.mark.asyncio
 async def test_search_filter_includes_bot_tag():
@@ -177,6 +183,7 @@ async def test_different_bot_tags_produce_different_filters():
 # P0-3: qna_pipeline tests
 # ===========================================================================
 
+
 @pytest.mark.asyncio
 async def test_generate_answer_accepts_history_parameter():
     """
@@ -215,17 +222,32 @@ async def test_generate_answer_uses_provided_history_not_global():
 
     fake_azure = FakeAzure()
 
-    with patch.object(qna_pipeline, "_latest_three_and_reply", side_effect=capturing_latest_three), \
-         patch.object(qna_pipeline, "rephrase_queries", new=AsyncMock(return_value={
-             "rephrased_query": "rephrased",
-             "is_greeting": True,  # skip retrieval to avoid embedding calls
-             "extracted_snippet": "",
-             "is_followup": False,
-             "was_rephrased": False,
-         })), \
-         patch.object(qna_pipeline, "generate_openai_response", new=AsyncMock(return_value="Answer text.\n\n**Sources:\n")), \
-         patch.object(qna_pipeline, "extract_answer_and_filenames_from_text", new=AsyncMock(return_value=("Answer text.", []))):
-
+    with (
+        patch.object(qna_pipeline, "_latest_three_and_reply", side_effect=capturing_latest_three),
+        patch.object(
+            qna_pipeline,
+            "rephrase_queries",
+            new=AsyncMock(
+                return_value={
+                    "rephrased_query": "rephrased",
+                    "is_greeting": True,  # skip retrieval to avoid embedding calls
+                    "extracted_snippet": "",
+                    "is_followup": False,
+                    "was_rephrased": False,
+                }
+            ),
+        ),
+        patch.object(
+            qna_pipeline,
+            "generate_openai_response",
+            new=AsyncMock(return_value="Answer text.\n\n**Sources:\n"),
+        ),
+        patch.object(
+            qna_pipeline,
+            "extract_answer_and_filenames_from_text",
+            new=AsyncMock(return_value=("Answer text.", [])),
+        ),
+    ):
         # Call generate_answer with two distinct histories sequentially
         await qna_pipeline.generate_answer(
             query="question from tenant A",
@@ -259,16 +281,27 @@ async def test_generate_answer_none_history_treated_as_empty():
 
     fake_azure = FakeAzure()
 
-    with patch.object(qna_pipeline, "rephrase_queries", new=AsyncMock(return_value={
-             "rephrased_query": "hi",
-             "is_greeting": True,
-             "extracted_snippet": "",
-             "is_followup": False,
-             "was_rephrased": False,
-         })), \
-         patch.object(qna_pipeline, "generate_openai_response", new=AsyncMock(return_value="Hello!\n\n**Sources:\n")), \
-         patch.object(qna_pipeline, "extract_answer_and_filenames_from_text", new=AsyncMock(return_value=("Hello!", []))):
-
+    with (
+        patch.object(
+            qna_pipeline,
+            "rephrase_queries",
+            new=AsyncMock(
+                return_value={
+                    "rephrased_query": "hi",
+                    "is_greeting": True,
+                    "extracted_snippet": "",
+                    "is_followup": False,
+                    "was_rephrased": False,
+                }
+            ),
+        ),
+        patch.object(
+            qna_pipeline, "generate_openai_response", new=AsyncMock(return_value="Hello!\n\n**Sources:\n")
+        ),
+        patch.object(
+            qna_pipeline, "extract_answer_and_filenames_from_text", new=AsyncMock(return_value=("Hello!", []))
+        ),
+    ):
         result = await qna_pipeline.generate_answer(
             query="hi",
             fr_mode="read",
@@ -296,18 +329,31 @@ async def test_generate_answer_passes_bot_tag_to_search():
         captured_search_calls.append({"fr_mode": fr_mode, "bot_tag": bot_tag})
         return []
 
-    with patch.object(qna_pipeline, "rephrase_queries", new=AsyncMock(return_value={
-             "rephrased_query": "what is procurement?",
-             "is_greeting": False,
-             "extracted_snippet": "",
-             "is_followup": False,
-             "was_rephrased": True,
-         })), \
-         patch.object(qna_pipeline, "get_embedding", new=AsyncMock(return_value=[0.1, 0.2, 0.3])), \
-         patch.object(qna_pipeline, "perform_search", side_effect=fake_perform_search), \
-         patch.object(qna_pipeline, "generate_openai_response", new=AsyncMock(return_value="Answer.\n\n**Sources:\n")), \
-         patch.object(qna_pipeline, "extract_answer_and_filenames_from_text", new=AsyncMock(return_value=("Answer.", []))):
-
+    with (
+        patch.object(
+            qna_pipeline,
+            "rephrase_queries",
+            new=AsyncMock(
+                return_value={
+                    "rephrased_query": "what is procurement?",
+                    "is_greeting": False,
+                    "extracted_snippet": "",
+                    "is_followup": False,
+                    "was_rephrased": True,
+                }
+            ),
+        ),
+        patch.object(qna_pipeline, "get_embedding", new=AsyncMock(return_value=[0.1, 0.2, 0.3])),
+        patch.object(qna_pipeline, "perform_search", side_effect=fake_perform_search),
+        patch.object(
+            qna_pipeline, "generate_openai_response", new=AsyncMock(return_value="Answer.\n\n**Sources:\n")
+        ),
+        patch.object(
+            qna_pipeline,
+            "extract_answer_and_filenames_from_text",
+            new=AsyncMock(return_value=("Answer.", [])),
+        ),
+    ):
         await qna_pipeline.generate_answer(
             query="what is procurement?",
             fr_mode="read",
@@ -333,8 +379,9 @@ async def test_concurrent_requests_do_not_cross_contaminate():
     fake_azure = FakeAzure()
     results = {}
 
-    async def fake_rephrase(azure, current_query, prev_query, prev_prev_query,
-                             latest_bot_reply, full_history):
+    async def fake_rephrase(
+        azure, current_query, prev_query, prev_prev_query, latest_bot_reply, full_history
+    ):
         return {
             "rephrased_query": current_query,
             "is_greeting": True,
@@ -351,9 +398,11 @@ async def test_concurrent_requests_do_not_cross_contaminate():
         answer = text.split("\n\n")[0]
         return (answer, [])
 
-    with patch.object(qna_pipeline, "rephrase_queries", side_effect=fake_rephrase), \
-         patch.object(qna_pipeline, "generate_openai_response", side_effect=fake_openai_response), \
-         patch.object(qna_pipeline, "extract_answer_and_filenames_from_text", side_effect=fake_extract):
+    with (
+        patch.object(qna_pipeline, "rephrase_queries", side_effect=fake_rephrase),
+        patch.object(qna_pipeline, "generate_openai_response", side_effect=fake_openai_response),
+        patch.object(qna_pipeline, "extract_answer_and_filenames_from_text", side_effect=fake_extract),
+    ):
 
         async def run_request(tenant_id: str, user_q: str):
             hist = [{"user_query": user_q, "bot_response": None}]

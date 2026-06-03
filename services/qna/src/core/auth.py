@@ -18,7 +18,7 @@ from fastapi import Request
 
 from src.config.config import settings
 from src.core.errors import ApiErrorCode, build_error_response
-from src.core.token_validator import validate_token, TokenValidationError
+from src.core.token_validator import TokenValidationError, validate_token
 
 logger = logging.getLogger(__name__)
 
@@ -56,9 +56,9 @@ class AuthUtils:
 
         # ---- Public routes / methods ----------------------------------------
         if (
-            request.method == "OPTIONS"                           # CORS preflight
-            or path.endswith("/health")                       # health endpoint
-            or path in {"/docs", "/redoc", "/openapi.json"}      # swagger assets
+            request.method == "OPTIONS"  # CORS preflight
+            or path.endswith("/health")  # health endpoint
+            or path in {"/docs", "/redoc", "/openapi.json"}  # swagger assets
         ):
             return await call_next(request)
 
@@ -84,11 +84,7 @@ class AuthUtils:
             )
 
             # Extract email from common claim aliases
-            email = (
-                decoded.get("upn")
-                or decoded.get("preferred_username")
-                or decoded.get("email")
-            )
+            email = decoded.get("upn") or decoded.get("preferred_username") or decoded.get("email")
             if not email:
                 return build_error_response(
                     request,
@@ -104,11 +100,7 @@ class AuthUtils:
             # `e.status_code` is 401 for client-side token issues (expired,
             # wrong audience, malformed) and 503 for JWKS-unavailable cases.
             # `e.message` is set by token_validator and is safe to surface.
-            code = (
-                ApiErrorCode.UPSTREAM_UNAVAILABLE
-                if e.status_code == 503
-                else ApiErrorCode.UNAUTHORIZED
-            )
+            code = ApiErrorCode.UPSTREAM_UNAVAILABLE if e.status_code == 503 else ApiErrorCode.UNAUTHORIZED
             return build_error_response(
                 request,
                 code=code,
@@ -117,9 +109,7 @@ class AuthUtils:
             )
         except Exception as e:
             # Never include `str(e)` in the response — log type only.
-            logger.error(
-                "Auth middleware unexpected error: %s", type(e).__name__
-            )
+            logger.error("Auth middleware unexpected error: %s", type(e).__name__)
             return build_error_response(
                 request,
                 code=ApiErrorCode.INTERNAL_ERROR,

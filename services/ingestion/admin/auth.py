@@ -19,18 +19,18 @@ QnA service uses (see `services/qna/src/core/auth.py`). Until then:
 
 import os
 import secrets
-from typing import Annotated, Optional
+from typing import Annotated
 
 from fastapi import Header, HTTPException, status
 
 
-def _get_admin_token() -> Optional[str]:
+def _get_admin_token() -> str | None:
     """Read `ADMIN_API_TOKEN` from env. Returns None if unset."""
     return os.getenv("ADMIN_API_TOKEN")
 
 
 async def require_admin_token(
-    x_admin_token: Annotated[Optional[str], Header(alias="X-Admin-Token")] = None,
+    x_admin_token: Annotated[str | None, Header(alias="X-Admin-Token")] = None,
 ) -> None:
     """FastAPI dependency: enforce a valid X-Admin-Token header.
 

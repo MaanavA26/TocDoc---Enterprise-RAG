@@ -1,22 +1,22 @@
+import logging
 import os
+import time
 from contextlib import asynccontextmanager
+from datetime import datetime
+
+import src.pipeline.qna_pipeline
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from src.core.lifecycle import startup_event, shutdown_event
-import src.pipeline.qna_pipeline
-import logging
-import time
-from datetime import datetime
-from src.utils.util import Payload, _as_turn
 from src.core.auth import AuthUtils
-from src.core.observability import RequestIDMiddleware
 from src.core.errors import (
-    register_exception_handlers,
+    ApiErrorCode,
     default_error_responses,
     raise_api_error,
-    ApiErrorCode,
+    register_exception_handlers,
 )
-
+from src.core.lifecycle import shutdown_event, startup_event
+from src.core.observability import RequestIDMiddleware
+from src.utils.util import Payload, _as_turn
 
 # ---------------------------------------------------------------------------
 # Logging configuration

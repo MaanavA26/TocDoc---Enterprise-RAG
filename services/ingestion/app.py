@@ -1,17 +1,15 @@
-from contextlib import asynccontextmanager
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
-from starlette.requests import Request
-import custom_rag
-import os
 import logging
+import os
 import sys
-from typing import Optional
+from contextlib import asynccontextmanager
 
-from observability import RequestIDMiddleware
+import custom_rag
 from admin.routes import router as admin_router
-from errors import register_exception_handlers, default_error_responses
+from errors import default_error_responses, register_exception_handlers
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from middleware import limit_upload_size
+from observability import RequestIDMiddleware
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 # Stdout always; file logging only if LOG_FILE env var is set (local dev)
@@ -96,6 +94,7 @@ register_exception_handlers(app)
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
+
 @app.get("/health", summary="Liveness probe")
 async def health_check():
     """Returns service health status."""
@@ -112,7 +111,7 @@ async def upload_file(
         regex="^(read|layout)$",
         description="Azure Document Intelligence model: 'read' (token-chunked) or 'layout' (header-split)",
     ),
-    file: Optional[UploadFile] = File(None),
+    file: UploadFile | None = File(None),
 ):
     """
     Ingest one PDF or an entire folder of PDFs into the Azure Cognitive Search index.
@@ -123,9 +122,7 @@ async def upload_file(
       `layout` uses Markdown-header splitting, preserving document structure.
     - **file**: Required when `filepath` points to a single file uploaded by the client.
     """
-    logger.info(
-        f"Upload request — bot_tag: {bot_tag!r}, filepath: {filepath!r}, fr_mode: {fr_mode!r}"
-    )
+    logger.info(f"Upload request — bot_tag: {bot_tag!r}, filepath: {filepath!r}, fr_mode: {fr_mode!r}")
 
     # ── Folder batch mode ─────────────────────────────────────────────────────
     if os.path.isdir(filepath):
@@ -144,6 +141,7 @@ async def upload_file(
             basename = os.path.basename(file_path)
             logger.info(f"Processing {i}/{len(pdf_files)}: {basename!r}")
             try:
+
                 class _MockFile:
                     def __init__(self, path: str):
                         self.file_path = path
@@ -186,7 +184,7 @@ async def upload_file(
         raise
     except Exception as e:
         logger.error(f"Unexpected error during upload: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Ingestion service unavailable.")
+        raise HTTPException(status_code=500, detail="Ingestion service unavailable.") from e
 
 
 @app.get("/", summary="Service metadata")

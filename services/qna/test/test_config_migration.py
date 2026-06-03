@@ -61,10 +61,12 @@ def _reset_warned_aliases():
 # _get_env resolver
 # ---------------------------------------------------------------------------
 
-class TestGetEnvResolver:
 
+class TestGetEnvResolver:
     def test_canonical_only_resolves_silently(
-        self, monkeypatch: pytest.MonkeyPatch, caplog,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog,
     ):
         monkeypatch.setenv("AZURE_OPENAI_KEY", "from-canonical")
         # Legacy name is unset
@@ -75,12 +77,12 @@ class TestGetEnvResolver:
 
         assert value == "from-canonical"
         # No deprecation warning emitted on the canonical path
-        assert not any(
-            "Deprecated" in r.message for r in caplog.records
-        )
+        assert not any("Deprecated" in r.message for r in caplog.records)
 
     def test_legacy_only_resolves_with_warning(
-        self, monkeypatch: pytest.MonkeyPatch, caplog,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog,
     ):
         monkeypatch.delenv("AZURE_OPENAI_KEY", raising=False)
         monkeypatch.setenv("TocdocOpenAIKey", "from-legacy")
@@ -99,7 +101,9 @@ class TestGetEnvResolver:
         assert "AZURE_OPENAI_KEY" in msg
 
     def test_canonical_wins_when_both_set(
-        self, monkeypatch: pytest.MonkeyPatch, caplog,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog,
     ):
         monkeypatch.setenv("AZURE_OPENAI_KEY", "from-canonical")
         monkeypatch.setenv("TocdocOpenAIKey", "from-legacy")
@@ -109,12 +113,12 @@ class TestGetEnvResolver:
 
         # Canonical wins, legacy is silently ignored
         assert value == "from-canonical"
-        assert not any(
-            "Deprecated" in r.message for r in caplog.records
-        )
+        assert not any("Deprecated" in r.message for r in caplog.records)
 
     def test_neither_set_returns_default(
-        self, monkeypatch: pytest.MonkeyPatch, caplog,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog,
     ):
         monkeypatch.delenv("AZURE_OPENAI_KEY", raising=False)
         monkeypatch.delenv("TocdocOpenAIKey", raising=False)
@@ -124,12 +128,12 @@ class TestGetEnvResolver:
         assert cfg._get_env("AZURE_OPENAI_KEY", default="fallback") == "fallback"
         # No deprecation warning when neither name is set — only the
         # legacy-hit path warns.
-        assert not any(
-            "Deprecated" in r.message for r in caplog.records
-        )
+        assert not any("Deprecated" in r.message for r in caplog.records)
 
     def test_warning_is_one_shot_per_alias(
-        self, monkeypatch: pytest.MonkeyPatch, caplog,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog,
     ):
         monkeypatch.delenv("AZURE_OPENAI_KEY", raising=False)
         monkeypatch.setenv("TocdocOpenAIKey", "from-legacy")
@@ -144,9 +148,10 @@ class TestGetEnvResolver:
 
 
 class TestMixedCanonicalAndLegacy:
-
     def test_mix_resolves_all_with_warnings_only_for_legacy(
-        self, monkeypatch: pytest.MonkeyPatch, caplog,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog,
     ):
         # Canonical: AZURE_OPENAI_KEY. Legacy: AzureSearchEndpoint.
         monkeypatch.setenv("AZURE_OPENAI_KEY", "canonical-1")
@@ -168,6 +173,7 @@ class TestMixedCanonicalAndLegacy:
 # ---------------------------------------------------------------------------
 # Key Vault dual-read — legacy KV secret writes to canonical os.environ key
 # ---------------------------------------------------------------------------
+
 
 class TestKeyVaultDualRead:
     """Verify the loader's three-step KV lookup contract:
@@ -216,6 +222,7 @@ class TestKeyVaultDualRead:
             with patch("src.config.config.SecretClient", return_value=mock_client):
                 with patch("src.config.config.ClientSecretCredential", return_value=mock_credential):
                     import asyncio
+
                     results = asyncio.run(cfg.Settings.load_secrets_from_keyvault())
 
         # Resolved via the hyphenated canonical KV name
@@ -264,6 +271,7 @@ class TestKeyVaultDualRead:
             with patch("src.config.config.SecretClient", return_value=mock_client):
                 with patch("src.config.config.ClientSecretCredential", return_value=mock_credential):
                     import asyncio
+
                     results = asyncio.run(cfg.Settings.load_secrets_from_keyvault())
 
         assert results == {"AZURE_OPENAI_KEY": True}
@@ -300,6 +308,7 @@ class TestKeyVaultDualRead:
             with patch("src.config.config.SecretClient", return_value=mock_client):
                 with patch("src.config.config.ClientSecretCredential", return_value=mock_credential):
                     import asyncio
+
                     asyncio.run(cfg.Settings.load_secrets_from_keyvault())
 
         called_names = {c.args[0] for c in mock_client.get_secret.call_args_list}
@@ -323,6 +332,7 @@ class TestKeyVaultDualRead:
             with patch("src.config.config.SecretClient", return_value=mock_client):
                 with patch("src.config.config.ClientSecretCredential", return_value=mock_credential):
                     import asyncio
+
                     results = asyncio.run(cfg.Settings.load_secrets_from_keyvault())
 
         assert results == {"AZURE_OPENAI_KEY": False}
@@ -335,6 +345,7 @@ class TestKeyVaultDualRead:
 # ---------------------------------------------------------------------------
 # Settings + AzureConfig + LocalConfig — sanity-check the public API
 # ---------------------------------------------------------------------------
+
 
 class TestSettingsApiSurface:
     """The internal Python attribute names didn't change in P0-7. Downstream
@@ -352,7 +363,8 @@ class TestSettingsApiSurface:
         assert hasattr(cfg.settings, "AUDIENCE_ID")
 
     def test_azure_config_reads_canonical(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ):
         # Make sure neither name is set first to avoid carryover.
         for n in ("AZURE_OPENAI_VERSION", "AzureOpenaiApiVersion"):
@@ -363,7 +375,9 @@ class TestSettingsApiSurface:
         assert ac.AZURE_OPENAI_API_VERSION == "from-canonical"
 
     def test_azure_config_falls_back_to_legacy_with_warning(
-        self, monkeypatch: pytest.MonkeyPatch, caplog,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog,
     ):
         for n in ("AZURE_OPENAI_VERSION", "AzureOpenaiApiVersion"):
             monkeypatch.delenv(n, raising=False)
@@ -376,7 +390,8 @@ class TestSettingsApiSurface:
         assert any("AzureOpenaiApiVersion" in m for m in warnings)
 
     def test_local_config_llm_model_canonical(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ):
         for n in ("AZURE_OPENAI_LLM_MODEL", "AzureOpenaiLlmModel"):
             monkeypatch.delenv(n, raising=False)
@@ -386,7 +401,8 @@ class TestSettingsApiSurface:
         assert lc.AZURE_LLM_MODEL == "gpt-test-model"
 
     def test_local_config_llm_model_default_when_neither_set(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ):
         for n in ("AZURE_OPENAI_LLM_MODEL", "AzureOpenaiLlmModel"):
             monkeypatch.delenv(n, raising=False)
@@ -398,6 +414,7 @@ class TestSettingsApiSurface:
 # ---------------------------------------------------------------------------
 # Migration table integrity
 # ---------------------------------------------------------------------------
+
 
 class TestMigrationTable:
     """Guard against accidental drift in the migration mappings."""
@@ -446,11 +463,11 @@ class TestMigrationTable:
         lowercase form satisfies this; the UPPER_SNAKE env-var form does
         NOT (underscores)."""
         import re
+
         pattern = re.compile(r"^[a-zA-Z0-9-]+$")
         for canonical, kv_name in cfg._KV_SECRET_NAMES.items():
             assert pattern.match(kv_name), (
-                f"_KV_SECRET_NAMES[{canonical!r}] = {kv_name!r} is not a "
-                f"valid Azure Key Vault secret name."
+                f"_KV_SECRET_NAMES[{canonical!r}] = {kv_name!r} is not a valid Azure Key Vault secret name."
             )
             assert "_" not in kv_name, (
                 f"_KV_SECRET_NAMES[{canonical!r}] contains an underscore — "
@@ -461,6 +478,7 @@ class TestMigrationTable:
         """Legacy PascalCase secret names must also be valid KV names
         (they always have been — KV permits alphanumerics)."""
         import re
+
         pattern = re.compile(r"^[a-zA-Z0-9-]+$")
         for canonical, legacy in cfg._LEGACY_ENV_ALIASES.items():
             assert pattern.match(legacy), (

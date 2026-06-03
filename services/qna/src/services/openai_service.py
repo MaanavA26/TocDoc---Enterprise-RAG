@@ -1,13 +1,13 @@
 import asyncio
-import time
-from typing import List, Optional, Dict
-import traceback
 import re
+import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from inspect import isawaitable
+
+from src.config.config import LocalConfig
 from src.core.logger import logger
 from src.llm.prompts import generate_bot, rephrasal_prompt
-from src.config.config import LocalConfig
 
 # ---------------------------------------------------------------------------
 # Executors / local config
@@ -18,7 +18,7 @@ localconfig = LocalConfig()
 
 async def generate_openai_response(
     query: str,
-    knowledge_source: List[str],
+    knowledge_source: list[str],
     is_greeting: bool,
     is_follow_up: bool,
     azure,
@@ -76,7 +76,7 @@ async def generate_openai_response(
 
 def _generate_response_sync(
     query: str,
-    knowledge_source: List[str],
+    knowledge_source: list[str],
     is_greeting: bool,
     is_follow_up: bool,
     azure,
@@ -122,11 +122,11 @@ def _generate_response_sync(
 async def rephrase_queries(
     azure,
     current_query: str,
-    prev_query: Optional[str] = None,
-    prev_prev_query: Optional[str] = None,
-    latest_bot_reply: Optional[str] = None,
-    full_history: Optional[List[Dict[str, Optional[str]]]] = None,
-) -> Dict[str, object]:
+    prev_query: str | None = None,
+    prev_prev_query: str | None = None,
+    latest_bot_reply: str | None = None,
+    full_history: list[dict[str, str | None]] | None = None,
+) -> dict[str, object]:
     """
     Optionally rephrase the current user query using recent conversation context.
 
@@ -184,7 +184,7 @@ async def rephrase_queries(
         if isawaitable(resp):
             resp = await resp
 
-        response_content = (resp.choices[0].message.content or "")
+        response_content = resp.choices[0].message.content or ""
         logger.info(f"Response from rephrasal LLM: {response_content}")
 
         pattern = r'\["([^"]+)"\](?:\[(greeting|followup)\])?'

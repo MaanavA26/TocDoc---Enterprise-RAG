@@ -14,15 +14,16 @@ Expected history shape: List[{"user_query": str, "bot_response": Optional[str]}]
 """
 
 import time
-from typing import Dict, Any, Optional, List
-from src.core.logger import logger
-from src.services.embedding_service import get_embedding
-from src.services.search_service import perform_search
-from src.services.openai_service import generate_openai_response, rephrase_queries
-from src.services.text_processor import extract_answer_and_filenames_from_text
-from src.utils.util import _latest_three_and_reply, _norm_name, _stem
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any
+
+from src.core.logger import logger
+from src.services.embedding_service import get_embedding
+from src.services.openai_service import generate_openai_response, rephrase_queries
+from src.services.search_service import perform_search
+from src.services.text_processor import extract_answer_and_filenames_from_text
+from src.utils.util import _latest_three_and_reply, _norm_name, _stem
 
 # ---------------------------------------------------------------------------
 # Executors / globals
@@ -34,9 +35,9 @@ async def generate_answer(
     query: str,
     fr_mode: str,
     bot_tag: str,
-    history: List[Dict[str, Optional[str]]],
+    history: list[dict[str, str | None]],
     azure,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Generate a grounded answer for the user's query.
 
@@ -78,18 +79,10 @@ async def generate_answer(
 
         # Pull: current user query, the two prior user queries, and
         # the latest bot response.
-        latest_q, prev_q, prev_prev_q, latest_bot_reply = _latest_three_and_reply(
-            history
-        )
+        latest_q, prev_q, prev_prev_q, latest_bot_reply = _latest_three_and_reply(history)
 
-        logger.info(
-            f"[{request_id}] history types -> "
-            f"{[type(x).__name__ for x in history]}"
-        )
-        logger.info(
-            f"[{request_id}] prev turn sample -> "
-            f"{history[-2] if len(history) >= 2 else 'n/a'}"
-        )
+        logger.info(f"[{request_id}] history types -> {[type(x).__name__ for x in history]}")
+        logger.info(f"[{request_id}] prev turn sample -> {history[-2] if len(history) >= 2 else 'n/a'}")
         logger.info(
             f"[{request_id}] Latest Query: {latest_q},\n"
             f" Previous Query: {prev_q},\n"
@@ -104,7 +97,7 @@ async def generate_answer(
         # Default setting
         is_greeting = False
         is_followup = False
-        file_map: Dict[str, str] = {}
+        file_map: dict[str, str] = {}
 
         # Best-effort rephrasal using full, normalized history.
         try:
@@ -119,11 +112,8 @@ async def generate_answer(
             )
             if isinstance(rq, dict):
                 effective_query = rq.get("rephrased_query")
-                if effective_query:
-                    if effective_query != query:
-                        logger.info(
-                            f"[{request_id}] Query rephrased for retrieval"
-                        )
+                if effective_query and effective_query != query:
+                    logger.info(f"[{request_id}] Query rephrased for retrieval")
 
                 # Prefer a snippet extracted by the rephraser; fall back to
                 # the latest bot reply.
@@ -133,8 +123,7 @@ async def generate_answer(
                 if snippet:
                     extracted_snippet = snippet
                     logger.info(
-                        f"[{request_id}] Prior bot snippet detected "
-                        f"(will be added as data-only line)"
+                        f"[{request_id}] Prior bot snippet detected (will be added as data-only line)"
                     )
                 is_greeting = rq.get("is_greeting")
                 if is_greeting:
@@ -145,11 +134,9 @@ async def generate_answer(
 
         except Exception as re_err:
             # Rephrasal is best-effort; retrieval proceeds regardless.
-            logger.warning(
-                f"[{request_id}] Rephrase path skipped due to error: {re_err}"
-            )
+            logger.warning(f"[{request_id}] Rephrase path skipped due to error: {re_err}")
 
-        knowledge_source: List[str] = []
+        knowledge_source: list[str] = []
 
         # If it's a greeting rather than a question we don't send it for
         # knowledge retrieval!
@@ -160,9 +147,7 @@ async def generate_answer(
             vector = await get_embedding(azure, effective_query)
 
             logger.info(f"[{request_id}] Step 2: Performing search")
-            results = await perform_search(
-                azure, effective_query, vector, fr_mode_tag, bot_tag
-            )
+            results = await perform_search(azure, effective_query, vector, fr_mode_tag, bot_tag)
 
             # Build knowledge base lines and a filename→filepath map
             # for citation resolution
@@ -177,29 +162,17 @@ async def generate_answer(
             # Optionally append the latest bot reply as data-only (not cited)
             if extracted_snippet:
                 try:
-                    sanitized = extracted_snippet.replace("\n", " ").replace(
-                        "\r", " "
-                    )
+                    sanitized = extracted_snippet.replace("\n", " ").replace("\r", " ")
                     knowledge_source.append(
-                        "PrevAnswer.md (previous assistant reply; "
-                        "data-only, do not cite): \n"
-                        f"{sanitized}"
+                        f"PrevAnswer.md (previous assistant reply; data-only, do not cite): \n{sanitized}"
                     )
                 except Exception as snip_err:
-                    logger.warning(
-                        f"[{request_id}] Skipped appending prior snippet: {snip_err}"
-                    )
+                    logger.warning(f"[{request_id}] Skipped appending prior snippet: {snip_err}")
         else:
             # Greeting path
-            logger.info(
-                f"[{request_id}] Greeting Detected, skipping retrieval & "
-                f"calling model directly!"
-            )
+            logger.info(f"[{request_id}] Greeting Detected, skipping retrieval & calling model directly!")
 
-        logger.debug(
-            f"[{request_id}] KB lines: {len(knowledge_source)} | "
-            f"file_map: {len(file_map)}"
-        )
+        logger.debug(f"[{request_id}] KB lines: {len(knowledge_source)} | file_map: {len(file_map)}")
 
         # Model call
         logger.info(f"[{request_id}] Step 4: Generating model response")
@@ -214,9 +187,7 @@ async def generate_answer(
         # Extract the final answer text and the filenames the model referenced
         logger.info(f"[{request_id}] Step 5: Extracting answer and sources")
         if not isinstance(ans, str):
-            raise TypeError(
-                f"Model response type must be str, got {type(ans)}"
-            )
+            raise TypeError(f"Model response type must be str, got {type(ans)}")
 
         answer_text, filenames = await extract_answer_and_filenames_from_text(ans)
 
@@ -234,7 +205,7 @@ async def generate_answer(
             st = _stem(nk)
             stem_to_reals.setdefault(st, []).append((real_name, real_path))
 
-        extracted_filepath: Dict[str, str] = {}
+        extracted_filepath: dict[str, str] = {}
         misses: list[tuple[str, str]] = []  # (original, normalized)
 
         # Preserve model order; de-duplicate by real_name
@@ -267,18 +238,12 @@ async def generate_answer(
 
         # Helpful debugging (keeps INFO/ERROR noise low)
         if misses:
-            logger.debug(
-                "[%s] Citation mapping misses (model → normalized): %s",
-                request_id, misses
-            )
+            logger.debug("[%s] Citation mapping misses (model → normalized): %s", request_id, misses)
 
         total_time = time.time() - start_time
+        logger.info(f"[{request_id}] Answer generation completed in {total_time:.4f}s")
         logger.info(
-            f"[{request_id}] Answer generation completed in {total_time:.4f}s"
-        )
-        logger.info(
-            f"[{request_id}] Answer length: {len(answer_text)} chars | "
-            f"citations: {len(extracted_filepath)}"
+            f"[{request_id}] Answer length: {len(answer_text)} chars | citations: {len(extracted_filepath)}"
         )
 
         return {
@@ -294,8 +259,6 @@ async def generate_answer(
         # (`services/qna/src/core/errors.py`) which produces a 500
         # ErrorEnvelope with `code=INTERNAL_ERROR` plus X-Request-ID in the
         # body and the response header.
-        logger.error(
-            f"[{request_id}] Error in generate_answer: {type(e).__name__}"
-        )
+        logger.error(f"[{request_id}] Error in generate_answer: {type(e).__name__}")
         logger.error(f"[{request_id}] Traceback: {traceback.format_exc()}")
         raise

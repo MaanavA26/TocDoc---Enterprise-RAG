@@ -7,9 +7,10 @@ no network calls are made.  All 8 auth failure/success modes are covered.
 
 import os
 import time
-import pytest
-from unittest.mock import AsyncMock, patch
 from typing import Any
+from unittest.mock import AsyncMock, patch
+
+import pytest
 
 # ---------------------------------------------------------------------------
 # Ensure required env vars exist BEFORE importing the app / config modules.
@@ -32,11 +33,12 @@ os.environ.setdefault("AUDIENCE_ID", _AUDIENCE)
 # ---------------------------------------------------------------------------
 # Crypto helpers — generate a temporary RSA key pair for test token signing
 # ---------------------------------------------------------------------------
-from cryptography.hazmat.primitives.asymmetric import rsa
+import base64
+
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from jose import jwt as jose_jwt
-import base64
 
 
 def _generate_rsa_keypair():
@@ -121,6 +123,7 @@ def _make_rs256_token(
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(scope="module")
 def rsa_keypair():
     """Module-scoped RSA key pair (generated once per test session)."""
@@ -153,19 +156,21 @@ def mock_jwks(jwk_key):
 # ---------------------------------------------------------------------------
 # Import the FastAPI app AFTER env vars and fixtures are set up.
 # ---------------------------------------------------------------------------
-from httpx import AsyncClient, ASGITransport
+from httpx import ASGITransport, AsyncClient
+
 
 # Lazy import at test time to avoid import-order issues with env vars.
 @pytest.fixture(scope="module")
 def app():
-    import importlib
     import app as app_module  # the qna app
+
     return app_module.app
 
 
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
+
 
 def _bearer(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
@@ -174,6 +179,7 @@ def _bearer(token: str) -> dict:
 # ---------------------------------------------------------------------------
 # Auth tests
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_health_route_bypasses_auth(app):
@@ -191,7 +197,7 @@ async def test_missing_auth_header_returns_401(app):
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         r = await ac.post("/qna/qna", json={})
     assert r.status_code == 401
-    assert "Missing or invalid Authorization header" in r.json()["detail"]
+    assert "Missing or invalid Authorization header" in r.json()["error"]["message"]
 
 
 @pytest.mark.asyncio
@@ -205,7 +211,7 @@ async def test_invalid_bearer_format_returns_401(app):
             headers={"Authorization": "Token not-a-bearer"},
         )
     assert r.status_code == 401
-    assert "Missing or invalid Authorization header" in r.json()["detail"]
+    assert "Missing or invalid Authorization header" in r.json()["error"]["message"]
 
 
 @pytest.mark.asyncio
@@ -217,7 +223,7 @@ async def test_expired_token_returns_401(app, rsa_keypair):
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         r = await ac.post("/qna/qna", json={}, headers=_bearer(token))
     assert r.status_code == 401
-    body = r.json()["detail"]
+    body = r.json()["error"]["message"]
     assert "expired" in body.lower() or "Token validation failed" in body
 
 
@@ -230,7 +236,7 @@ async def test_wrong_audience_returns_401(app, rsa_keypair):
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         r = await ac.post("/qna/qna", json={}, headers=_bearer(token))
     assert r.status_code == 401
-    assert r.json()["detail"] != ""
+    assert r.json()["error"]["message"] != ""
 
 
 @pytest.mark.asyncio
@@ -245,7 +251,7 @@ async def test_wrong_issuer_returns_401(app, rsa_keypair):
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         r = await ac.post("/qna/qna", json={}, headers=_bearer(token))
     assert r.status_code == 401
-    assert r.json()["detail"] != ""
+    assert r.json()["error"]["message"] != ""
 
 
 @pytest.mark.asyncio
@@ -257,7 +263,7 @@ async def test_missing_email_claim_returns_401(app, rsa_keypair):
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         r = await ac.post("/qna/qna", json={}, headers=_bearer(token))
     assert r.status_code == 401
-    assert r.json()["detail"] == "Email claim not found in token"
+    assert r.json()["error"]["message"] == "Email claim not found in token"
 
 
 @pytest.mark.asyncio
@@ -276,6 +282,7 @@ async def test_valid_token_sets_email_on_request_state(app, rsa_keypair, monkeyp
     # Patch KeyVault startup to avoid network calls
     async def _no_kv():
         return {}
+
     monkeypatch.setattr(cfg.settings, "load_secrets_from_keyvault", _no_kv, raising=True)
 
     private_key, _ = rsa_keypair
@@ -289,6 +296,4 @@ async def test_valid_token_sets_email_on_request_state(app, rsa_keypair, monkeyp
             headers=_bearer(token),
         )
     # Auth passed if we get anything other than 401
-    assert r.status_code != 401, (
-        f"Expected auth to succeed but got 401: {r.json()}"
-    )
+    assert r.status_code != 401, f"Expected auth to succeed but got 401: {r.json()}"

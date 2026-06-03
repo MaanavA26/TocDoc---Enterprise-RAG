@@ -10,9 +10,8 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import Request
-
 from errors import ApiErrorCode, build_error_response
+from fastapi import Request
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +47,7 @@ async def limit_upload_size(request: Request, call_next):
 
     logger.info(f"Request content-length: {content_length} bytes")
     if content_length > MAX_UPLOAD_BYTES:
-        logger.warning(
-            f"Request too large: {content_length} bytes exceeds {MAX_UPLOAD_BYTES} bytes"
-        )
+        logger.warning(f"Request too large: {content_length} bytes exceeds {MAX_UPLOAD_BYTES} bytes")
         return build_error_response(
             request,
             code=ApiErrorCode.INVALID_REQUEST,
