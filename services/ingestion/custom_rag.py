@@ -37,6 +37,11 @@ load_dotenv()
 _READ_MAX_TOKENS = 500
 _READ_OVERLAP_TOKENS = 50
 
+# Azure Cognitive Search caps a single indexing batch at 1000 actions, so
+# delete_by_source_path deletes in batches no larger than this. The id list
+# itself is unbounded — paginated above the 1000 per-page read cap.
+_DELETE_BATCH_SIZE = 1000
+
 # Logging handlers — stdout always, file logging only if LOG_FILE is set
 log_handlers = [logging.StreamHandler(sys.stdout)]
 log_file = os.getenv("LOG_FILE")  # Not set in containers; set locally if desired
@@ -279,7 +284,13 @@ class rag:
             logger.error(f"Error creating search index: {str(e)}", exc_info=True)
             raise
 
-    async def upload(self, file, tag, fr_mode, file_path, request_id=None):
+    async def upload(self, file, tag, fr_mode, file_path, source_type="upload", request_id=None):
+        # `source_type` is the provenance stamp written to every chunk
+        # (and the ingestion_started event). It defaults to "upload" so the
+        # /upload route and folder-batch path keep their exact prior behavior;
+        # connectors pass "blob"/"sharepoint". The connector layer NEVER mints
+        # chunk IDs or writes the index — it only feeds bytes into upload(),
+        # so P0-4 deterministic IDs and P0-5 chunking stay enforced in one place.
         logger.info(f"Starting upload process - tag: {tag}, fr_mode: {fr_mode}, file_path: {file_path}")
 
         # `stage` tracks where we are in the pipeline so a failure event can
@@ -295,7 +306,7 @@ class rag:
             service="ingestion",
             bot_tag=tag,
             fr_mode=fr_mode,
-            source_type="upload",
+            source_type=source_type,
             source_path=file_path,
         )
 
@@ -453,7 +464,7 @@ class rag:
                             "content_vector": content_vector,
                             "document_id": document_id,
                             "ingestion_timestamp": datetime.utcnow().isoformat() + "Z",
-                            "source_type": "upload",
+                            "source_type": source_type,
                             "source_path": file_path,
                         }
                     )
@@ -517,7 +528,7 @@ class rag:
                             "content_vector": content_vector,
                             "document_id": document_id,
                             "ingestion_timestamp": datetime.utcnow().isoformat() + "Z",
-                            "source_type": "upload",
+                            "source_type": source_type,
                             "source_path": file_path,
                         }
                     )
@@ -613,6 +624,57 @@ class rag:
                 stage=stage,
             )
             raise
+
+    async def delete_by_source_path(self, source_path: str, bot_tag: str) -> int:
+        """Delete every chunk indexed at one (source_path, bot_tag).
+
+        This is the **edited-file cleanup** mechanism (ADR section B), distinct
+        from the document_id-keyed stale-delete inside upload() (section A).
+        When a file's content changes at a stable source_path, its sha256 — and
+        thus its document_id — changes, so the document_id-keyed delete matches
+        nothing and the old version's chunks orphan. Connectors call this before
+        upload() so an edited file fully replaces its prior chunks under the
+        same source_path.
+
+        Both filter values are OData-escaped (single quote → doubled). source_path
+        is not regex-validated upstream (unlike bot_tag), so escaping it is the
+        primary injection defense here.
+
+        Errors propagate: this is correctness-critical, not best-effort cleanup,
+        so failures are NOT swallowed (contrast the document_id stale-delete in
+        upload(), which warns-and-continues).
+
+        Returns:
+            The number of chunks deleted.
+        """
+        safe_path = source_path.replace("'", "''")
+        safe_tag = bot_tag.replace("'", "''")
+        filter_expr = f"source_path eq '{safe_path}' and bot_tag eq '{safe_tag}'"
+
+        search_client = await self.create_search_index()
+
+        # Drain ALL matching ids first (across every page), THEN delete. We never
+        # delete while the search pager is open: deleting mutates the index, which
+        # can invalidate continuation tokens mid-walk. We do not pass `top` — in
+        # the azure-search-documents SDK it maps to OData $top, which can be
+        # interpreted as a hard total cap and silently truncate results; the
+        # `.by_page()` continuation-token walk visits every match instead.
+        result = search_client.search(
+            search_text="*",
+            filter=filter_expr,
+            select=["id"],
+        )
+        ids = [doc["id"] for page in result.by_page() for doc in page if doc.get("id")]
+
+        for start in range(0, len(ids), _DELETE_BATCH_SIZE):
+            batch = ids[start : start + _DELETE_BATCH_SIZE]
+            search_client.delete_documents(documents=[{"id": cid} for cid in batch])
+
+        logger.info(
+            f"delete_by_source_path removed {len(ids)} chunks for "
+            f"source_path={source_path!r}, bot_tag={bot_tag!r}"
+        )
+        return len(ids)
 
     async def _chunk_text_by_tokens(self, text: str, max_tokens: int = 500, overlap: int = 50) -> list[str]:
         """Chunk text by real token count using tiktoken (cl100k_base encoding).
