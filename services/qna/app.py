@@ -16,6 +16,7 @@ from src.core.errors import (
 )
 from src.core.lifecycle import shutdown_event, startup_event
 from src.core.observability import RequestIDMiddleware
+from src.core.responses import QnASuccessResponse
 from src.utils.util import Payload, _as_turn
 
 # ---------------------------------------------------------------------------
@@ -143,7 +144,15 @@ async def health_check():
 # ---------------------------------------------------------------------------
 # QnA endpoint
 # ---------------------------------------------------------------------------
-@app.post("/qna", responses=default_error_responses)
+@app.post(
+    "/qna",
+    response_model=QnASuccessResponse,
+    # Keep the wire payload byte-identical to the historical `{answer, citation}`
+    # shape: drop the model's defensive optional fields (request_id/error) so
+    # they never serialize as `null` on the success path.
+    response_model_exclude_none=True,
+    responses=default_error_responses,
+)
 async def custom_rag_qna(payload: Payload, request: Request):
     """
     QnA handler endpoint.

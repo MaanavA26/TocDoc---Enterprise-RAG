@@ -276,6 +276,53 @@ async def test_qna_happy_path_returns_answer_and_citations(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_qna_response_model_keeps_json_byte_identical(monkeypatch):
+    """Backward-compat lock for the typed response_model (P2/P4 contract).
+
+    The historical /qna success payload is EXACTLY `{"answer", "citation"}`.
+    Wiring `QnASuccessResponse` as the route's `response_model` must not add,
+    drop, or rename a top-level key. The defensive optional fields
+    (`request_id`/`error`) must be excluded (response_model_exclude_none), and
+    `citation` must serialize flat — never a wrapped `{"root": {...}}` shape.
+    """
+    from src.services import openai_service as oai
+
+    async def fake_rephrase(*args, **kwargs):
+        return {
+            "rephrased_query": kwargs.get("current_query") or "hi",
+            "is_greeting": False,
+            "original_response": "ok",
+            "extracted_snippet": "",
+            "is_followup": False,
+            "was_rephrased": False,
+        }
+
+    monkeypatch.setattr(oai, "rephrase_queries", fake_rephrase, raising=True)
+
+    token = make_token()
+    headers = {"Authorization": f"Bearer {token}"}
+    payload = {
+        "session_id": "s1",
+        "fr_tag": "read",
+        "bot_tag": "toc",
+        "bot": [{"user_query": "What is in fileA?"}],
+    }
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        r = await ac.post(url("/qna"), headers=headers, json=payload)
+
+    assert r.status_code == 200
+    body = r.json()
+    # The centerpiece: top-level keys are EXACTLY the historical two.
+    assert set(body.keys()) == {"answer", "citation"}
+    # citation is a flat {filename: filepath} object, not a wrapped RootModel.
+    assert isinstance(body["citation"], dict)
+    assert "root" not in body["citation"]
+    assert body["citation"]["fileA.md"] == "/docs/fileA.md"
+
+
+@pytest.mark.asyncio
 async def test_qna_greeting_path_skips_retrieval(monkeypatch):
     # Make rephraser flag as greeting -> no embedding/search should be required by logic
     from src.services import openai_service as oai
