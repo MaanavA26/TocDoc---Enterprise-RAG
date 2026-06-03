@@ -27,8 +27,15 @@ from azure.search.documents.indexes.models import (
 from dotenv import load_dotenv
 from langchain.text_splitter import MarkdownHeaderTextSplitter
 from langchain_community.document_loaders import AzureAIDocumentIntelligenceLoader
+from observability import log_event
 
 load_dotenv()
+
+# Read-mode token-chunking parameters. Hoisted to module constants so the
+# `chunking_completed` stage event can report them without magic numbers
+# drifting from the call site.
+_READ_MAX_TOKENS = 500
+_READ_OVERLAP_TOKENS = 50
 
 # Logging handlers — stdout always, file logging only if LOG_FILE is set
 log_handlers = [logging.StreamHandler(sys.stdout)]
@@ -272,14 +279,32 @@ class rag:
             logger.error(f"Error creating search index: {str(e)}", exc_info=True)
             raise
 
-    async def upload(self, file, tag, fr_mode, file_path):
+    async def upload(self, file, tag, fr_mode, file_path, request_id=None):
         logger.info(f"Starting upload process - tag: {tag}, fr_mode: {fr_mode}, file_path: {file_path}")
+
+        # `stage` tracks where we are in the pipeline so a failure event can
+        # report the precise phase that broke. `document_id` may not be known
+        # yet when an early-stage failure occurs.
+        stage = "validation"
+        document_id = None
+
+        log_event(
+            logger,
+            "ingestion_started",
+            request_id=request_id,
+            service="ingestion",
+            bot_tag=tag,
+            fr_mode=fr_mode,
+            source_type="upload",
+            source_path=file_path,
+        )
 
         try:
             filename = file.filename
             logger.info(f"Processing file: {filename}")
 
             # Read file content
+            stage = "file_read"
             logger.debug("Reading file content")
             file_content = await file.read()
             logger.info(f"File content read successfully - size: {len(file_content)} bytes")
@@ -299,6 +324,7 @@ class rag:
             search_client = await self.create_search_index()
 
             # Delete any existing chunks for this document+tenant to avoid stale data
+            deleted_stale_chunks = 0
             try:
                 existing = list(
                     search_client.search(
@@ -310,6 +336,7 @@ class rag:
                 )
                 if existing:
                     search_client.delete_documents(documents=existing)
+                    deleted_stale_chunks = len(existing)
                     logger.info(
                         f"Deleted {len(existing)} stale chunks for document_id={document_id!r}, bot_tag={tag!r}"
                     )
@@ -317,6 +344,7 @@ class rag:
                 logger.warning(f"Stale chunk cleanup failed (non-fatal): {cleanup_err}")
 
             # Load document using Azure AI Document Intelligence
+            stage = "document_intelligence"
             logger.info(f"Loading document with Azure AI Document Intelligence - mode: {fr_mode}")
             start_time = time.time()
 
@@ -333,15 +361,40 @@ class rag:
             logger.info(f"Document loaded successfully in {end_time - start_time:.2f} seconds")
             logger.info(f"Loaded {len(docs)} document(s)")
 
+            _content_length_chars = sum(len(d.page_content or "") for d in docs)
             if docs:
                 logger.debug(f"First document content length: {len(docs[0].page_content)} characters")
 
+            log_event(
+                logger,
+                "document_parsed",
+                request_id=request_id,
+                parser="azure_document_intelligence",
+                latency_ms=round((end_time - start_time) * 1000, 2),
+                page_count=total_pages,
+                content_length_chars=_content_length_chars,
+            )
+
             # Prepare documents for upload
+            stage = "chunking"
+            _chunking_start = time.time()
             azure_docs = []
             token_list = []
+            # Defaults reported for the chunking event; refined per mode below.
+            _chunking_mode = fr_mode
+            _chunk_max_tokens = None
+            _chunk_overlap_tokens = None
+
+            # Cumulative wall-clock spent in embedding calls. Chunking and
+            # embedding are interleaved per-chunk in this pipeline, so we time
+            # them separately by accumulating embedding latency and subtracting
+            # it from the chunking-stage total below.
+            _embedding_latency_ms = 0.0
+            _embedding_count = 0
 
             if fr_mode == "layout":
                 logger.info("Processing document in layout mode with header-based splitting")
+                _chunking_mode = "markdown_header"
 
                 # Use header-based splitting for layout mode
                 headers_to_split_on = [
@@ -373,8 +426,13 @@ class rag:
                     logger.debug(f"Chunk {i + 1} - section: {section_name}, content length: {len(content)}")
 
                     # Get embedding for content
+                    stage = "embedding"
                     logger.debug(f"Generating embedding for chunk {i + 1}")
+                    _emb_start = time.perf_counter()
                     content_vector = await self.get_embedding(content)
+                    _embedding_latency_ms += (time.perf_counter() - _emb_start) * 1000
+                    _embedding_count += 1
+                    stage = "chunking"
 
                     # Calculate token count
                     token_count = await self.chunk_token(content)
@@ -404,6 +462,9 @@ class rag:
 
             elif fr_mode == "read":
                 logger.info("Processing document in read mode with token-based splitting")
+                _chunking_mode = "token"
+                _chunk_max_tokens = _READ_MAX_TOKENS
+                _chunk_overlap_tokens = _READ_OVERLAP_TOKENS
 
                 # Use token-based splitting for read mode
                 docs_string = docs[0].page_content
@@ -411,7 +472,9 @@ class rag:
 
                 logger.debug("Splitting text by tokens")
                 start_time = time.time()
-                chunks = await self._chunk_text_by_tokens(docs_string, max_tokens=500, overlap=50)
+                chunks = await self._chunk_text_by_tokens(
+                    docs_string, max_tokens=_READ_MAX_TOKENS, overlap=_READ_OVERLAP_TOKENS
+                )
                 end_time = time.time()
 
                 logger.info(f"Text split into {len(chunks)} chunks in {end_time - start_time:.2f} seconds")
@@ -427,8 +490,13 @@ class rag:
                     logger.debug(f"Chunk {i + 1} content length: {len(content)} characters")
 
                     # Get embedding for content
+                    stage = "embedding"
                     logger.debug(f"Generating embedding for chunk {i + 1}")
+                    _emb_start = time.perf_counter()
                     content_vector = await self.get_embedding(content)
+                    _embedding_latency_ms += (time.perf_counter() - _emb_start) * 1000
+                    _embedding_count += 1
+                    stage = "chunking"
 
                     # Calculate token count
                     token_count = await self.chunk_token(content)
@@ -456,8 +524,33 @@ class rag:
 
                     logger.debug(f"Chunk {i + 1} processed successfully")
 
+            # Stage events: chunking + embedding completed. Chunking latency is
+            # the total chunk-loop wall time minus the embedding wall time
+            # (the two are interleaved), floored at 0 for safety.
+            _chunking_total_ms = (time.time() - _chunking_start) * 1000
+            _chunking_only_ms = max(0.0, _chunking_total_ms - _embedding_latency_ms)
+            log_event(
+                logger,
+                "chunking_completed",
+                request_id=request_id,
+                chunk_count=len(azure_docs),
+                chunking_mode=_chunking_mode,
+                max_tokens=_chunk_max_tokens,
+                overlap_tokens=_chunk_overlap_tokens,
+                latency_ms=round(_chunking_only_ms, 2),
+            )
+            log_event(
+                logger,
+                "embeddings_completed",
+                request_id=request_id,
+                embedding_model=os.getenv("AZURE_OPENAI_EMBEDDING_MODEL"),
+                embedding_count=_embedding_count,
+                latency_ms=round(_embedding_latency_ms, 2),
+            )
+
             # Upload documents to the index
             if azure_docs:
+                stage = "search_indexing"
                 logger.info(f"Uploading {len(azure_docs)} documents to search index")
                 start_time = time.time()
 
@@ -466,6 +559,17 @@ class rag:
 
                 logger.info(f"Documents uploaded successfully in {end_time - start_time:.2f} seconds")
                 logger.debug(f"Upload result: {result}")
+
+                log_event(
+                    logger,
+                    "index_upsert_completed",
+                    request_id=request_id,
+                    document_id=document_id,
+                    bot_tag=tag,
+                    chunk_count=len(azure_docs),
+                    deleted_stale_chunks=deleted_stale_chunks,
+                    latency_ms=round((end_time - start_time) * 1000, 2),
+                )
 
                 # Calculate character statistics for each chunk
                 char_list = [len(doc["content"]) for doc in azure_docs]
@@ -492,6 +596,22 @@ class rag:
 
         except Exception as e:
             logger.error(f"Error in upload process: {str(e)}", exc_info=True)
+            # Structured failure event. `stage` pinpoints the failing phase.
+            # safe_message is the exception CLASS only — NOT str(e), which may
+            # carry document paths or content. The exception is re-raised so
+            # the route's error envelope (P0-6) still owns the HTTP response.
+            log_event(
+                logger,
+                "ingestion_failed",
+                request_id=request_id,
+                level=logging.ERROR,
+                document_id=document_id,
+                bot_tag=tag,
+                error_class=type(e).__name__,
+                error_category="ingestion_error",
+                safe_message=f"Ingestion failed during {stage} stage",
+                stage=stage,
+            )
             raise
 
     async def _chunk_text_by_tokens(self, text: str, max_tokens: int = 500, overlap: int = 50) -> list[str]:

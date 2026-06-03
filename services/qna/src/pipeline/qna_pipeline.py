@@ -13,12 +13,15 @@ concurrent requests cannot contaminate each other's conversation context.
 Expected history shape: List[{"user_query": str, "bot_response": Optional[str]}]
 """
 
+import os
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+from src.config.config import LocalConfig
 from src.core.logger import logger
+from src.core.observability import log_event
 from src.services.embedding_service import get_embedding
 from src.services.openai_service import generate_openai_response, rephrase_queries
 from src.services.search_service import perform_search
@@ -30,6 +33,10 @@ from src.utils.util import _latest_three_and_reply, _norm_name, _stem
 # ---------------------------------------------------------------------------
 process_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="process")
 
+# Module-level config holder so we can report the configured model / top_k in
+# structured stage events without re-reading env on every call.
+_localconfig = LocalConfig()
+
 
 async def generate_answer(
     query: str,
@@ -37,6 +44,7 @@ async def generate_answer(
     bot_tag: str,
     history: list[dict[str, str | None]],
     azure,
+    request_id: str | None = None,
 ) -> dict[str, Any]:
     """
     Generate a grounded answer for the user's query.
@@ -50,6 +58,12 @@ async def generate_answer(
             {"user_query": str, "bot_response": Optional[str]}. May be empty
             for a first-turn request; None is treated as [].
         azure: Azure client holder (OpenAI, embeddings, search).
+        request_id: Optional correlation ID threaded from the HTTP layer
+            (`request.state.request_id`). When omitted, a local `gen_<ts>` id
+            is minted to preserve backward-compatible behavior for direct
+            callers/tests. Threading the middleware request_id lets pipeline
+            stage events share the same correlation ID as the request
+            lifecycle events.
 
     Returns:
         A dict with:
@@ -61,7 +75,10 @@ async def generate_answer(
         - Rephrasal is best-effort; the pipeline proceeds if it fails.
         - History is never stored in module-level state; each call is isolated.
     """
-    request_id = f"gen_{int(time.time() * 1000)}"
+    # Reuse the HTTP-layer correlation ID when provided so pipeline stage
+    # events share the request_started/request_completed correlation ID.
+    # Fall back to the legacy locally-minted id for direct callers/tests.
+    request_id = request_id or f"gen_{int(time.time() * 1000)}"
     if not bot_tag or not bot_tag.strip():
         raise ValueError("bot_tag is required for tenant isolation")
     logger.info(f"[{request_id}] Starting answer generation")
@@ -102,6 +119,7 @@ async def generate_answer(
         # Best-effort rephrasal using full, normalized history.
         try:
             logger.info(f"[{request_id}] Rephrasing path enabled ")
+            _rephrase_start = time.perf_counter()
             rq = await rephrase_queries(
                 azure=azure,
                 current_query=latest_q,
@@ -109,6 +127,13 @@ async def generate_answer(
                 prev_prev_query=prev_prev_q,
                 latest_bot_reply=latest_bot_reply,
                 full_history=history,
+            )
+            log_event(
+                logger,
+                "query_rephrased",
+                request_id=request_id,
+                history_turns_used=len(history),
+                latency_ms=round((time.perf_counter() - _rephrase_start) * 1000, 2),
             )
             if isinstance(rq, dict):
                 effective_query = rq.get("rephrased_query")
@@ -147,17 +172,45 @@ async def generate_answer(
             vector = await get_embedding(azure, effective_query)
 
             logger.info(f"[{request_id}] Step 2: Performing search")
+            _retrieval_start = time.perf_counter()
             results = await perform_search(azure, effective_query, vector, fr_mode_tag, bot_tag)
+            _retrieval_latency_ms = round((time.perf_counter() - _retrieval_start) * 1000, 2)
 
             # Build knowledge base lines and a filename→filepath map
             # for citation resolution
             logger.info(f"[{request_id}] Step 3: Processing search results")
 
+            # Collect source provenance for the structured retrieval event.
+            # De-duplicate (many chunks share one document) while preserving
+            # first-seen order. NEVER collect chunk text here — only IDs/paths.
+            _doc_ids: list[str] = []
+            _source_paths: list[str] = []
             for r in results:
-                # r: {"filename", "filepath", "content", ...}
+                # r: {"filename", "filepath", "content", "document_id", "source_path", ...}
                 content = (r["content"] or "").replace("\n", "").replace("\r", "")
                 knowledge_source.append(f"{r['filename']}: {content}")
                 file_map[r["filename"]] = r["filepath"]
+
+                doc_id = r.get("document_id")
+                if doc_id and doc_id not in _doc_ids:
+                    _doc_ids.append(doc_id)
+                # Prefer the indexed source_path; fall back to filepath.
+                src_path = r.get("source_path") or r.get("filepath")
+                if src_path and src_path not in _source_paths:
+                    _source_paths.append(src_path)
+
+            log_event(
+                logger,
+                "retrieval_completed",
+                request_id=request_id,
+                bot_tag=bot_tag,
+                fr_tag=fr_mode_tag,
+                retrieved_chunk_count=len(results),
+                top_k=_localconfig.TOP_K,
+                latency_ms=_retrieval_latency_ms,
+                source_document_ids=_doc_ids,
+                source_paths=_source_paths,
+            )
 
             # Optionally append the latest bot reply as data-only (not cited)
             if extracted_snippet:
@@ -176,6 +229,7 @@ async def generate_answer(
 
         # Model call
         logger.info(f"[{request_id}] Step 4: Generating model response")
+        _answer_start = time.perf_counter()
         ans = await generate_openai_response(
             effective_query,
             knowledge_source,
@@ -183,6 +237,7 @@ async def generate_answer(
             is_follow_up=is_followup,
             azure=azure,
         )
+        _answer_latency_ms = round((time.perf_counter() - _answer_start) * 1000, 2)
 
         # Extract the final answer text and the filenames the model referenced
         logger.info(f"[{request_id}] Step 5: Extracting answer and sources")
@@ -244,6 +299,23 @@ async def generate_answer(
         logger.info(f"[{request_id}] Answer generation completed in {total_time:.4f}s")
         logger.info(
             f"[{request_id}] Answer length: {len(answer_text)} chars | citations: {len(extracted_filepath)}"
+        )
+
+        # Structured answer event — metadata only. The answer body is NEVER
+        # logged here; a short preview is emitted only when QNA_DEBUG_LOG_PREVIEW
+        # is explicitly enabled (off by default, capped at 200 chars).
+        _preview = None
+        if os.getenv("QNA_DEBUG_LOG_PREVIEW", "").lower() in ("1", "true", "yes"):
+            _preview = (answer_text or "")[:200]
+        log_event(
+            logger,
+            "answer_generated",
+            request_id=request_id,
+            model=_localconfig.AZURE_LLM_MODEL,
+            latency_ms=_answer_latency_ms,
+            citation_count=len(extracted_filepath),
+            answer_length_chars=len(answer_text),
+            answer_preview=_preview,
         )
 
         return {
