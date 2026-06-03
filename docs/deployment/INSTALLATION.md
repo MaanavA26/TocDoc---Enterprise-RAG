@@ -436,6 +436,33 @@ internal failure (a 200 with an `error` field embedded in the answer
 shape), it must now handle a 500 with the envelope above — that is a
 deliberate contract correction.
 
+## Automated post-deploy validation
+
+For a single-command sanity check across all of the above, run
+`scripts/validate_deployment.sh` against your deployment. The script is
+read-only — it never modifies Azure resources — and validates resource
+presence, Container App revision state, env-var name coverage (canonical
++ legacy-deprecation warnings), Key Vault readiness, Cognitive Search
+service presence, Bicep deployment outputs, and HTTP health endpoints.
+
+```bash
+./scripts/validate_deployment.sh \
+  --resource-group rg-tocdoc-<client-name> \
+  --ingestion-app tocdoc-ingestion-prod \
+  --qna-app tocdoc-qna-prod
+```
+
+Optional flags:
+- `--environment <env>` — environment tag (default `prod`)
+- `--deployment-name <name>` — Bicep deployment name (default `main`)
+- `--expected-index-name <name>` — Cognitive Search index name (default `tocdoc-index`)
+- `--skip-health-checks` — useful when the operator is on a network without egress to the Container App FQDNs, or when revisions are scaled to zero with a long cold-start
+- `--output text|json` — JSON output is convenient for piping into a runbook automation step; default is human-readable text
+
+Exit codes: `0` all required checks passed (warnings allowed), `1` at least one required check failed, `2` script usage / preflight error (`az` missing, not logged in, etc.).
+
+The script never prints secret values — it validates env var **names** only via `az containerapp show --query ...env[].name`. It is safe to run from an operator's workstation or to wire into a CI job after a deployment step.
+
 ## Estimated installation time
 
 | Step | Time |
@@ -445,4 +472,5 @@ deliberate contract correction.
 | Image build + push + update (Step 3) | 5–10 min |
 | Smoke test (Step 4) | 2 min |
 | Admin API verification (Step 5) | 2 min |
-| **Total** | **~25–35 min** |
+| Automated validation (`scripts/validate_deployment.sh`) | 1–2 min |
+| **Total** | **~25–37 min** |
