@@ -10,7 +10,7 @@
 # Secret-safe: validates env var NAMES only, never prints values.
 #
 # Compatibility: bash 3.2+ (macOS default). No associative arrays, no mapfile,
-# no jq dependency. shellcheck-clean.
+# no jq dependency. Intended to be shellcheck-clean (enforced by the CI lint gate once it lands on main).
 #
 # Exit codes:
 #   0 — all required checks passed (warnings allowed)
@@ -41,7 +41,7 @@ IFS=$'\n\t'
 RG=""
 INGESTION_APP=""
 QNA_APP=""
-ENVIRONMENT="prod"
+ENVIRONMENT=""   # empty = infer the env suffix from the app-name's last segment
 DEPLOYMENT_NAME="main"
 EXPECTED_INDEX_NAME="tocdoc-index"
 SKIP_HEALTH=""
@@ -115,7 +115,7 @@ Required:
   --qna-app NAME               QnA Container App name (e.g., tocdoc-qna-prod)
 
 Optional:
-  --environment ENV            Environment tag (default: prod)
+  --environment ENV            Env suffix override for resource-name inference (default: inferred from app name)
   --deployment-name NAME       Bicep deployment name (default: main)
   --expected-index-name NAME   Cognitive Search index name (default: tocdoc-index)
   --skip-health-checks         Skip the HTTP /health probes (useful for cold-start
@@ -256,7 +256,9 @@ check_expected_resources() {
     local prefix env_suffix
     # Derive: INGESTION_APP="tocdoc-ingestion-prod" → prefix="tocdoc", env_suffix="prod"
     prefix=$(printf '%s' "$INGESTION_APP" | awk -F- '{print $1}')
-    env_suffix=$(printf '%s' "$INGESTION_APP" | awk -F- '{print $NF}')
+    # Use the explicit --environment override when given; otherwise infer the
+    # suffix from the app name's last segment (the robust default).
+    env_suffix="${ENVIRONMENT:-$(printf '%s' "$INGESTION_APP" | awk -F- '{print $NF}')}"
 
     # Check container apps exist (these are the resources that matter most for runtime).
     local apps=("$INGESTION_APP" "$QNA_APP")
@@ -286,7 +288,10 @@ check_expected_resources() {
     for short_name in "${short_names[@]}"; do
         fullname="${prefix}-${short_name}-${env_suffix}"
         local exists
-        exists=$(az resource show -g "$RG" -n "$fullname" --resource-type "*" --query name -o tsv 2>/dev/null || true)
+        # `az resource show` requires a concrete --resource-type; "*" is not a
+        # reliable wildcard and can miss resources that exist. List by group and
+        # filter by name instead (returns the name or empty).
+        exists=$(az resource list -g "$RG" --query "[?name=='$fullname'].name | [0]" -o tsv 2>/dev/null || true)
         if [ -n "$exists" ]; then
             record_result "resource_${short_name}_exists" "PASS" "Found expected resource: $fullname" ""
         else
@@ -404,7 +409,7 @@ check_health_endpoints() {
     fi
 
     local apps_paths=("$INGESTION_APP /upload_pipeline/health" "$QNA_APP /qna/health")
-    local entry app path fqdn http_code
+    local entry app path fqdn http_code curl_status
     for entry in "${apps_paths[@]}"; do
         app=$(printf '%s' "$entry" | awk '{print $1}')
         path=$(printf '%s' "$entry" | awk '{print $2}')
@@ -417,8 +422,16 @@ check_health_endpoints() {
         fi
 
         # --max-time accommodates cold-start when minReplicas=0.
+        # Capture curl's exit status separately. Appending `|| echo "000"` to the
+        # `%{http_code}` output risks concatenating to "000000" on failure, which
+        # would fall through to the generic-HTTP-failure branch instead of the
+        # intended unreachable branch.
         http_code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 45 --retry 1 --retry-delay 5 \
-            "https://${fqdn}${path}" 2>/dev/null || echo "000")
+            "https://${fqdn}${path}" 2>/dev/null)
+        curl_status=$?
+        if [ "$curl_status" -ne 0 ] || [ -z "$http_code" ]; then
+            http_code="000"
+        fi
 
         if [ "$http_code" = "200" ]; then
             record_result "health_${app}" "PASS" "Health endpoint OK: https://${fqdn}${path}" ""
