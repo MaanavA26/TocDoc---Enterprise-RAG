@@ -56,3 +56,32 @@ class IndexStatsResponse(BaseModel):
     chunk_count: int = Field(ge=0)
     source_types: dict[str, int]
     fr_modes: dict[str, int]
+
+
+class DeleteDocumentResponse(BaseModel):
+    """Response shape for DELETE /admin/documents/{document_id}."""
+
+    bot_tag: str
+    document_id: str
+    deleted_chunks: int = Field(ge=0)
+    status: str = "deleted"
+
+
+class DeleteTenantResponse(BaseModel):
+    """Response shape for DELETE /admin/bots/{bot_tag}/documents."""
+
+    bot_tag: str
+    deleted_chunks: int = Field(ge=0)
+    deleted_documents: int = Field(ge=0)
+    status: str = "deleted"
+
+
+class ReindexResponse(BaseModel):
+    """Response shape for POST /admin/documents/{document_id}/reindex.
+
+    Reindex is a documented 501 stub until source persistence exists; this is
+    a normal payload (returned with HTTP 501), NOT an error envelope.
+    """
+
+    status: str = "not_implemented"
+    reason: str = "Reindex requires source persistence or connector metadata. Use delete + ingest for now."
