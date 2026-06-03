@@ -141,7 +141,7 @@ The active backlog should now point developers toward:
 - `docs/architect_phase_2/02_OBSERVABILITY_SPEC.md`
 - `docs/architect_phase_2/03_DEPLOYMENT_VALIDATION_SPEC.md`
 - `docs/architect_phase_2/04_BOT_TAG_DECISION_RECORD.md`
-- `docs/architect_phase_2/05_PRIORITY_REMOVE_ALL_GMR_REFERENCES.md`
+- `docs/architect_phase_2/05_PRODUCT_NEUTRAL_NAMING_POLICY.md`
 
 ## Suggested status classification
 
