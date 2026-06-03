@@ -16,7 +16,7 @@
 | `services/ingestion` | `app.py` → `custom_rag.py` | PDF ingestion, chunking, Azure Search indexing |
 | `services/qna` | `app.py` → `src/pipeline/qna_pipeline.py` | Hybrid retrieval, rephrasal, LLM answer generation |
 
-All 8 original P0 blockers have shipped. Phase 2 read-only workstreams (Admin API, Observability) are on `main`. The structured error contract and env-var normalization landed in PRs #10 and #11. Active work continues on Phase 2 destructive endpoints, pipeline-stage observability events, deployment validation, and CI gates.
+All 8 original P0 blockers have shipped. The production CI gate (ruff · bandit · pip-audit · bicep · shellcheck · pytest+coverage) is now on `main` (PR #13), as is deployment validation (PR #14). A `/health` liveness-probe auth regression — surfaced by the new test gate — was fixed as a standalone P0 hotfix (PR #17). The low-risk slice of the dependency-CVE backlog was bumped (PR #19; pip-audit remains report-only while the cascading FastAPI/Starlette, LangChain-1.x, and pypdf upgrades are deferred to a runtime-validated PR). The structured error contract and env-var normalization landed earlier in PRs #10 and #11. Active work continues on Phase 2 destructive endpoints, pipeline-stage observability events, and connectors.
 
 ---
 
@@ -25,7 +25,7 @@ All 8 original P0 blockers have shipped. Phase 2 read-only workstreams (Admin AP
 | Phase | Description | Items | Status |
 |-------|-------------|-------|--------|
 | **P0** | Security, correctness, and production hardening | 8 | `8/8 SHIPPED` ✅ |
-| **P1** | Enterprise feature completeness | 5 | `2/5 SHIPPED` (P1-1 read-only piece, P1-4 Bicep) |
+| **P1** | Enterprise feature completeness | 5 | `2/5 SHIPPED` (P1-4 IaC+CI, P1-5 quality gate); P1-1 partial |
 | **Phase 2** | Operability (Admin API, Observability, Deployment Validation, bot_tag scope) | 4 | `A PR-1 + B PR-1 SHIPPED` · A PR-2 / B PR-2 / C / D pending |
 | **P2** | Product differentiation and commercial packaging | 2 | `BLOCKED on P1` |
 | **P3** | Agentic AI layer (LangGraph) | 6 | `PLANNED` |
@@ -61,8 +61,8 @@ See `01_P0_HARDENING.md` for the original planning detail.
 | P1-1 | `09_OBSERVABILITY` | Azure Monitor telemetry, audit logs, correlation IDs | `services/qna/src/core/observability.py`, `services/ingestion/observability.py` | `PARTIAL — SHIPPED (PR #8)` for request-ID middleware + `log_event` helper; pipeline-stage events still pending |
 | P1-2 | `10_PRODUCT` | Admin APIs for index and tenant management | `services/ingestion/admin/` package | `PARTIAL — SHIPPED (PR #7)` for read-only endpoints; destructive endpoints + reindex still pending |
 | P1-3 | `11_CONNECTORS` | Blob Storage + SharePoint connector ingestion | new `services/ingestion/connectors/` | `PENDING` |
-| P1-4 | `12_PLATFORM` | Azure Bicep IaC, GitHub Actions CI/CD, ACA deployment | `infra/main.bicep`, `infra/parameters/`, `docs/deployment/INSTALLATION.md` | `PARTIAL — SHIPPED (PR #5)` for Bicep + install runbook; CI/CD GitHub Actions still pending |
-| P1-5 | `13_QUALITY` | Expanded test suite, CI quality gates, release checks | `services/qna/test/`, `services/ingestion/test/`, `.github/workflows/` | `PENDING` |
+| P1-4 | `12_PLATFORM` | Azure Bicep IaC, GitHub Actions CI/CD, ACA deployment | `infra/main.bicep`, `infra/parameters/`, `docs/deployment/INSTALLATION.md`, `.github/workflows/ci.yml` | `SHIPPED` — Bicep + install runbook (PR #5), GitHub Actions CI gate (PR #13) |
+| P1-5 | `13_QUALITY` | Expanded test suite, CI quality gates, release checks | `services/qna/test/`, `services/ingestion/test/`, `.github/workflows/ci.yml`, `pyproject.toml` | `SHIPPED (PR #13)` — ruff/bandit/bicep/shellcheck/pytest+coverage gate. pip-audit report-only; coverage threshold not gated yet (both tracked follow-ups). |
 
 See `02_P1_ENTERPRISE.md` for original implementation guides and `docs/architect_phase_2/` for the active Phase 2 specs covering P1-1 and P1-2.
 
@@ -76,7 +76,7 @@ Active workstream specs in `docs/architect_phase_2/`. Entries appear here only w
 |---|---|---|
 | **A** Admin API | `01_ADMIN_API_SPEC.md` | `PR-1 SHIPPED (PR #7)` — read-only `GET /admin/documents`, `/admin/documents/{id}`, `/admin/index/stats` with `bot_tag` scope, `X-Admin-Token` interim auth, pagination via `.by_page()`, OData filter escape. PR-2 (destructive endpoints) pending. |
 | **B** Observability baseline | `02_OBSERVABILITY_SPEC.md` | `PR-1 SHIPPED (PR #8)` — `RequestIDMiddleware` in both services, `log_event` helper, lifecycle events. P0-6 (PR #10) closed the deferred X-Request-ID-on-5xx gap. PR-2 (pipeline-stage events) pending. |
-| **C** Deployment validation | `03_DEPLOYMENT_VALIDATION_SPEC.md` | `PENDING` (`scripts/validate_deployment.sh`) |
+| **C** Deployment validation | `03_DEPLOYMENT_VALIDATION_SPEC.md` | `SHIPPED (PR #14)` — `scripts/validate_deployment.sh` post-deploy checks (resource existence, Container App health probes, Key Vault wiring); shellcheck-clean under the CI gate. |
 | **D** bot_tag scope/naming | `04_BOT_TAG_DECISION_RECORD.md` | `DECIDED` — keep `bot_tag` internally; expose as `workspace_id` in future public APIs. Validation regex enforced in admin routes (PR #7). |
 
 ---
