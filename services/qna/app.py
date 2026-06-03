@@ -213,6 +213,9 @@ async def custom_rag_qna(payload: Payload, request: Request):
         bot_tag=bot_tag,
         history=history,
         azure=azure,
+        # Thread the middleware correlation ID so pipeline stage events share
+        # the same request_id as request_started/request_completed.
+        request_id=getattr(request.state, "request_id", None),
     )
 
     elapsed = time.time() - start

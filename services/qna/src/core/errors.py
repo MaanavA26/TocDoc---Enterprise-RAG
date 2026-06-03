@@ -63,6 +63,8 @@ from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field
 from starlette.responses import JSONResponse
 
+from src.core.observability import log_event
+
 logger = logging.getLogger(__name__)
 
 # Per-field truncation cap for validation error messages — mirrors the
@@ -243,6 +245,21 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
         # string non-conforming dict, stringify it safely.
         message = detail if isinstance(detail, str) else str(detail or "Error")
 
+    # Structured request-failed event. `code` is the error category, `message`
+    # is the safe (client-visible) message — never raw exception text. We log
+    # at WARNING for 4xx and ERROR for 5xx so dashboards can split client
+    # mistakes from server faults.
+    log_event(
+        logger,
+        "request_failed",
+        request_id=getattr(request.state, "request_id", None),
+        level=logging.ERROR if exc.status_code >= 500 else logging.WARNING,
+        error_class=type(exc).__name__,
+        error_category=code,
+        http_status=exc.status_code,
+        safe_message=message,
+    )
+
     return build_error_response(
         request,
         status_code=exc.status_code,
@@ -298,6 +315,18 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
         "Unhandled exception in request handler (request_id=%s, error_class=%s)",
         request_id,
         type(exc).__name__,
+    )
+    # Structured request-failed event. safe_message is a generic category, NOT
+    # str(exc) — exception text may carry sensitive content (paths, queries).
+    log_event(
+        logger,
+        "request_failed",
+        request_id=request_id,
+        level=logging.ERROR,
+        error_class=type(exc).__name__,
+        error_category=ApiErrorCode.INTERNAL_ERROR,
+        http_status=500,
+        safe_message="Internal server error",
     )
     return build_error_response(
         request,

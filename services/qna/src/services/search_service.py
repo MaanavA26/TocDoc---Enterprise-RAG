@@ -105,7 +105,15 @@ def _search_sync(
     results = azure.search_client.search(
         search_text=query,
         vector_queries=[vector_query],
-        select=["id", "content", "section_header", "filename", "filepath"],
+        select=[
+            "id",
+            "content",
+            "section_header",
+            "filename",
+            "filepath",
+            "document_id",
+            "source_path",
+        ],
         filter=filter_expr,
         top=top,
     )

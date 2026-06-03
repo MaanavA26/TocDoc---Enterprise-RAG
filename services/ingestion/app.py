@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 import custom_rag
 from admin.routes import router as admin_router
 from errors import default_error_responses, register_exception_handlers
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from middleware import limit_upload_size
 from observability import RequestIDMiddleware
@@ -104,6 +104,7 @@ async def health_check():
 
 @app.post("/upload", summary="Ingest a PDF document or folder", responses=default_error_responses)
 async def upload_file(
+    request: Request,
     bot_tag: str = Query(..., description="Tenant / bot identifier"),
     filepath: str = Query(..., description="Absolute file or folder path on the server"),
     fr_mode: str = Query(
@@ -123,6 +124,10 @@ async def upload_file(
     - **file**: Required when `filepath` points to a single file uploaded by the client.
     """
     logger.info(f"Upload request — bot_tag: {bot_tag!r}, filepath: {filepath!r}, fr_mode: {fr_mode!r}")
+
+    # Correlation ID set by RequestIDMiddleware; threaded into the ingestion
+    # pipeline so stage events share the request lifecycle's request_id.
+    request_id = getattr(request.state, "request_id", None)
 
     # ── Folder batch mode ─────────────────────────────────────────────────────
     if os.path.isdir(filepath):
@@ -151,7 +156,9 @@ async def upload_file(
                         with open(self.file_path, "rb") as fh:
                             return fh.read()
 
-                result = await rag_instance.upload(_MockFile(file_path), bot_tag, fr_mode, file_path)
+                result = await rag_instance.upload(
+                    _MockFile(file_path), bot_tag, fr_mode, file_path, request_id=request_id
+                )
                 results.append({"file": basename, "status": "success", "result": result})
                 logger.info(f"Successfully processed: {basename!r}")
             except Exception as e:
@@ -176,7 +183,7 @@ async def upload_file(
         if file.size and file.size > 100 * 1024 * 1024:
             raise HTTPException(status_code=413, detail="File too large. Maximum size is 100 MB.")
 
-        result = await rag_instance.upload(file, bot_tag, fr_mode, filepath)
+        result = await rag_instance.upload(file, bot_tag, fr_mode, filepath, request_id=request_id)
         logger.info(f"Upload completed successfully: {result}")
         return {"status": "successfully indexed", "detail": result}
 
