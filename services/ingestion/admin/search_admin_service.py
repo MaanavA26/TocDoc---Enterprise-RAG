@@ -25,6 +25,8 @@ from fastapi import HTTPException, status
 
 from .models import (
     ChunkSample,
+    DeleteDocumentResponse,
+    DeleteTenantResponse,
     DocumentDetailResponse,
     DocumentListResponse,
     DocumentSummary,
@@ -52,6 +54,17 @@ _GET_DOC_SELECT = [
 ]
 _STATS_SELECT = ["document_id", "source_type", "fr_tag"]
 
+# Only the key field is needed to delete a chunk.
+_DELETE_SELECT = ["id"]
+# Fields needed to delete a whole tenant: key + document_id (to count distinct
+# documents removed in the response).
+_DELETE_TENANT_SELECT = ["id", "document_id"]
+
+# Azure Cognitive Search caps a single indexing batch at 1000 actions. We
+# delete in batches no larger than this; the collection of ids itself is
+# unbounded (paginated above the per-page read cap).
+_DELETE_BATCH_SIZE = 1000
+
 # NOTE on pagination:
 # The Azure Cognitive Search REST API caps results at 1000 per page. The
 # Python SDK exposes pagination via `SearchItemPaged.by_page()` which uses
@@ -66,7 +79,7 @@ _STATS_SELECT = ["document_id", "source_type", "fr_tag"]
 
 
 class SearchAdminService:
-    """Read-only admin operations over Azure Cognitive Search."""
+    """Admin operations (read + scoped delete) over Azure Cognitive Search."""
 
     def __init__(self, search_client: SearchClient) -> None:
         self._search_client = search_client
@@ -249,6 +262,86 @@ class SearchAdminService:
             chunk_count=chunk_count,
             source_types=source_types,
             fr_modes=fr_modes,
+        )
+
+    def _delete_by_ids(self, ids: list[str]) -> None:
+        """Delete chunks by key in batches of at most `_DELETE_BATCH_SIZE`.
+
+        `delete_documents` accepts a list of partial documents containing only
+        the key field (`id`). We chunk the id list because a single indexing
+        batch is capped at 1000 actions by the service.
+        """
+        for start in range(0, len(ids), _DELETE_BATCH_SIZE):
+            batch = ids[start : start + _DELETE_BATCH_SIZE]
+            self._search_client.delete_documents(documents=[{"id": cid} for cid in batch])
+
+    def delete_document(self, bot_tag: str, document_id: str) -> DeleteDocumentResponse:
+        """Delete every chunk for one document within one bot_tag scope.
+
+        Both `bot_tag` and `document_id` are applied to the filter, so a
+        document indexed under a different tenant is never touched. Idempotent:
+        if no chunks match, returns `deleted_chunks=0` (the route maps this to
+        a 200, not a 404).
+
+        Single read pass: we drain all matching ids first, then delete. We never
+        delete while the search pager is open (deleting mutates the index, which
+        can invalidate continuation tokens mid-walk).
+        """
+        safe_tag = self._escape_odata(bot_tag)
+        safe_doc = self._escape_odata(document_id)
+        filter_expr = f"bot_tag eq '{safe_tag}' and document_id eq '{safe_doc}'"
+
+        ids = [c["id"] for c in self._paged_search(filter_expr, _DELETE_SELECT) if c.get("id")]
+        self._delete_by_ids(ids)
+
+        logger.info(
+            "Deleted %d chunks for bot_tag=%r document_id=%r",
+            len(ids),
+            bot_tag,
+            document_id,
+        )
+        return DeleteDocumentResponse(
+            bot_tag=bot_tag,
+            document_id=document_id,
+            deleted_chunks=len(ids),
+        )
+
+    def delete_tenant(self, bot_tag: str) -> DeleteTenantResponse:
+        """Delete every chunk for one bot_tag scope (all documents).
+
+        Scoped strictly to the single `bot_tag` — other tenants are never
+        affected. Counts distinct `document_id`s removed for the response.
+
+        Single read pass: drain all ids (and the distinct document_id set)
+        before deleting, for the same continuation-token safety reason as
+        `delete_document`.
+        """
+        safe_tag = self._escape_odata(bot_tag)
+        filter_expr = f"bot_tag eq '{safe_tag}'"
+
+        ids: list[str] = []
+        doc_ids: set[str] = set()
+        for chunk in self._paged_search(filter_expr, _DELETE_TENANT_SELECT):
+            cid = chunk.get("id")
+            if not cid:
+                continue
+            ids.append(cid)
+            doc_id = chunk.get("document_id")
+            if doc_id:
+                doc_ids.add(doc_id)
+
+        self._delete_by_ids(ids)
+
+        logger.info(
+            "Deleted %d chunks across %d documents for bot_tag=%r",
+            len(ids),
+            len(doc_ids),
+            bot_tag,
+        )
+        return DeleteTenantResponse(
+            bot_tag=bot_tag,
+            deleted_chunks=len(ids),
+            deleted_documents=len(doc_ids),
         )
 
 

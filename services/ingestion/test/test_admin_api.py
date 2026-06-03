@@ -33,6 +33,8 @@ if str(_INGESTION_ROOT) not in sys.path:
 
 from admin.models import (  # noqa: E402
     ChunkSample,
+    DeleteDocumentResponse,
+    DeleteTenantResponse,
     DocumentDetailResponse,
     DocumentListResponse,
     DocumentSummary,
@@ -409,3 +411,308 @@ class TestChunkIndexExtraction:
         assert SearchAdminService._extract_chunk_index("malformed") is None
         assert SearchAdminService._extract_chunk_index("") is None
         assert SearchAdminService._extract_chunk_index("a_b_notanumber") is None
+
+
+# ---------------------------------------------------------------------------
+# Destructive endpoints (PR-2) — route layer
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteDocumentRoute:
+    def test_deletes_and_returns_counts(self, client: TestClient, mock_svc: MagicMock):
+        mock_svc.delete_document.return_value = DeleteDocumentResponse(
+            bot_tag="client_a",
+            document_id="abc123",
+            deleted_chunks=24,
+        )
+        r = client.request(
+            "DELETE",
+            "/admin/documents/abc123",
+            params={"bot_tag": "client_a"},
+            headers=VALID_HEADERS,
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body == {
+            "bot_tag": "client_a",
+            "document_id": "abc123",
+            "deleted_chunks": 24,
+            "status": "deleted",
+        }
+        # Scoped strictly to the (bot_tag, document_id) the caller provided.
+        mock_svc.delete_document.assert_called_once_with("client_a", "abc123")
+
+    def test_idempotent_when_no_chunks(self, client: TestClient, mock_svc: MagicMock):
+        mock_svc.delete_document.return_value = DeleteDocumentResponse(
+            bot_tag="client_a",
+            document_id="missing",
+            deleted_chunks=0,
+        )
+        r = client.request(
+            "DELETE",
+            "/admin/documents/missing",
+            params={"bot_tag": "client_a"},
+            headers=VALID_HEADERS,
+        )
+        assert r.status_code == 200
+        assert r.json()["deleted_chunks"] == 0
+
+    def test_missing_token_returns_401(self, client: TestClient, mock_svc: MagicMock):
+        r = client.request(
+            "DELETE",
+            "/admin/documents/abc123",
+            params={"bot_tag": "client_a"},
+        )
+        assert r.status_code == 401
+        mock_svc.delete_document.assert_not_called()
+
+    def test_missing_bot_tag_returns_422(self, client: TestClient, mock_svc: MagicMock):
+        r = client.request("DELETE", "/admin/documents/abc123", headers=VALID_HEADERS)
+        assert r.status_code == 422
+        mock_svc.delete_document.assert_not_called()
+
+    def test_injection_in_bot_tag_rejected(self, client: TestClient, mock_svc: MagicMock):
+        r = client.request(
+            "DELETE",
+            "/admin/documents/abc123",
+            params={"bot_tag": "client'; DROP--"},
+            headers=VALID_HEADERS,
+        )
+        assert r.status_code == 422
+        mock_svc.delete_document.assert_not_called()
+
+    def test_injection_in_document_id_rejected(self, client: TestClient, mock_svc: MagicMock):
+        r = client.request(
+            "DELETE",
+            "/admin/documents/abc'def",
+            params={"bot_tag": "client_a"},
+            headers=VALID_HEADERS,
+        )
+        assert r.status_code == 422
+        mock_svc.delete_document.assert_not_called()
+
+
+class TestDeleteTenantRoute:
+    def test_without_confirm_returns_400_and_deletes_nothing(self, client: TestClient, mock_svc: MagicMock):
+        r = client.request(
+            "DELETE",
+            "/admin/bots/client_a/documents",
+            headers=VALID_HEADERS,
+        )
+        assert r.status_code == 400
+        # Service must never be invoked without confirmation.
+        mock_svc.delete_tenant.assert_not_called()
+
+    def test_confirm_false_returns_400_and_deletes_nothing(self, client: TestClient, mock_svc: MagicMock):
+        r = client.request(
+            "DELETE",
+            "/admin/bots/client_a/documents",
+            params={"confirm": "false"},
+            headers=VALID_HEADERS,
+        )
+        assert r.status_code == 400
+        mock_svc.delete_tenant.assert_not_called()
+
+    def test_with_confirm_deletes_and_returns_counts(self, client: TestClient, mock_svc: MagicMock):
+        mock_svc.delete_tenant.return_value = DeleteTenantResponse(
+            bot_tag="client_a",
+            deleted_chunks=540,
+            deleted_documents=12,
+        )
+        r = client.request(
+            "DELETE",
+            "/admin/bots/client_a/documents",
+            params={"confirm": "true"},
+            headers=VALID_HEADERS,
+        )
+        assert r.status_code == 200
+        assert r.json() == {
+            "bot_tag": "client_a",
+            "deleted_chunks": 540,
+            "deleted_documents": 12,
+            "status": "deleted",
+        }
+        mock_svc.delete_tenant.assert_called_once_with("client_a")
+
+    def test_missing_token_returns_401(self, client: TestClient, mock_svc: MagicMock):
+        r = client.request(
+            "DELETE",
+            "/admin/bots/client_a/documents",
+            params={"confirm": "true"},
+        )
+        assert r.status_code == 401
+        mock_svc.delete_tenant.assert_not_called()
+
+    def test_injection_in_bot_tag_rejected(self, client: TestClient, mock_svc: MagicMock):
+        r = client.request(
+            "DELETE",
+            "/admin/bots/bad'tag/documents",
+            params={"confirm": "true"},
+            headers=VALID_HEADERS,
+        )
+        assert r.status_code == 422
+        mock_svc.delete_tenant.assert_not_called()
+
+
+class TestReindexRoute:
+    def test_returns_501_with_documented_body(self, client: TestClient):
+        r = client.post(
+            "/admin/documents/abc123/reindex",
+            params={"bot_tag": "client_a"},
+            headers=VALID_HEADERS,
+        )
+        assert r.status_code == 501
+        assert r.json() == {
+            "status": "not_implemented",
+            "reason": (
+                "Reindex requires source persistence or connector metadata. Use delete + ingest for now."
+            ),
+        }
+
+    def test_still_requires_auth(self, client: TestClient):
+        r = client.post(
+            "/admin/documents/abc123/reindex",
+            params={"bot_tag": "client_a"},
+        )
+        assert r.status_code == 401
+
+    def test_still_validates_inputs(self, client: TestClient):
+        r = client.post(
+            "/admin/documents/abc123/reindex",
+            params={"bot_tag": "bad tag"},
+            headers=VALID_HEADERS,
+        )
+        assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Destructive endpoints (PR-2) — service layer
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteDocumentService:
+    def test_filter_scopes_by_both_bot_tag_and_document_id(self):
+        mock_client = MagicMock()
+        mock_client.search.return_value = _make_paged_search_result([[]])
+        svc = SearchAdminService(mock_client)
+
+        svc.delete_document("client_a", "doc1")
+
+        kwargs = mock_client.search.call_args.kwargs
+        filter_expr = kwargs.get("filter")
+        assert "bot_tag eq 'client_a'" in filter_expr
+        assert "document_id eq 'doc1'" in filter_expr
+        assert " and " in filter_expr
+        assert "top" not in kwargs
+
+    def test_deletes_only_matching_ids(self):
+        # The search filter already scopes the result set; we assert the exact
+        # ids the service collected are the ones handed to delete_documents.
+        chunks = [
+            {"id": "client_a_doc1_read_00000"},
+            {"id": "client_a_doc1_read_00001"},
+        ]
+        mock_client = MagicMock()
+        mock_client.search.return_value = _make_paged_search_result([chunks])
+        svc = SearchAdminService(mock_client)
+
+        result = svc.delete_document("client_a", "doc1")
+
+        assert result.deleted_chunks == 2
+        assert result.status == "deleted"
+        mock_client.delete_documents.assert_called_once()
+        deleted = mock_client.delete_documents.call_args.kwargs["documents"]
+        deleted_ids = {d["id"] for d in deleted}
+        assert deleted_ids == {"client_a_doc1_read_00000", "client_a_doc1_read_00001"}
+
+    def test_idempotent_no_chunks_no_delete_call(self):
+        mock_client = MagicMock()
+        mock_client.search.return_value = _make_paged_search_result([[]])
+        svc = SearchAdminService(mock_client)
+
+        result = svc.delete_document("client_a", "ghost")
+
+        assert result.deleted_chunks == 0
+        mock_client.delete_documents.assert_not_called()
+
+    def test_pagination_deletes_all_pages_not_just_first(self):
+        # 2500 chunks split as 1000 + 1000 + 500 across 3 read pages. The
+        # service must delete all 2500, batched at <=1000 per delete call.
+        page1 = [{"id": f"client_a_doc1_read_{i:05d}"} for i in range(1000)]
+        page2 = [{"id": f"client_a_doc1_read_{i:05d}"} for i in range(1000, 2000)]
+        page3 = [{"id": f"client_a_doc1_read_{i:05d}"} for i in range(2000, 2500)]
+
+        mock_client = MagicMock()
+        mock_client.search.return_value = _make_paged_search_result([page1, page2, page3])
+        svc = SearchAdminService(mock_client)
+
+        result = svc.delete_document("client_a", "doc1")
+
+        assert result.deleted_chunks == 2500
+        total_deleted = sum(
+            len(call.kwargs["documents"]) for call in mock_client.delete_documents.call_args_list
+        )
+        assert total_deleted == 2500, f"Expected all 2500 ids deleted, got {total_deleted}"
+        # Each batch must respect the 1000-action cap.
+        for call in mock_client.delete_documents.call_args_list:
+            assert len(call.kwargs["documents"]) <= 1000
+
+    def test_escapes_quotes_defense_in_depth(self):
+        # Even though the route regex rejects quotes, the service still escapes.
+        mock_client = MagicMock()
+        mock_client.search.return_value = _make_paged_search_result([[]])
+        svc = SearchAdminService(mock_client)
+
+        svc.delete_document("a'b", "c'd")
+
+        filter_expr = mock_client.search.call_args.kwargs["filter"]
+        assert "a''b" in filter_expr
+        assert "c''d" in filter_expr
+
+
+class TestDeleteTenantService:
+    def test_scopes_by_bot_tag_only(self):
+        mock_client = MagicMock()
+        mock_client.search.return_value = _make_paged_search_result([[]])
+        svc = SearchAdminService(mock_client)
+
+        svc.delete_tenant("client_a")
+
+        kwargs = mock_client.search.call_args.kwargs
+        filter_expr = kwargs.get("filter")
+        assert filter_expr == "bot_tag eq 'client_a'"
+        # Must NOT widen to other tenants and must not use top-capping.
+        assert "top" not in kwargs
+
+    def test_counts_distinct_documents_and_chunks(self):
+        chunks = [
+            {"id": "client_a_d1_read_00000", "document_id": "d1"},
+            {"id": "client_a_d1_read_00001", "document_id": "d1"},
+            {"id": "client_a_d2_read_00000", "document_id": "d2"},
+        ]
+        mock_client = MagicMock()
+        mock_client.search.return_value = _make_paged_search_result([chunks])
+        svc = SearchAdminService(mock_client)
+
+        result = svc.delete_tenant("client_a")
+
+        assert result.deleted_chunks == 3
+        assert result.deleted_documents == 2
+        assert result.status == "deleted"
+
+    def test_pagination_deletes_all_pages(self):
+        page1 = [{"id": f"client_a_d1_read_{i:05d}", "document_id": "d1"} for i in range(1000)]
+        page2 = [{"id": f"client_a_d2_read_{i:05d}", "document_id": "d2"} for i in range(1000)]
+        page3 = [{"id": f"client_a_d3_read_{i:05d}", "document_id": "d3"} for i in range(500)]
+        mock_client = MagicMock()
+        mock_client.search.return_value = _make_paged_search_result([page1, page2, page3])
+        svc = SearchAdminService(mock_client)
+
+        result = svc.delete_tenant("client_a")
+
+        assert result.deleted_chunks == 2500
+        assert result.deleted_documents == 3
+        total_deleted = sum(
+            len(call.kwargs["documents"]) for call in mock_client.delete_documents.call_args_list
+        )
+        assert total_deleted == 2500
