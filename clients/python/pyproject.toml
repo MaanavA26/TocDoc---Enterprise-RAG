@@ -20,7 +20,7 @@ requires-python = ">=3.10"
 # against the same pydantic/httpx behavior.
 dependencies = [
     "httpx==0.28.1",
-    "pydantic==2.11.4",
+    "pydantic==2.13.4",
 ]
 
 [project.optional-dependencies]
