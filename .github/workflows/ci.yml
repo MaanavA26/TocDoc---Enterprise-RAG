@@ -8,6 +8,10 @@ name: ci
 #   bicep      → az bicep build (validate IaC compiles)
 #   shell      → shellcheck (validate any scripts/*.sh in the repo)
 #   test       → matrix over {qna, ingestion}; pytest with coverage, artifact uploaded
+#   test (sdk) → install clients/python SDK (light: httpx + pydantic) + pytest
+#   test (eval)→ install eval/ RAGAS harness (heavy: ragas + qna deps) + pytest
+#                kept as its own parallel job so the slow install never sits on
+#                the {qna, ingestion} critical path
 #
 # Coverage is computed but NOT gated this round. The architect can set a
 # threshold in a follow-up PR after the baseline is observable. Concurrency
@@ -54,11 +58,14 @@ jobs:
       - name: Install ruff
         run: pip install "ruff==${{ env.RUFF_VERSION }}"
 
+      # clients/python (SDK) and eval/ (RAGAS harness) are linted with the same
+      # repo-root ruff config as the services — both omit a [tool.ruff] section
+      # so ruff walks up to the root pyproject. Folded into this one fast job.
       - name: ruff check
-        run: ruff check services/qna services/ingestion
+        run: ruff check services/qna services/ingestion clients/python eval
 
       - name: ruff format --check
-        run: ruff format --check services/qna services/ingestion
+        run: ruff format --check services/qna services/ingestion clients/python eval
 
   # ---------------------------------------------------------------------------
   # Security — bandit + pip-audit
@@ -218,3 +225,84 @@ jobs:
             services/${{ matrix.service }}/htmlcov/
           retention-days: 14
           if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Test (SDK) — clients/python typed HTTP client
+  # ---------------------------------------------------------------------------
+  #
+  # The SDK deps are light (httpx + pydantic) and its tests mock all HTTP with
+  # httpx.MockTransport, so this runs fast on the standard runner with no system
+  # packages. Kept out of the {qna, ingestion} matrix because it installs an
+  # editable package rather than a service requirements file. Gates on lint like
+  # the service tests do.
+  test-sdk:
+    name: test (sdk)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: lint
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: clients/python/pyproject.toml
+
+      # The `[dev]` extra adds pytest; the base deps pull httpx + pydantic.
+      - name: Install SDK (with dev extra)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e "clients/python[dev]"
+
+      - name: Run pytest
+        working-directory: clients/python
+        run: pytest -q
+
+  # ---------------------------------------------------------------------------
+  # Test (eval) — eval/ RAGAS offline evaluation harness
+  # ---------------------------------------------------------------------------
+  #
+  # SEPARATE job, deliberately NOT in the {qna, ingestion} matrix and NOT a
+  # `needs:` of any other job, so its heavy install (eval/requirements.txt pulls
+  # ragas + datasets + the full QnA runtime via `-r ../services/qna/...`, several
+  # minutes) runs in PARALLEL and never sits on the fast critical path.
+  #
+  # Runs on every push AND every PR (the workflow's two triggers): per-PR
+  # coverage is preferred and this job blocks nothing, so the extra parallel
+  # minutes are cheap insurance against the SDK/eval hole this PR is closing.
+  # It is a REAL gate — a failing eval test fails the run (no continue-on-error;
+  # that is reserved for the report-only pip-audit steps).
+  #
+  # eval pulls only the QnA dep set, which (like the qna test leg) needs no
+  # libgl/libglib system packages — so no apt step here.
+  test-eval:
+    name: test (eval)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: lint
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: eval/requirements.txt
+
+      - name: Install eval harness requirements
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r eval/requirements.txt
+          python -m pip install pytest pytest-asyncio
+
+      # Run from the repo root so eval/tests/conftest.py is discovered and sets
+      # the fake Azure env BEFORE the harness (which validates Azure config at
+      # import time) is collected. Mocked end to end — no live Azure or RAGAS LLM
+      # call.
+      - name: Run pytest
+        run: pytest eval -q
