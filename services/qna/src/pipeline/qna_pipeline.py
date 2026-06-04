@@ -22,6 +22,7 @@ from typing import Any
 from src.config.config import LocalConfig
 from src.core.logger import logger
 from src.core.observability import log_event
+from src.core.responses import CitationMap, QnASuccessResponse
 from src.services.embedding_service import get_embedding
 from src.services.openai_service import generate_openai_response, rephrase_queries
 from src.services.search_service import perform_search
@@ -318,10 +319,17 @@ async def generate_answer(
             answer_preview=_preview,
         )
 
-        return {
-            "answer": answer_text,
-            "citation": extracted_filepath,
-        }
+        # Give the payload a typed home (the public success contract; see
+        # src.core.responses). We construct the model to validate the shape,
+        # then return its dict form so direct callers/tests that do
+        # `result["answer"]` / `"citation" in result` keep working unchanged.
+        # `exclude_none=True` drops the defensive optional fields so the dict
+        # stays byte-identical to the historical `{answer, citation}` payload.
+        response = QnASuccessResponse(
+            answer=answer_text,
+            citation=CitationMap(extracted_filepath),
+        )
+        return response.model_dump(exclude_none=True)
 
     except Exception as e:
         # Log with full traceback for server-side debugging, then re-raise.
