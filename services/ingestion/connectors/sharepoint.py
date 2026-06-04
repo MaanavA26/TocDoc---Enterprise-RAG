@@ -245,6 +245,12 @@ class SharePointConnector:
                     logger.debug("Skipping non-PDF SharePoint item: %r", name)
                     continue
                 item_id = entry.get("id", "")
+                if not item_id:
+                    # Defensive: a driveItem without an id would yield a
+                    # malformed source_path (sharepoint://site/drive/) and a bad
+                    # /items//content fetch. Skip it rather than ingest garbage.
+                    logger.debug("Skipping SharePoint item with missing id: name=%r", name)
+                    continue
                 size = entry.get("size")
                 if isinstance(size, int) and size > MAX_FILE_BYTES:
                     log_event(

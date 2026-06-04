@@ -192,6 +192,23 @@ def test_sync_valid_returns_202_and_schedules_run(client, monkeypatch, captured,
     assert captured["run_id"] == body["run_id"]
 
 
+def test_background_runner_is_sync_for_threadpool_offload():
+    """The connector driver is registered as a SYNC background task so Starlette
+    offloads it to its threadpool. The connectors' enumerate()/fetch() use
+    synchronous httpx / Azure-SDK calls; if this regressed to an `async def`
+    background task they would run on the main event loop and block admin /
+    upload / health for the whole sync. The async driver is driven via
+    asyncio.run on the worker thread instead.
+    """
+    import inspect
+
+    assert not inspect.iscoroutinefunction(routes_module._run_connector_background), (
+        "_run_connector_background must be a sync def so Starlette runs it in the "
+        "threadpool; an async def would run the connector's blocking I/O on the "
+        "event loop"
+    )
+
+
 def test_sync_blob_source_type_supported(client, monkeypatch, captured):
     """source_type=blob is accepted; construction uses env config too."""
     monkeypatch.setenv("CONNECTOR_BOT_TAG", "tenant-x")

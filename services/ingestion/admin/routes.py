@@ -348,8 +348,15 @@ def _build_connector(source_type: str):
     raise ConnectorError(f"Unsupported source_type: {source_type!r}")
 
 
-async def _run_connector_background(connector, rag_instance, *, run_id: str) -> None:
-    """Drive one connector run, logging its own start/complete/failed events.
+def _run_connector_background(connector, rag_instance, *, run_id: str) -> None:
+    """Drive one connector run on a worker THREAD — never the event loop.
+
+    Registered as a SYNC background task so Starlette runs it in its threadpool;
+    we then drive the async connector loop via ``asyncio.run`` on that thread.
+    This is load-bearing: the connectors' ``enumerate()``/``fetch()`` use
+    synchronous httpx / Azure SDK calls that would otherwise block the main
+    event loop for the entire sync, degrading admin/upload/health probes in the
+    same worker. In-process v1 — not a durable distributed job queue.
 
     run_connector emits run_started/run_completed and re-raises on a failing
     item (logging connector_item_failed but NO run-level failed event). As a
@@ -358,7 +365,7 @@ async def _run_connector_background(connector, rag_instance, *, run_id: str) -> 
     fully greppable by run_id.
     """
     try:
-        await run_connector(connector, rag_instance, run_id=run_id)
+        asyncio.run(run_connector(connector, rag_instance, run_id=run_id))
     except Exception as exc:  # noqa: BLE001 - background task must not propagate
         log_event(
             logger,
