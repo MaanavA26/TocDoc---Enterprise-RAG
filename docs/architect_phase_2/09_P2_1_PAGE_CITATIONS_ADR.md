@@ -3,7 +3,7 @@
 # P2-1 Step 2 — Page-Level Citations: Architecture Decision Record
 
 **Status:** Proposed — pending architect sign-off on the reindex window and the spike gates in this document.
-**Supersedes:** the "Out of scope: page_number" note in `services/qna/src/core/responses.py` (lines 25–27), which deferred page-level citation fields to a separate gated workstream. This ADR is that workstream's decision.
+**Will supersede (once accepted & implemented):** the "Out of scope: page_number" note in `services/qna/src/core/responses.py` (lines 25–27). That note stays accurate until the optional `page_citations` field actually ships — this ADR is the *decision record* for that workstream, not yet in effect.
 
 ## Context & constraints (read-mode provenance is the hard part)
 
@@ -32,6 +32,8 @@ Then token-chunk **within each page**:
 - for each non-empty chunk, build the `azure_doc` exactly as today (`516–534`) plus `"page_number": str(page_no)`, using the running `i` for the ID and incrementing only on emitted (non-empty) chunks.
 
 No chunk straddles a page boundary, so `page_number` is exact and trivially correct — the strongest possible read-mode fidelity. The cost (chunk-boundary and content churn) is disclosed in the next two sections.
+
+**Gate (blocking) — read mode is also a retrieval-behaviour migration, not just a field add.** DI `mode="page"` emits line-joined *text*, whereas read mode today indexes markdown-like content; switching changes the *indexed representation* and the chunk boundaries, which can degrade retrieval for tables, headings, and bullets. Read-mode page citations are therefore gated on a **content-format spike + retrieval-quality QA** (Spike A below): (a) check whether DI/langchain can yield page-level content that preserves useful markdown/table structure; (b) benchmark current read-mode markdown chunks vs proposed page-mode text chunks on a small query set; (c) proceed only if quality is acceptable or the architect explicitly accepts the tradeoff. If page-mode text is selected, it ships as a **planned retrieval-behaviour migration**, not silent page-citation work — page citations must never quietly reduce answer quality.
 
 ### Layout mode — overlay, never re-split
 
@@ -100,7 +102,12 @@ The honest, decision-relevant framing for the architect: **this window contains 
 
 ## Sequenced delivery plan (PR-sized increments)
 
-1. **Spike A (blocking, read):** confirm the installed DI `mode="page"` Document shape (one Document/page, 1-based `metadata["page"]`, OCR content) against a real read-mode response, and capture a fixture. Confirms the read-mode source. (Planning-doc Q1.)
+**Rollout sequencing — three independently-gated tracks (read must NOT block the other two):**
+1. *Contract field + search select-list* are backward-compatible and land first (steps 3–4) — safe before anything populates `page_number`.
+2. *Layout* page citations ship after **Spike B** (marker survival) as a pure field-backfill on byte-identical IDs.
+3. *Read-mode* page citations are a **retrieval-behaviour migration**: they require **Spike A's content-format + retrieval-quality QA gate** AND a planned reindex window before they ship.
+
+1. **Spike A (blocking, read) — shape AND content-format / retrieval-quality gate:** (i) confirm the installed DI `mode="page"` Document shape (one Document/page, 1-based `metadata["page"]`, OCR content) against a real read-mode response + capture a fixture; (ii) check whether a page-level source can preserve useful markdown/table structure; (iii) **benchmark retrieval quality** of current read-mode markdown chunks vs proposed page-mode text chunks on a small query set. Read-mode implementation proceeds ONLY if quality is acceptable or the architect explicitly accepts the markdown→text tradeoff. (Planning-doc Q1.)
 2. **Spike B (blocking, layout):** confirm whether `<!-- PageBreak -->` / `<!-- PageNumber -->` markers survive into `docs[0].page_content`; capture a fixture. If absent, adopt the page-aware-DI-pass / page-range fallback for layout. Gates the layout PR only; blocks no design.
 3. **Search select (independent, backward-compatible):** add `"page_number"` to `search_service.py:118–126`; verify the semantic fallback is unaffected. Ships safely before anything populates the field (old chunks return empty).
 4. **Contract (additive):** add optional `page_citations: dict[str, list[str]] | None` to `QnASuccessResponse`; update the out-of-scope docstring; extend `test_responses_contract.py` to prove `None`→excluded byte-identity and populated→flat-list, with `CitationMap` unchanged.
