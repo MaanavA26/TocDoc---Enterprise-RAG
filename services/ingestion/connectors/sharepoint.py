@@ -81,6 +81,9 @@ class SharePointConnector:
     """
 
     source_type = "sharepoint"
+    # Set by run_connector before enumerate(); None when used outside a run.
+    # Included as request_id on inner log events so they correlate with the run.
+    run_id: str | None = None
 
     def __init__(
         self,
@@ -182,6 +185,7 @@ class SharePointConnector:
                 log_event(
                     logger,
                     "connector_graph_throttled",
+                    request_id=self.run_id,
                     level=logging.WARNING,
                     source_type=self.source_type,
                     bot_tag=self.bot_tag,
@@ -256,6 +260,7 @@ class SharePointConnector:
                     log_event(
                         logger,
                         "connector_item_skipped",
+                        request_id=self.run_id,
                         source_type=self.source_type,
                         bot_tag=self.bot_tag,
                         source_path=self._source_path(item_id),

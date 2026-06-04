@@ -5,6 +5,8 @@ Field nullability reflects the reality that older indexed chunks may not have
 the metadata fields added in P0-4 (deterministic chunk IDs PR).
 """
 
+from datetime import datetime
+
 from pydantic import BaseModel, Field
 
 
@@ -98,3 +100,45 @@ class ConnectorSyncResponse(BaseModel):
     run_id: str
     source_type: str
     status: str = "started"
+
+
+class ConnectorRunError(BaseModel):
+    """Safe error summary attached to a failed run.
+
+    Carries only the exception CLASS name and a generic category message —
+    never raw exception text, secrets, or document content.
+    """
+
+    error_class: str
+    safe_message: str
+
+
+class ConnectorRunStatusResponse(BaseModel):
+    """Response shape for GET /admin/connectors/runs/{run_id}.
+
+    Reflects the in-process run-status store. `status` is one of
+    started | completed | failed. Counts are populated on completion;
+    `error` is present only on failure. State is in-process and LOST on
+    restart (in-process v1 — not a durable distributed store).
+    """
+
+    run_id: str
+    status: str
+    source_type: str
+    bot_tag: str
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    processed_count: int = Field(ge=0)
+    failed_count: int = Field(ge=0)
+    error: ConnectorRunError | None = None
+
+
+class ConnectorRunListResponse(BaseModel):
+    """Response shape for GET /admin/connectors/runs (recent runs, newest first).
+
+    Admin-wide view across bot_tags — the operator triggering a sync is already
+    a privileged, bot_tag-agnostic role (see require_admin_token).
+    """
+
+    count: int = Field(ge=0)
+    runs: list[ConnectorRunStatusResponse]

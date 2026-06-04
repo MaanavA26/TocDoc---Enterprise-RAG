@@ -152,6 +152,12 @@ class SourceConnector(Protocol):
         source_type: "blob" | "sharepoint" — stamped on every chunk.
         bot_tag:     bound at init, validated against BOT_TAG_PATTERN.
         fr_mode:     "read" | "layout" — bound per connector instance.
+
+    Optional run correlation: ``run_connector`` sets a ``run_id`` attribute on
+    the connector before enumerate() so the connector's own inner log events
+    carry it as ``request_id``. It is NOT part of this structural (runtime_
+    checkable) contract — connectors that never run inside the driver need not
+    declare it — so it is documented here rather than annotated above.
     """
 
     source_type: str
@@ -273,6 +279,12 @@ async def run_connector(connector: SourceConnector, rag_instance, *, run_id: str
     Returns:
         A summary dict: {"processed": int, "items": [source_path, ...]}.
     """
+    # Thread the run_id onto the connector instance BEFORE enumerate() runs so
+    # the connectors' own inner log events (e.g. connector_graph_throttled in
+    # the SharePoint connector) carry it. Backward-compatible: connectors built
+    # directly without a run keep their `run_id` class-attribute default (None).
+    connector.run_id = run_id
+
     log_event(
         logger,
         "connector_run_started",
