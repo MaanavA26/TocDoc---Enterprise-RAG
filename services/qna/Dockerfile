@@ -1,4 +1,4 @@
-FROM python:3.10-slim
+FROM python:3.14-slim
 
 # Install system dependencies and Microsoft ODBC driver
 RUN apt-get update && \
