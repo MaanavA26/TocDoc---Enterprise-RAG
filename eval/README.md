@@ -63,7 +63,7 @@ reads (`AzureConfig` / `LocalConfig`).
 This is an **offline, CI-controlled, non-blocking** gate. A real run needs
 live Azure OpenAI + Cognitive Search env (it calls the model and the index):
 
-```
+```bash
 # Canonical UPPER_SNAKE env (same names the QnA service uses):
 export AZURE_OPENAI_ENDPOINT=...        AZURE_OPENAI_KEY=...
 export AZURE_OPENAI_VERSION=...         AZURE_OPENAI_LLM_MODEL=...
@@ -108,7 +108,7 @@ recorded** on that record; the run continues and still produces a report.
 real RAGAS LLM calls** happen. `eval/tests/conftest.py` sets fake Azure env so
 importing the QnA config/pipeline (validated at import time) does not fail.
 
-```
+```bash
 pip install -r eval/requirements.txt
 pytest eval -q
 ```

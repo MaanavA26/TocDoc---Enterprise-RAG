@@ -360,3 +360,73 @@ def _run(coro):
     import asyncio
 
     return asyncio.run(coro)
+
+
+# ---------------------------------------------------------------------------
+# Robustness guards (per CodeRabbit review on #33)
+# ---------------------------------------------------------------------------
+def test_non_dict_record_isolated_as_error(tmp_path):
+    """A valid-JSON line that isn't an object is isolated as an error record,
+    not a crash that aborts the whole run."""
+    bench = tmp_path / "bench.jsonl"
+    good = {"question": "q", "ground_truth": "g", "bot_tag": "client_a", "fr_tag": "read"}
+    # First line is a JSON array (valid JSON, not a dict); second is a real record.
+    bench.write_text(json.dumps([1, 2, 3]) + "\n" + json.dumps(good) + "\n", encoding="utf-8")
+
+    gen = AsyncMock(side_effect=[{"answer": "A"}])
+    emb = AsyncMock(return_value=[0.1])
+    search = AsyncMock(side_effect=[_fake_search_results("c")])
+    fake_eval = _patch_evaluate([_fake_scores()[0]])
+
+    with (
+        patch.object(ragas_eval, "generate_answer", gen),
+        patch.object(ragas_eval, "get_embedding", emb),
+        patch.object(ragas_eval, "perform_search", search),
+        patch.object(ragas_eval, "evaluate", fake_eval),
+    ):
+        payload = _run(
+            ragas_eval.run_eval(
+                bench,
+                tmp_path / "out",
+                azure=MagicMock(),
+                ragas_llm=MagicMock(),
+                ragas_embeddings=MagicMock(),
+            )
+        )
+
+    recs = payload["records"]
+    assert payload["record_count"] == 2
+    assert recs[0]["error"] == "invalid_record"  # the non-dict line, isolated
+    assert recs[1]["error"] is None  # the good record still processed
+
+
+def test_score_count_mismatch_marks_unscored_record(tmp_path):
+    """If evaluate() returns fewer score rows than samples, unscored records are
+    marked with an error — never silently dropped."""
+    bench = _benchmark_file(tmp_path, _records())  # two scorable records
+    gen = AsyncMock(side_effect=[{"answer": "A1"}, {"answer": "A2"}])
+    emb = AsyncMock(return_value=[0.1])
+    search = AsyncMock(side_effect=[_fake_search_results("c1"), _fake_search_results("c2")])
+    # Two samples reach scoring, but evaluate returns only ONE score row.
+    fake_eval = _patch_evaluate([_fake_scores()[0]])
+
+    with (
+        patch.object(ragas_eval, "generate_answer", gen),
+        patch.object(ragas_eval, "get_embedding", emb),
+        patch.object(ragas_eval, "perform_search", search),
+        patch.object(ragas_eval, "evaluate", fake_eval),
+    ):
+        payload = _run(
+            ragas_eval.run_eval(
+                bench,
+                tmp_path / "out",
+                azure=MagicMock(),
+                ragas_llm=MagicMock(),
+                ragas_embeddings=MagicMock(),
+            )
+        )
+
+    recs = payload["records"]
+    assert recs[0]["scores"]  # first record got the single score row
+    assert recs[1]["error"] == "score_count_mismatch"  # second not silently dropped
+    assert recs[1]["scores"] == {}

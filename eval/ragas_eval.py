@@ -369,6 +369,12 @@ async def run_eval(
     scorable: list[tuple[int, SingleTurnSample]] = []
 
     for record in records:
+        if not isinstance(record, dict):
+            # A valid-JSON line that isn't an object (e.g. a list/scalar) would
+            # crash record.get(...); isolate it as an errored record instead of
+            # aborting the whole run.
+            results.append(RecordResult(question="", bot_tag="", fr_tag="read", error="invalid_record"))
+            continue
         rr = RecordResult(
             question=record.get("question", ""),
             bot_tag=record.get("bot_tag", ""),
@@ -393,8 +399,16 @@ async def run_eval(
             ragas_llm, ragas_embeddings = _build_ragas_clients()
         try:
             per_record_scores = _score_dataset([s for _, s in scorable], ragas_llm, ragas_embeddings)
-            for (idx, _sample), scores in zip(scorable, per_record_scores, strict=False):
-                results[idx].scores = {k: v for k, v in scores.items() if isinstance(v, (int, float))}
+            # Defensive: if evaluate() returns fewer rows than samples, never
+            # silently drop a record — mark any unscored ones with an error so
+            # every scorable record ends with either scores or an error.
+            for i, (idx, _sample) in enumerate(scorable):
+                if i < len(per_record_scores):
+                    results[idx].scores = {
+                        k: v for k, v in per_record_scores[i].items() if isinstance(v, (int, float))
+                    }
+                elif not results[idx].error:
+                    results[idx].error = "score_count_mismatch"
         except Exception as exc:  # noqa: BLE001 - scoring failure must not abort
             # Record the scoring failure on every record that was meant to be
             # scored, so the run still produces a report.
