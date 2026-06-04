@@ -1,0 +1,33 @@
+# Packaging for the TocDoc Python client SDK.
+#
+# NOTE: there is intentionally NO `[tool.ruff]` section here. Ruff only treats
+# a pyproject as a config file when it contains `[tool.ruff]`; by omitting it we
+# let ruff walk up to the repo-root `pyproject.toml` so this package is linted
+# and formatted with the exact same rules as the services (py310 target,
+# line-length 110, double quotes, sorted imports).
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tocdoc-sdk"
+version = "0.1.0"
+description = "Typed Python client for the TocDoc QnA HTTP API."
+readme = "README.md"
+requires-python = ">=3.10"
+# Exact pins mirror the versions the services already run on
+# (services/qna/requirements.txt) so the SDK deserializes the live contract
+# against the same pydantic/httpx behavior.
+dependencies = [
+    "httpx==0.28.1",
+    "pydantic==2.11.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tocdoc_sdk*"]
