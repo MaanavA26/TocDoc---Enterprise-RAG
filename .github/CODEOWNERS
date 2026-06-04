@@ -1,0 +1,6 @@
+# Code owners for TocDoc.
+#
+# A matching owner is auto-requested as a reviewer on every pull request, and
+# branch protection requires a code-owner approval before merge. The catch-all
+# rule makes @MaanavA26 the owner of the entire repository.
+* @MaanavA26
