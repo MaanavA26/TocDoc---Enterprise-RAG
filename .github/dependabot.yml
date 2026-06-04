@@ -1,0 +1,142 @@
+# Dependabot keeps TocDoc's dependencies current and surfaces CVE fixes as PRs
+# that CodeRabbit + the architect review — taking the per-bump dependency churn
+# off the implementation loop.
+#
+# Noise control:
+#   - weekly cadence, bounded open-PR counts.
+#   - minor/patch updates are GROUPED into one PR per surface.
+#   - the fragile ecosystems (langchain*, the FastAPI/Starlette stack, azure-*)
+#     are grouped so the whole family moves together — that mirrors how they
+#     must actually be upgraded (e.g. fastapi pins starlette; the langchain
+#     packages are version-locked to each other). Reviewers gate the risky ones
+#     (the deferred LangChain-1.x and pypdf-major cascades will surface here).
+version: 2
+
+updates:
+  # ---------------------------------------------------------------------------
+  # Python — QnA service
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: pip
+    directory: /services/qna
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    labels: ["dependencies", "python", "qna"]
+    reviewers: ["MaanavA26"]
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(deps-dev)"
+    groups:
+      langchain:
+        patterns: ["langchain*", "langsmith"]
+      fastapi-stack:
+        patterns: ["fastapi", "starlette", "uvicorn*", "python-multipart", "pydantic*", "httpx*", "httpcore", "anyio"]
+      azure:
+        patterns: ["azure-*", "msal*"]
+      python-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # ---------------------------------------------------------------------------
+  # Python — ingestion service (requirements.txt + requirements-dev.txt)
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: pip
+    directory: /services/ingestion
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    labels: ["dependencies", "python", "ingestion"]
+    reviewers: ["MaanavA26"]
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(deps-dev)"
+    groups:
+      langchain:
+        patterns: ["langchain*", "langsmith"]
+      fastapi-stack:
+        patterns: ["fastapi", "starlette", "uvicorn*", "python-multipart", "pydantic*", "httpx*", "httpcore", "anyio"]
+      azure:
+        patterns: ["azure-*", "msal*"]
+      python-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # ---------------------------------------------------------------------------
+  # Python — client SDK (clients/python, pyproject.toml)
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: pip
+    directory: /clients/python
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "python", "sdk"]
+    reviewers: ["MaanavA26"]
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(deps-dev)"
+    groups:
+      sdk-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # ---------------------------------------------------------------------------
+  # Python — RAGAS evaluation harness (eval/)
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: pip
+    directory: /eval
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "python", "eval"]
+    reviewers: ["MaanavA26"]
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(deps-dev)"
+    groups:
+      eval-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # ---------------------------------------------------------------------------
+  # GitHub Actions — CI workflow pins
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "ci"]
+    reviewers: ["MaanavA26"]
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  # ---------------------------------------------------------------------------
+  # Docker — service base images
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: docker
+    directory: /services/qna
+    schedule:
+      interval: weekly
+      day: monday
+    labels: ["dependencies", "docker", "qna"]
+    reviewers: ["MaanavA26"]
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: docker
+    directory: /services/ingestion
+    schedule:
+      interval: weekly
+      day: monday
+    labels: ["dependencies", "docker", "ingestion"]
+    reviewers: ["MaanavA26"]
+    commit-message:
+      prefix: "chore(deps)"
