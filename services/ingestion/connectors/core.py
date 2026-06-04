@@ -19,6 +19,7 @@ Tenant isolation is preserved **by construction**, not by policing:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 from collections.abc import Iterator
@@ -283,7 +284,11 @@ async def run_connector(connector: SourceConnector, rag_instance, *, run_id: str
     # the connectors' own inner log events (e.g. connector_graph_throttled in
     # the SharePoint connector) carry it. Backward-compatible: connectors built
     # directly without a run keep their `run_id` class-attribute default (None).
-    connector.run_id = run_id
+    # Best-effort: run_id is an optional correlation field, so a connector using
+    # __slots__ without a `run_id` slot (or a read-only attribute) simply won't
+    # carry it rather than failing the whole run.
+    with contextlib.suppress(AttributeError, TypeError):
+        connector.run_id = run_id
 
     log_event(
         logger,
