@@ -271,6 +271,51 @@ Expected response codes:
 
 Store `ADMIN_TOKEN` in your operator secret manager. **Do not** commit it, share it over chat, or check it into any infrastructure repo — rotate via `az containerapp secret set` if exposed.
 
+### Connector sync control plane
+
+The same admin API also exposes a small control plane for triggering connector
+syncs and checking their status. A sync runs the configured source's
+enumerate→fetch→upload loop as an in-process background task; the source→`bot_tag`
+binding and per-source location come entirely from env vars on the ingestion app
+(`CONNECTOR_BOT_TAG`, `BLOB_CONTAINER`, `SHAREPOINT_SITE_ID`/`SHAREPOINT_DRIVE_ID`),
+never from the request, so a sync can never write into a foreign workspace.
+
+```bash
+# Trigger a sync (source_type is `blob` or `sharepoint`).
+# Returns 202 with a run_id; the sync runs in the background.
+curl -X POST -H "X-Admin-Token: ${ADMIN_TOKEN}" \
+  "https://${INGESTION_FQDN}/upload_pipeline/admin/connectors/blob/sync"
+# → {"run_id":"<hex>","source_type":"blob"}
+
+# Get one run's status by run_id (status: started | completed | failed).
+curl -H "X-Admin-Token: ${ADMIN_TOKEN}" \
+  "https://${INGESTION_FQDN}/upload_pipeline/admin/connectors/runs/<run_id>"
+
+# List recent runs, newest first (optional ?limit=N, 1–200, default 50).
+curl -H "X-Admin-Token: ${ADMIN_TOKEN}" \
+  "https://${INGESTION_FQDN}/upload_pipeline/admin/connectors/runs?limit=20"
+```
+
+Expected response codes for the control plane:
+- `202` — sync accepted and scheduled; the body carries the `run_id` to poll
+- `200` — run status returned (single run or list)
+- `400` — unsupported `source_type`, or the connector is misconfigured (missing required env vars)
+- `401` — missing or wrong `X-Admin-Token`
+- `404` — no run found for that `run_id`
+
+**Run status is in-process and lost on restart.** The run-status store lives in
+the ingestion process's memory — it is **not** durable and is **not** shared
+across replicas. A restart, redeploy, or scale event clears it, and a run_id is
+only visible on the replica that served the trigger. It is also bounded (oldest
+runs are evicted once the cap is reached). Treat it as a best-effort live view of
+recent activity, not an audit log; durable run history is a documented follow-up.
+
+Because of this, a `404` on `…/connectors/runs/<run_id>` means the run is
+**unknown, evicted, or lost on a restart** — it does **not** mean a just-created
+run is still pending. A run_id returned by a `202` is recorded as `started`
+synchronously before the response, so an immediate status poll for that id will
+return `200` (`started`), never `404`, on the replica that issued it.
+
 ## Operations: request correlation and observability
 
 Both services emit a correlation ID on every request. Use this to trace a single

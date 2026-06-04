@@ -14,6 +14,7 @@ import logging
 import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from functools import partial
 from typing import Annotated
 
@@ -24,6 +25,7 @@ import custom_rag
 from azure.core.exceptions import AzureError
 from connectors import ConnectorConfig, ConnectorError, run_connector
 from connectors.blob import BlobConnector
+from connectors.run_status import run_status_store
 from connectors.sharepoint import SharePointConnector
 from errors import ApiErrorCode, default_error_responses, raise_api_error
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Path, Query, Request, status
@@ -32,6 +34,8 @@ from observability import log_event
 
 from .auth import require_admin_token
 from .models import (
+    ConnectorRunListResponse,
+    ConnectorRunStatusResponse,
     ConnectorSyncResponse,
     DeleteDocumentResponse,
     DeleteTenantResponse,
@@ -59,6 +63,9 @@ _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="admin")
 # Validation patterns (per architect bot_tag decision record).
 BOT_TAG_PATTERN = r"^[A-Za-z0-9_-]{1,128}$"
 DOCUMENT_ID_PATTERN = r"^[A-Za-z0-9_.:-]{1,256}$"
+# run_id is a generated uuid4().hex, but accept the same safe charset class as
+# request ids so a malformed path is a clean 422, never a lookup of garbage.
+RUN_ID_PATTERN = r"^[A-Za-z0-9_-]{1,128}$"
 
 # Source types the operator trigger endpoint can launch a sync for.
 _SUPPORTED_SOURCE_TYPES = ("blob", "sharepoint")
@@ -363,10 +370,28 @@ def _run_connector_background(connector, rag_instance, *, run_id: str) -> None:
     detached background task there is no caller to observe that exception, so we
     wrap it and emit a connector_run_failed event — keeping the run's lifecycle
     fully greppable by run_id.
+
+    The run's terminal status (completed/failed) is recorded in the in-process
+    ``run_status_store`` so ``GET /admin/connectors/runs/{run_id}`` can report it.
+    The ``started`` record is written SYNCHRONOUSLY by ``trigger_connector_sync``
+    before this task is scheduled, so a client that polls immediately after the
+    202 can never observe a spurious 404 for a just-created run. We are on a
+    threadpool thread here; the store is thread-safe. ``record_completed`` /
+    ``record_failed`` update the existing record in place (and no-op on an
+    unknown/evicted run_id). Timestamps are timezone-aware UTC, captured at the
+    observe point.
     """
     try:
-        asyncio.run(run_connector(connector, rag_instance, run_id=run_id))
+        result = asyncio.run(run_connector(connector, rag_instance, run_id=run_id))
     except Exception as exc:  # noqa: BLE001 - background task must not propagate
+        # run_connector is fail-fast: an item exception aborts the run with no
+        # return dict, so we record a safe error summary with unknown counts.
+        run_status_store.record_failed(
+            run_id,
+            error_class=type(exc).__name__,
+            safe_message="Connector sync run failed",
+            finished_at=datetime.now(timezone.utc),
+        )
         log_event(
             logger,
             "connector_run_failed",
@@ -376,6 +401,15 @@ def _run_connector_background(connector, rag_instance, *, run_id: str) -> None:
             bot_tag=getattr(connector, "bot_tag", None),
             error_class=type(exc).__name__,
             safe_message="Connector sync run failed",
+        )
+    else:
+        # run_connector returns {"processed", "items"} and is fail-fast, so a
+        # successful return means zero failed items.
+        run_status_store.record_completed(
+            run_id,
+            processed_count=result.get("processed", 0),
+            failed_count=0,
+            finished_at=datetime.now(timezone.utc),
         )
 
 
@@ -399,11 +433,17 @@ async def trigger_connector_sync(
     In-stack (behind require_admin_token) so it inherits the P0-6 ErrorEnvelope
     handlers and X-Request-ID middleware. The connector is built from env config
     (validating bot_tag); construction/validation errors return the P0-6
-    envelope (400 for bad source_type / missing config). On success the
+    envelope (400 for bad source_type / missing config). On success the run is
+    recorded as ``started`` in the in-process store SYNCHRONOUSLY (before the
+    background task is scheduled and before we return), then the
     enumerate→fetch→upload loop is scheduled as a background task and the handler
-    returns 202 with a generated run_id. The trigger event carries BOTH the
-    request's X-Request-ID and the run_id; the background run logs its own
-    start/complete/failed events keyed on run_id.
+    returns 202 with a generated run_id. Recording ``started`` here — rather than
+    inside the background task — closes a race where a client polling
+    ``GET /admin/connectors/runs/{run_id}`` immediately after the 202 could get a
+    404 before the worker thread started: for a run-status API a 404 must mean
+    unknown/evicted/lost-on-restart, never "just created". The trigger event
+    carries BOTH the request's X-Request-ID and the run_id; the background run
+    logs its own start/complete/failed events keyed on run_id.
     """
     if source_type not in _SUPPORTED_SOURCE_TYPES:
         raise_api_error(
@@ -438,6 +478,67 @@ async def trigger_connector_sync(
         bot_tag=connector.bot_tag,
     )
 
+    # Record the run as `started` SYNCHRONOUSLY, before scheduling the background
+    # task and before returning 202, so an immediate GET on the run_id can never
+    # 404 a just-created run. The background task only transitions it to
+    # completed/failed (updating this record in place).
+    run_status_store.record_started(
+        run_id,
+        source_type=source_type,
+        bot_tag=connector.bot_tag,
+        started_at=datetime.now(timezone.utc),
+    )
+
     background_tasks.add_task(_run_connector_background, connector, rag_instance, run_id=run_id)
 
     return ConnectorSyncResponse(run_id=run_id, source_type=source_type)
+
+
+@router.get(
+    "/connectors/runs",
+    response_model=ConnectorRunListResponse,
+    summary="List recent connector sync runs (in-process; newest first)",
+)
+async def list_connector_runs(
+    limit: Annotated[
+        int,
+        Query(ge=1, le=200, description="Max number of recent runs to return"),
+    ] = 50,
+) -> ConnectorRunListResponse:
+    """Return recent connector-run statuses, newest first.
+
+    Admin-wide (bot_tag-agnostic) view backed by the in-process run-status
+    store. State is in-process and LOST on restart (in-process v1 — not a
+    durable distributed store). Reading the store is a cheap, lock-guarded
+    snapshot, so this stays on the event loop (no threadpool offload needed).
+    """
+    records = run_status_store.list_recent(limit=limit)
+    runs = [ConnectorRunStatusResponse.model_validate(r) for r in records]
+    return ConnectorRunListResponse(count=len(runs), runs=runs)
+
+
+@router.get(
+    "/connectors/runs/{run_id}",
+    response_model=ConnectorRunStatusResponse,
+    summary="Get one connector sync run's status (in-process)",
+)
+async def get_connector_run(
+    run_id: Annotated[
+        str,
+        Path(..., pattern=RUN_ID_PATTERN, description="Connector run identifier"),
+    ],
+) -> ConnectorRunStatusResponse:
+    """Return one run's status, or a P0-6 404 envelope if unknown.
+
+    "Unknown" covers both a never-issued run_id and one that has been evicted
+    from the bounded store, or lost on restart (in-process v1 — not a durable
+    distributed store). Reading the store is a cheap, lock-guarded snapshot.
+    """
+    record = run_status_store.get(run_id)
+    if record is None:
+        raise_api_error(
+            code=ApiErrorCode.NOT_FOUND,
+            message="No connector run found for this run_id (unknown, evicted, or lost on restart).",
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+    return ConnectorRunStatusResponse.model_validate(record)
