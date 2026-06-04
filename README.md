@@ -92,7 +92,7 @@ flowchart TD
 ## Features
 
 - **Dual ingestion modes** — `read` (token-chunked for dense text) and `layout` (header-split for structured documents)
-- **Hybrid retrieval** — combines full-text BM25 and HNSW vector KNN search in a single query
+- **Hybrid retrieval** — combines full-text BM25 and HNSW vector KNN search in a single query, with optional Azure AI Search L2 semantic reranking (set `AZURE_SEARCH_SEMANTIC_CONFIG=mySemanticConfig`; requires Standard S1+, falls back to hybrid otherwise)
 - **Conversation-aware rephrasing** — LLM rewrites follow-up queries into self-contained, retrieval-optimized questions using up to 3 turns of history
 - **Grounded, cited responses** — model is strictly constrained to the retrieved knowledge base; filenames are parsed and mapped to source paths
 - **Greeting detection** — conversational turns bypass retrieval and are handled efficiently
@@ -219,6 +219,7 @@ Both services are configured entirely via environment variables. Copy the releva
 | `AzureSearchEndpoint` | Azure Cognitive Search endpoint | |
 | `AzureSearchKey` | Search admin key | |
 | `INDEX_NAME` | Search index to query | |
+| `AZURE_SEARCH_SEMANTIC_CONFIG` | Optional. Semantic configuration name for L2 reranking. Empty (default) = pure hybrid retrieval. Set to `mySemanticConfig` to enable; requires Azure AI Search Standard (S1)+ — falls back to hybrid on unsupported tiers | `mySemanticConfig` |
 | `TocdocSPClientID` | Service principal client ID | |
 | `TocdocSPSecretValue` | Service principal secret | |
 | `TocdocSPTenantID` | Azure AD tenant ID | |

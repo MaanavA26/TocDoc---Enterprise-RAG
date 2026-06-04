@@ -366,6 +366,13 @@ class LocalConfig:
     Attributes:
         AZURE_LLM_MODEL (str): Default LLM deployment/model name.
         TOP_K (int): Default top-k retrieval limit.
+        AZURE_SEARCH_SEMANTIC_CONFIG (str): Name of the Azure AI Search
+            semantic configuration to apply for L2 semantic reranking.
+            Empty string (default) disables semantic ranking — retrieval
+            runs as a pure hybrid query, unchanged. Set to the index's
+            semantic configuration name (e.g. ``mySemanticConfig``) to
+            enable. Requires Azure AI Search Standard (S1) tier or higher;
+            on unsupported tiers the search layer falls back to hybrid.
         INDEX_NAME (str): Default Azure Cognitive Search index name.
         EMBEDDING_DIMENSIONS (int): Vector size for embeddings.
         AZURE_OPENAI_EMBEDDING_MODEL (str): Embedding model deployment/name.
@@ -376,6 +383,9 @@ class LocalConfig:
         # existing fallback values when that happens.
         self.AZURE_LLM_MODEL = _get_env("AZURE_OPENAI_LLM_MODEL") or "gpt-4o-mini"
         self.TOP_K = 20
+        # Empty string = semantic reranking disabled (default, no behavior
+        # change). Canonical UPPER_SNAKE name; no legacy alias (new in P2-1).
+        self.AZURE_SEARCH_SEMANTIC_CONFIG: str = _get_env("AZURE_SEARCH_SEMANTIC_CONFIG") or ""
         self.INDEX_NAME: str = os.getenv("INDEX_NAME", "vector-demo-custom-03")
         self.EMBEDDING_DIMENSIONS: int = os.getenv("EMBEDDING_DIMENSIONS", 1536)
         self.AZURE_OPENAI_EMBEDDING_MODEL = os.getenv(

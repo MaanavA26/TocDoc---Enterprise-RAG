@@ -5,7 +5,8 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import Any
 
-from azure.search.documents.models import VectorizedQuery
+from azure.core.exceptions import HttpResponseError
+from azure.search.documents.models import QueryType, VectorizedQuery
 
 from src.config.config import LocalConfig
 from src.core.logger import logger
@@ -88,8 +89,17 @@ def _search_sync(
         bot_tag (str): Bot/tenant identifier used in filter expression.
         top (int): Maximum number of results to return.
 
+    When ``AZURE_SEARCH_SEMANTIC_CONFIG`` is set, an L2 semantic rerank is
+    layered on the hybrid query. If the configured Search tier does not
+    support semantic ranking (Azure raises ``HttpResponseError``), the call
+    falls back to a plain hybrid query so a misconfigured tier never breaks
+    retrieval. When the config is empty, behavior is identical to a pure
+    hybrid query (no semantic params are sent).
+
     Returns:
-        List[Dict[str, Any]]: Search results materialized into a list.
+        List[Dict[str, Any]]: Search results materialized into a list. When
+        semantic ranking ran, each result includes its
+        ``@search.reranker_score`` when Azure returns one.
     """
     vector_query = VectorizedQuery(
         vector=vector,
@@ -102,10 +112,10 @@ def _search_sync(
     filter_expr = f"fr_tag eq '{safe_fr_mode}' and bot_tag eq '{safe_bot_tag}'"
     logger.debug(f"Filter expression: {filter_expr}")
 
-    results = azure.search_client.search(
-        search_text=query,
-        vector_queries=[vector_query],
-        select=[
+    base_kwargs: dict[str, Any] = {
+        "search_text": query,
+        "vector_queries": [vector_query],
+        "select": [
             "id",
             "content",
             "section_header",
@@ -114,8 +124,43 @@ def _search_sync(
             "document_id",
             "source_path",
         ],
-        filter=filter_expr,
-        top=top,
-    )
+        "filter": filter_expr,
+        "top": top,
+    }
 
-    return list(results)
+    semantic_config = localconfig.AZURE_SEARCH_SEMANTIC_CONFIG
+    if semantic_config:
+        # NOTE: Azure Search is lazy — the HTTP request fires on iteration,
+        # so an unsupported-tier HttpResponseError surfaces at list(), not at
+        # .search(). Materialize inside the try so the fallback actually
+        # triggers against real Azure.
+        try:
+            results = azure.search_client.search(
+                **base_kwargs,
+                query_type=QueryType.SEMANTIC,
+                semantic_configuration_name=semantic_config,
+            )
+            return _materialize(results)
+        except HttpResponseError as exc:
+            logger.warning(
+                "Semantic ranking unavailable for configuration %r (likely an "
+                "unsupported Search tier — Standard S1+ is required); falling "
+                "back to hybrid retrieval. Detail: %s",
+                semantic_config,
+                exc.message if hasattr(exc, "message") else str(exc),
+            )
+
+    results = azure.search_client.search(**base_kwargs)
+    return _materialize(results)
+
+
+def _materialize(results: Any) -> list[dict[str, Any]]:
+    """Force the lazy Azure Search pager into a list of result dicts.
+
+    Iterating the pager is what issues the HTTP request, so callers must do
+    this inside the semantic-fallback try block. Azure SDK result rows are
+    dict-like and already carry ``@search.reranker_score`` as a key when
+    semantic ranking ran, so it flows through to downstream observability
+    without special handling. Never logs chunk content.
+    """
+    return [dict(item) for item in results]
