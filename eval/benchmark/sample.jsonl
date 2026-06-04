@@ -1,0 +1,4 @@
+{"question": "What is the maximum file size supported for document upload?", "ground_truth": "The platform supports document uploads up to 50 MB per file.", "bot_tag": "client_a", "fr_tag": "read"}
+{"question": "How long are uploaded documents retained before automatic deletion?", "ground_truth": "Uploaded documents are retained for 90 days, after which they are automatically deleted.", "bot_tag": "client_a", "fr_tag": "read"}
+{"question": "Which document formats can be ingested by the system?", "ground_truth": "The system can ingest PDF, DOCX, and plain text documents.", "bot_tag": "demo_workspace", "fr_tag": "layout"}
+{"question": "Who is allowed to invite new members to a workspace?", "ground_truth": "Only workspace administrators can invite new members to a workspace.", "bot_tag": "demo_workspace", "fr_tag": "read"}
