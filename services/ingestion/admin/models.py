@@ -85,3 +85,16 @@ class ReindexResponse(BaseModel):
 
     status: str = "not_implemented"
     reason: str = "Reindex requires source persistence or connector metadata. Use delete + ingest for now."
+
+
+class ConnectorSyncResponse(BaseModel):
+    """Response shape for POST /admin/connectors/{source_type}/sync.
+
+    Returned with HTTP 202 Accepted — the sync runs as an in-process background
+    task, so the request does NOT block on the full enumerate→fetch→upload loop.
+    `run_id` correlates the background run's structured log events.
+    """
+
+    run_id: str
+    source_type: str
+    status: str = "started"
