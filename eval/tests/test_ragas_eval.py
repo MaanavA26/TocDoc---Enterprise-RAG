@@ -233,9 +233,10 @@ def test_single_failing_record_is_recorded_and_run_continues(tmp_path):
     assert payload["scored_count"] == 1
 
     recs = payload["records"]
-    # First record recorded an error and was not scored.
-    assert recs[0]["error"] is not None
-    assert "boom" in recs[0]["error"]
+    # First record recorded an error and was not scored. The stored error is
+    # the exception CLASS name only — never the raw str(exc) ("boom").
+    assert recs[0]["error"] == "RuntimeError"
+    assert "boom" not in recs[0]["error"]
     assert recs[0]["scores"] == {}
     # Second record scored fine.
     assert recs[1]["error"] is None
@@ -245,6 +246,97 @@ def test_single_failing_record_is_recorded_and_run_continues(tmp_path):
     dataset = fake_eval.call_args.kwargs["dataset"]
     assert len(dataset.samples) == 1
     assert dataset.samples[0].response == "A2"
+
+
+def test_raw_exception_text_never_leaks_into_artifacts(tmp_path):
+    """A failing record must store the class name only, never str(exc).
+
+    Raw exception text can carry search queries, document snippets, endpoints
+    or deployment identifiers. We force an assembly failure whose str(exc)
+    contains a sentinel and assert the sentinel is absent from the returned
+    payload, the JSON report and the markdown report, while the exception class
+    name is present in all three.
+    """
+    sentinel = "SECRET-QUERY-DETAIL"
+    records = _records()
+    bench = _benchmark_file(tmp_path, records)
+    out = tmp_path / "out"
+
+    # Both records' pipeline calls raise with the sentinel in the message, so
+    # nothing reaches scoring and every record carries an assembly error.
+    gen = AsyncMock(side_effect=RuntimeError(sentinel))
+    emb = AsyncMock(return_value=[0.1])
+    search = AsyncMock(return_value=_fake_search_results("ctx"))
+    fake_eval = _patch_evaluate(_fake_scores())
+
+    with (
+        patch.object(ragas_eval, "generate_answer", gen),
+        patch.object(ragas_eval, "get_embedding", emb),
+        patch.object(ragas_eval, "perform_search", search),
+        patch.object(ragas_eval, "evaluate", fake_eval),
+    ):
+        payload = _run(
+            ragas_eval.run_eval(
+                bench,
+                out,
+                azure=MagicMock(),
+                ragas_llm=MagicMock(),
+                ragas_embeddings=MagicMock(),
+            )
+        )
+
+    # Every record errored; none was scored, so evaluate was never called.
+    assert payload["error_count"] == 2
+    assert payload["scored_count"] == 0
+    for rec in payload["records"]:
+        assert rec["error"] == "RuntimeError"
+
+    json_text = (out / "ragas_report.json").read_text(encoding="utf-8")
+    md_text = (out / "ragas_report.md").read_text(encoding="utf-8")
+    payload_text = json.dumps(payload)
+
+    # Sentinel (the raw str(exc)) absent everywhere; class name present.
+    for surface in (payload_text, json_text, md_text):
+        assert sentinel not in surface
+        assert "RuntimeError" in surface
+
+
+def test_scoring_failure_error_is_class_only(tmp_path):
+    """A scoring-stage failure must also store the class name only."""
+    sentinel = "SECRET-SCORING-DETAIL"
+    records = _records()
+    bench = _benchmark_file(tmp_path, records)
+    out = tmp_path / "out"
+
+    gen = AsyncMock(side_effect=[{"answer": "A1"}, {"answer": "A2"}])
+    emb = AsyncMock(return_value=[0.1])
+    search = AsyncMock(side_effect=[_fake_search_results("c1"), _fake_search_results("c2")])
+    fake_eval = MagicMock(side_effect=ValueError(sentinel))
+
+    with (
+        patch.object(ragas_eval, "generate_answer", gen),
+        patch.object(ragas_eval, "get_embedding", emb),
+        patch.object(ragas_eval, "perform_search", search),
+        patch.object(ragas_eval, "evaluate", fake_eval),
+    ):
+        payload = _run(
+            ragas_eval.run_eval(
+                bench,
+                out,
+                azure=MagicMock(),
+                ragas_llm=MagicMock(),
+                ragas_embeddings=MagicMock(),
+            )
+        )
+
+    for rec in payload["records"]:
+        assert rec["error"] == "scoring_failed: ValueError"
+
+    json_text = (out / "ragas_report.json").read_text(encoding="utf-8")
+    md_text = (out / "ragas_report.md").read_text(encoding="utf-8")
+    for surface in (json.dumps(payload), json_text, md_text):
+        assert sentinel not in surface
+        assert "scoring_failed: ValueError" in surface
 
 
 def test_metric_names_and_sample_type():

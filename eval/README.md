@@ -37,6 +37,14 @@ contexts scored are therefore the contexts the answer was grounded on.
 The answer itself comes from the real pipeline
 (`src.pipeline.qna_pipeline.generate_answer`).
 
+> **Assumption (retrieval approximation, v1).** Because `/qna` returns
+> citations only, the scored contexts are obtained by **re-running retrieval**
+> rather than capturing the exact chunks used during answer generation. If the
+> retrieval configuration, semantic rerank, or fallback behavior differs
+> between answer generation and this direct retrieval call, the scored contexts
+> may not be byte-identical to those the answer was actually grounded on. This
+> is accepted for v1 and documented here as a known approximation.
+
 ## Sample / dataset types (RAGAS 0.4.3)
 
 * Sample:  `ragas.SingleTurnSample` — fields `user_input`, `response`,
@@ -84,6 +92,14 @@ recorded** on that record; the run continues and still produces a report.
   the `fr_<mode>` tag for `perform_search` itself.
 * The shipped benchmark is **neutral only** — no real client/company/document
   names.
+
+> **The shipped `eval/benchmark/sample.jsonl` is illustrative only.** Its
+> records are synthetic placeholders that make **no claims** about file-size
+> limits, supported formats, retention, permissions, or any other product
+> behavior — they exist purely to exercise the harness. They are **not
+> documentation** and the scores they would produce are meaningless. Replace
+> them with real client/workspace-specific eval records (questions paired with
+> verified ground-truth answers) before any meaningful scoring.
 
 ## Tests
 

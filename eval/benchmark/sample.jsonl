@@ -1,4 +1,4 @@
-{"question": "What is the maximum file size supported for document upload?", "ground_truth": "The platform supports document uploads up to 50 MB per file.", "bot_tag": "client_a", "fr_tag": "read"}
-{"question": "How long are uploaded documents retained before automatic deletion?", "ground_truth": "Uploaded documents are retained for 90 days, after which they are automatically deleted.", "bot_tag": "client_a", "fr_tag": "read"}
-{"question": "Which document formats can be ingested by the system?", "ground_truth": "The system can ingest PDF, DOCX, and plain text documents.", "bot_tag": "demo_workspace", "fr_tag": "layout"}
-{"question": "Who is allowed to invite new members to a workspace?", "ground_truth": "Only workspace administrators can invite new members to a workspace.", "bot_tag": "demo_workspace", "fr_tag": "read"}
+{"question": "What is the title of the sample document?", "ground_truth": "This is an illustrative placeholder answer and does not describe any product behavior.", "bot_tag": "client_a", "fr_tag": "read"}
+{"question": "Summarize the first section of the example document.", "ground_truth": "This is a synthetic placeholder summary used only to exercise the eval harness.", "bot_tag": "client_a", "fr_tag": "read"}
+{"question": "Which topic does the example document discuss?", "ground_truth": "A neutral, made-up topic used purely for demonstration; replace with real records before scoring.", "bot_tag": "demo_workspace", "fr_tag": "layout"}
+{"question": "What does the closing paragraph of the sample document say?", "ground_truth": "An illustrative placeholder closing statement with no real-world meaning.", "bot_tag": "demo_workspace", "fr_tag": "read"}

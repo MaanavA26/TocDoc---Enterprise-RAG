@@ -380,7 +380,11 @@ async def run_eval(
             rr.contexts = contexts
             scorable.append((len(results), sample))
         except Exception as exc:  # noqa: BLE001 - per-record isolation by design
-            rr.error = f"{type(exc).__name__}: {exc}"
+            # Store only the exception CLASS name. Raw str(exc) can leak search
+            # queries, document snippets, endpoints or deployment identifiers
+            # into the JSON/markdown report artifacts, so it must never be
+            # persisted or reported.
+            rr.error = type(exc).__name__
         results.append(rr)
 
     # Score all successfully-assembled samples in one evaluate() call.
@@ -396,7 +400,8 @@ async def run_eval(
             # scored, so the run still produces a report.
             for idx, _sample in scorable:
                 if not results[idx].error:
-                    results[idx].error = f"scoring_failed: {type(exc).__name__}: {exc}"
+                    # Class name only — never the raw str(exc) (see above).
+                    results[idx].error = f"scoring_failed: {type(exc).__name__}"
 
     aggregate = _aggregate(results)
     json_path, md_path = _write_reports(results, aggregate, out_dir)
