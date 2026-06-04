@@ -106,6 +106,38 @@ def test_get_unknown_run_returns_404_envelope(client):
 
 
 # ---------------------------------------------------------------------------
+# No just-created 404 race: the run is recorded `started` SYNCHRONOUSLY by the
+# POST handler, before the background task runs. We neutralize the background
+# task entirely so the ONLY thing that can record the run is the synchronous
+# handler call — on the old code (record_started lived in the background task)
+# this GET would 404; on the fixed code it is 200 + "started".
+# ---------------------------------------------------------------------------
+
+
+def test_just_created_run_not_404_before_background_runs(client, monkeypatch):
+    _set_blob_env(monkeypatch)
+
+    # No-op the background driver so nothing but the synchronous handler can
+    # record this run. Bare-name lookup in the handler resolves from module
+    # globals at call time, so this patch takes effect.
+    monkeypatch.setattr(routes_module, "_run_connector_background", lambda *a, **k: None)
+
+    resp = client.post("/admin/connectors/blob/sync", headers=VALID_HEADERS)
+    assert resp.status_code == 202
+    run_id = resp.json()["run_id"]
+
+    status_resp = client.get(f"/admin/connectors/runs/{run_id}", headers=VALID_HEADERS)
+    # Recorded synchronously before the 202 — never a just-created 404.
+    assert status_resp.status_code == 200
+    body = status_resp.json()
+    assert body["run_id"] == run_id
+    assert body["status"] == "started"
+    assert body["source_type"] == "blob"
+    assert body["bot_tag"] == "tenant-x"
+    assert body["finished_at"] is None
+
+
+# ---------------------------------------------------------------------------
 # After a mocked sync run, status reflects completed + counts
 # ---------------------------------------------------------------------------
 
