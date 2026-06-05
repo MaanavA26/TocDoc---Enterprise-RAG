@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=https://www.coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit review configuration for TocDoc.
+#
+# CodeRabbit posts an automated review on every PR into the default branch as a
+# second-opinion assistant. It does NOT gate merges: request_changes_workflow is
+# off, so a CodeRabbit "change request" never blocks. The human code-owner review
+# enforced by branch protection remains the only merge gate.
+reviews:
+  profile: chill
+  poem: false
+  request_changes_workflow: false
+  auto_review:
+    enabled: true
+    base_branches:
+      - main

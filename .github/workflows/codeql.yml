@@ -1,0 +1,48 @@
+# CodeQL security scanning.
+#
+# Static analysis (GitHub's semantic code-analysis engine) over the repo's
+# languages. Findings surface in the Security tab and as PR annotations.
+# Runs on pushes/PRs to main and on a weekly schedule so newly disclosed
+# query-pack rules are applied to unchanged code.
+#
+# TocDoc is a Python project (linguist: Python/Shell/Bicep/Dockerfile, no
+# JS/TS), so the matrix analyzes python only.
+name: codeql
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, Mondays 07:00 UTC.
+    - cron: "0 7 * * 1"
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ["python"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
