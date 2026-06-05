@@ -16,11 +16,19 @@
   no live Azure) or any real-world fact (the BSL legal entity) is **held, not fabricated.**
 - `--admin` merges are used per the owner's standing authorization, but only on green CI.
 
+## ⚠️ TOP PRIORITY — sellability blocker found (license audit)
+
+**PyMuPDF (`fitz`) is AGPL-3.0** and is actively used for PDF parsing (`services/ingestion/custom_rag.py` `import fitz`, also pinned in `eval/`). **AGPL is incompatible with selling a proprietary, self-hosted product under BSL 1.1** — this blocks the stated commercial goal. Not fixed autonomously (it's a business + quality decision needing live validation). Your options:
+1. **Buy the Artifex commercial PyMuPDF license** (keeps fitz's high-quality extraction), or
+2. **Swap to a permissive lib** — BSD-3 `pypdf` is *already pinned but unused* in ingestion; or `pdfplumber`/`pdfminer.six` (MIT). A swap changes extraction quality, so validate PDF output before committing.
+Full analysis: `docs/LICENSE_COMPLIANCE.md` (#180). Everything else is permissive (MIT/Apache/BSD); 3 MPL deps (`certifi`/`tqdm`/`orjson`) just need a NOTICE file. No LGPL/GPL/unknown.
+
 ## Held for the owner (NOT done autonomously — by design)
 
 | Item | Why held | What you do |
 |---|---|---|
-| **P3 enable** (flip `QNA_AGENT_ENABLED` default-ON) | Agentic paths never ran against live Azure; flipping prod while you sleep is the #1 bad-surprise risk | After a live smoke, set the env flag; cutover steps will be staged in a doc |
+| **PyMuPDF AGPL** (see TOP PRIORITY above) | Copyleft incompatible with selling under BSL 1.1; swap needs PDF-quality validation, or buy the commercial license — a business call | Buy Artifex license, or swap to `pypdf`/`pdfplumber` + validate extraction |
+| **P3 enable** (flip `QNA_AGENT_ENABLED` default-ON) | Agentic paths never ran against live Azure; flipping prod while you sleep is the #1 bad-surprise risk | After a live smoke, set the env flag; cutover steps in `docs/deployment/P3_ENABLEMENT.md` |
 | **#90 THREAT_MODEL merge** | Publicly enumerates live residual risks (attacker checklist); the merged `SECURITY.md` controls doc is the safe public version | Decide: keep internal / trim / merge |
 | **#142 Dockerfile hardening** | No `docker` in this env — cannot build; won't merge unbuilt runtime images | `docker build` both services, then merge |
 | **#140 web admin SPA** | No `npm` in this env (registry blocked) — cannot build/test | `npm install && build && test` in `web/`, then merge |
