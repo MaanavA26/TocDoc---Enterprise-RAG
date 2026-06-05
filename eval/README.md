@@ -126,6 +126,60 @@ gate on quality. With no `--min-*` flags the run always exits `0`, and the
 default report shape is unchanged. Thresholds and `--baseline` are independent
 and may be combined.
 
+## Continuous eval: regression gate + trend report (`python -m eval.continuous`)
+
+`eval.continuous` is the CI-facing wrapper that turns a single run into a
+**regression gate** and accumulates **trends over time**. In one invocation it:
+
+1. runs the RAGAS harness over the benchmark (`run_eval`);
+2. **archives** the run into a history dir as `run-<ISO8601>.json` (timestamp
+   stamped both in the filename and in the payload);
+3. renders an **HTML + markdown trend report** over the whole history; and
+4. **exits non-zero** if any metric regressed beyond `--tolerance`, or if an
+   optional `--min-<metric>` floor is breached.
+
+```bash
+python -m eval.continuous \
+    --benchmark eval/benchmark/sample.jsonl \
+    --history eval/history --out eval/out \
+    --tolerance 0.02 \
+    --min-faithfulness 0.70
+```
+
+The baseline defaults to **the most recent archived run before this one**, so
+the gate answers "did this run regress versus the last run" with no manual
+baseline wiring (pass `--baseline path/to/ragas_report.json` to override). The
+first ever run has no prior history and so cannot regress — it can only fail on
+an explicit `--min-<metric>` floor.
+
+> **Exit-code contract differs from `ragas_eval`.** `ragas_eval.main` keeps
+> baseline comparison **informational** (exit 0) and gates only on `--min-*`
+> floors. `eval.continuous` is the opposite: a **regression is a failure**. That
+> inversion is the point of the continuous gate. A threshold breach also fails
+> the gate, so the run exits non-zero if **either** a regression or a floor
+> breach occurs.
+
+### Trend report (`python -m eval.trend_report`)
+
+The trend generator can also be run on its own against a history dir:
+
+```bash
+python -m eval.trend_report --history eval/history --out eval/out \
+    --min-faithfulness 0.70
+```
+
+It writes `eval/out/trend_report.html` and `eval/out/trend_report.md`:
+
+* **HTML** — one inline `<svg>` line chart per metric (y-axis pinned to the
+  RAGAS `[0, 1]` range), a values table, and a "latest run vs thresholds" block.
+* **Markdown** — the per-metric trend table and the latest-vs-thresholds table.
+
+It is **pure standard library** (no matplotlib/plotly/pandas), so it adds
+**nothing** to `eval/requirements.txt`. Runs are ordered oldest→newest by the
+embedded `timestamp` (filename, then mtime, as fallbacks); files that are not
+valid JSON or carry no usable `aggregate` are skipped rather than aborting the
+report.
+
 ## Benchmark format
 
 `eval/benchmark/sample.jsonl` — one JSON object per line:
@@ -161,6 +215,9 @@ pytest eval -q
 
 ## CI note
 
-The CI test/lint matrix currently covers only `services/qna` and
-`services/ingestion` (see `.github/workflows/ci.yml`) — it does **not** run
-`eval/`. Adding an `eval` leg to the matrix is a follow-up.
+CI runs `eval/` as its own leg (see the `test (eval)` job in
+`.github/workflows/ci.yml`): it installs this standalone requirements set and
+runs `pytest eval -q`, kept off the fast `{qna, ingestion}` critical path so the
+heavier ragas/datasets install never blocks them. `eval/` is also linted and
+format-checked by the `lint (ruff)` job. The eval tests are a **real gate** (no
+`continue-on-error`): a failing eval test fails the run.
