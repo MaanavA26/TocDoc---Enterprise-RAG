@@ -210,6 +210,19 @@ The control plane uses a separate guard: admin and connector-sync endpoints sit
 behind `require_admin_token` (an `X-Admin-Token` constant-time compare),
 distinct from the QnA AAD JWT path.
 
+A 2026 security audit drove a remediation pass (all 36 findings fixed on `main`):
+
+- **Within-tenant workspace isolation is fail-closed by default** —
+  `QNA_ENFORCE_TENANT_BINDING` defaults ON, binding the request `bot_tag` to the
+  caller's token tenant (`tid`) via a configured allow-list
+  (`src/core/tenant_binding.py`).
+- **`/upload` now requires `X-Admin-Token`**, its `bot_tag` is pattern-validated
+  and OData-escaped at the sink, and filesystem inputs are realpath-contained.
+- **Application-level rate limiting** (429 + `Retry-After`) on `/qna` and
+  `/upload`; outbound Azure/LLM calls carry timeouts.
+- **JWKS negative-caching** guards against unknown-`kid` refetch DoS, and logs
+  carry metadata only (no queries, answers, history, tokens, or document text).
+
 ---
 
 ## Operability
@@ -245,7 +258,7 @@ runs on every PR and push to `main`:
 |---|---|---|
 | Lint + format | `ruff` | qna, ingestion, SDK, eval |
 | Security (AST) | `bandit` | qna, ingestion (test dirs excluded) |
-| Dependency CVEs | `pip-audit` | per service — **report-only this round** |
+| Dependency CVEs | `pip-audit` | per service — **hard gate** (documented allowlist) |
 | IaC | `az bicep build` | `infra/main.bicep` compiles to ARM |
 | Shell | `shellcheck` | `scripts/*.sh` |
 | Tests + coverage | `pytest` + `pytest-cov` | matrix over {qna, ingestion} |
@@ -265,10 +278,12 @@ Supporting practices:
   benchmark is synthetic and neutral — meant to exercise the harness, not to
   document product behavior.
 
-> Honest notes carried from the gate itself: `pip-audit` is **report-only**
-> (a backlog of pinned-dep CVEs awaits coordinated major-version bumps), and the
-> coverage number is computed but **not yet threshold-gated**. Both are tracked
-> follow-ups, not silent omissions.
+> Update: both earlier follow-ups are closed — `pip-audit` is now a **hard gate**
+> (with a small documented allowlist) and coverage is **floor-gated**
+> (`--cov-fail-under=60`). CI also runs **CodeQL** (`analyze (python)`),
+> **`helm lint`**, and a **`test (teams-bot)`** job. The runtime is **Python
+> 3.12** and both services run **langchain 1.x** — the previously deferred
+> dependency cascade is resolved.
 
 ---
 
@@ -290,12 +305,15 @@ under `docs/architect_phase_2/`.
   Decisions are recorded in `docs/agent_plan/07_P2_P4_REFRESHED_PLAN.md` and
   `docs/agent_plan/03_P2_DIFFERENTIATION.md` — there is no standalone ADR file.
 
-### P3 — Agentic layer (designed, not yet built)
+### P3 — Agentic layer (built, dark)
 
 ADR: [`docs/architect_phase_2/07_P3_LANGGRAPH_ADR.md`](architect_phase_2/07_P3_LANGGRAPH_ADR.md).
 A LangGraph `StateGraph` wraps the existing pipeline behind a **default-OFF
-feature flag** (`QNA_AGENT_ENABLED`), preserving the byte-for-byte `/qna`
-contract until enabled. The decided shape:
+feature flag** (`QNA_AGENT_ENABLED`, with per-node `QNA_AGENT_MAP_REDUCE` /
+`QNA_AGENT_REACT` / `QNA_AGENT_VERIFY`), preserving the byte-for-byte `/qna`
+contract until enabled. The scaffold, structured-output router, map-reduce
+summarizer, ReAct multi-hop node, and self-critique verifier are all **merged to
+`main` and inert**, pending architect sign-off to enable. The shape:
 
 - A **classifier node with conditional edges** routes each query to one of
   three strategies — standard, map-reduce summarizer, or a ReAct multi-hop
@@ -314,15 +332,17 @@ contract until enabled. The decided shape:
 
 | Item | State | Reference |
 |---|---|---|
-| **Python client SDK (P4-4)** | Implemented and CI-tested in-repo; not yet published | `clients/python` (PR #31) |
-| **RAGAS evaluation (P4-2)** | Implemented and CI-tested in-repo | `eval/` (PR #33) |
-| **Microsoft Teams bot (P4-1)** | Designed, not built | `docs/agent_plan/07_P2_P4_REFRESHED_PLAN.md` |
-| **Helm chart for AKS (P4-3)** | Planned, demand-driven | `docs/agent_plan/07_P2_P4_REFRESHED_PLAN.md` |
+| **Python client SDK (P4-4)** | **Shipped** — sync + async, `tocdoc` CLI, optional LangChain retriever, SSE streaming | `clients/python` |
+| **RAGAS evaluation (P4-2)** | **Shipped** — + baseline/threshold gating + continuous-eval trend reports | `eval/` |
+| **Microsoft Teams bot (P4-1)** | **Shipped** — Bot Framework adapter, unspoofable server-side `bot_tag`, inbound JWT auth | `services/teams-bot/` (ADR 10) |
+| **Helm chart for AKS (P4-3)** | **Shipped** — + NetworkPolicy / ServiceMonitor / HA toggles | `charts/tocdoc/` |
+| **Terraform module** | **Shipped** — azurerm mirror of the Bicep | `infra/terraform/` |
+| **SSE answer streaming** | **Shipped** — `POST /qna/stream` + SDK `stream_ask` | `services/qna`, `clients/python` |
+| **Multi-format ingestion** | **Shipped** — DOCX/PPTX/HTML/MD/TXT + PDF | `services/ingestion/` |
 
-The Teams bot is planned as a thin adapter service over the existing QnA HTTP
-API (Bot Framework / Azure Bot Service), mapping Teams identity to a `bot_tag`
-and rendering citations as adaptive-card links. There is no dedicated Teams ADR
-file yet; the decision is captured in the refreshed P2–P4 plan.
+The Teams bot is a thin adapter over the QnA HTTP API: Teams identity → `bot_tag`
+derived **server-side** from the verified tenant id (never from message text),
+inbound Bot Framework JWT validated, citations rendered as adaptive cards.
 
 ### Connectors — decided & shipped (P1-3)
 
@@ -359,12 +379,17 @@ but not yet designed in detail.
 | Bicep IaC + GitHub Actions CI gate | **Shipped** | `infra/`, `ci.yml` (P1-4, P1-5) |
 | Semantic reranking (config-gated) | **Shipped** | `search_service.py` (P2-1) |
 | Typed `CitationMap` success contract | **Shipped** | `core/responses.py` (P2-1) |
-| Python client SDK | **Shipped in-repo** (unpublished) | `clients/python` (P4-4) |
-| RAGAS evaluation harness | **Shipped in-repo** | `eval/` (P4-2) |
+| Python client SDK (+CLI, LangChain, streaming) | **Shipped** | `clients/python` (P4-4) |
+| RAGAS + continuous-eval harness | **Shipped** | `eval/` (P4-2) |
+| Microsoft Teams bot | **Shipped** | `services/teams-bot/` (P4-1) |
+| Helm chart (AKS) + Terraform module | **Shipped** | `charts/tocdoc/`, `infra/terraform/` |
+| SSE answer streaming (`/qna/stream`) | **Shipped** | `services/qna`, `clients/python` |
+| Multi-format ingestion (DOCX/PPTX/HTML/MD/TXT) | **Shipped** | `services/ingestion/` |
+| Runtime: Python 3.12 + langchain 1.x | **Shipped** | both services |
+| Security-audit remediation (36 findings) | **Shipped** | hardening PRs on `main` |
+| Fail-closed tenant binding + `/upload` auth + rate limiting | **Shipped** | `tenant_binding.py`, `app.py` |
+| Agentic LangGraph layer (router/map-reduce/ReAct/verifier) | **Built, dark** | `src/agents/` (P3) |
 | Page-level citations | **Designed / pending reindex** | P2 differentiation + refreshed plan |
-| Agentic LangGraph layer | **Designed (ADR)** | `07_P3_LANGGRAPH_ADR.md` |
-| Microsoft Teams bot | **Planned** | refreshed P2–P4 plan |
-| Helm chart (AKS) | **Planned** | refreshed P2–P4 plan |
 
 For the authoritative, continuously-updated status, see
 [`docs/agent_plan/00_MASTER_TRACKER.md`](agent_plan/00_MASTER_TRACKER.md).
