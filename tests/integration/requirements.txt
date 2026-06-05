@@ -1,0 +1,32 @@
+# Test-only dependencies for the hermetic end-to-end integration suite.
+#
+# This suite imports the REAL FastAPI apps from BOTH services and drives them via
+# TestClient, so it needs each service's own runtime deps installed too. In CI,
+# install the service requirements FIRST, then this file:
+#
+#     pip install -r services/qna/requirements.txt
+#     pip install -r services/ingestion/requirements.txt
+#     pip install -r tests/integration/requirements.txt
+#     pytest tests/integration -q
+#
+# The two service manifests already pin fastapi / starlette / httpx / pydantic /
+# the Azure SDKs / langchain / pymupdf / tiktoken / python-jose, so those are NOT
+# duplicated here — pinning them in two places risks drift. This file holds only
+# the test harness deps the services do not ship (they note pytest is installed
+# by CI separately).
+#
+# NOTE on the local dev proxy: aiohttp==3.14.0 and msal (pinned in the service
+# manifests) are not currently resolvable from the dev pip proxy. They are NOT
+# needed by this suite — every Azure boundary is mocked at the service-entry
+# seam, so no aiohttp/msal code path runs. CI (which has the full index) installs
+# the service manifests verbatim; locally, install the service deps and simply
+# skip those two unresolvable pins.
+
+pytest>=8,<10
+pytest-asyncio>=0.23
+
+# TestClient needs httpx; multipart is required for the /upload file-upload test.
+# (Both are also pulled in by the service manifests; listed here so the suite is
+# runnable from this file alone once the services are importable.)
+httpx>=0.27,<0.29
+python-multipart>=0.0.9
