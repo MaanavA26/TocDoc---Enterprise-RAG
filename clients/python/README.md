@@ -12,15 +12,27 @@ and `pydantic`. It provides:
 - **`AdminClient`** — admin API client (ingestion service, `X-Admin-Token`
   auth): read-only document/index reads plus the connector sync control-plane.
 
+Two **optional** capabilities (see below) layer on top without changing the core
+dependency footprint:
+
+- **Streaming** — `stream_ask` consumes a Server-Sent-Events response and yields
+  answer tokens. No extra dependency.
+- **LangChain integration** — `TocDocRetriever` / `AsyncTocDocRetriever` behind
+  the optional `tocdoc-sdk[langchain]` extra.
+
 ## Install
 
 ```bash
 pip install tocdoc-sdk
 # or, from a checkout:
 pip install -e clients/python
+
+# with the optional LangChain integration:
+pip install "tocdoc-sdk[langchain]"
 ```
 
-Requires Python 3.10+.
+Requires Python 3.10+. The core install pulls in only `httpx` and `pydantic`;
+`langchain-core` (1.x) is installed only by the `[langchain]` extra.
 
 ## Quickstart
 
@@ -133,6 +145,84 @@ async def main():
 
 asyncio.run(main())
 ```
+
+## Streaming (optional)
+
+`stream_ask` is a streaming counterpart to `ask`: it sends the same request to a
+(future) `POST /qna/stream` endpoint and yields each answer token/chunk as it
+arrives over a Server-Sent-Events (SSE) stream. It adds **no** dependency — the
+SSE parser is part of the core SDK.
+
+```python
+from tocdoc_sdk import TocDocClient
+
+with TocDocClient("https://your-tocdoc-host", token="YOUR_BEARER_TOKEN") as client:
+    for token in client.stream_ask(
+        session_id="session-123",
+        bot_tag="acme",
+        fr_tag="read",
+        query="What is the refund policy?",
+    ):
+        print(token, end="", flush=True)
+```
+
+`AsyncTocDocClient.stream_ask` is the async mirror (an async generator):
+
+```python
+async for token in client.stream_ask(session_id="s", bot_tag="acme", fr_tag="read", query="..."):
+    print(token, end="", flush=True)
+```
+
+Notes:
+
+- Unlike `ask`, a streaming request is **not** retried (a consumed stream cannot
+  be replayed). A non-2xx status raises `ApiError` before any token is yielded.
+- The result is a lazy generator; consume it promptly (e.g. in a `for` loop) so
+  the underlying HTTP connection is released.
+- Heartbeat/comment lines are skipped, multi-line `data:` events are joined with
+  a newline, and an OpenAI-style `[DONE]` sentinel cleanly terminates the stream
+  (it is never yielded).
+
+## LangChain integration (optional)
+
+Install the `langchain` extra and import the retrievers from the
+`tocdoc_sdk.langchain` submodule (the core package never imports `langchain` —
+`import tocdoc_sdk` works with no LangChain installed):
+
+```bash
+pip install "tocdoc-sdk[langchain]"
+```
+
+```python
+from tocdoc_sdk import TocDocClient
+from tocdoc_sdk.langchain import TocDocRetriever
+
+retriever = TocDocRetriever(
+    client=TocDocClient("https://your-tocdoc-host", token="YOUR_BEARER_TOKEN"),
+    bot_tag="acme",
+    fr_tag="read",     # default: "read"
+    # session_id="...", # optional; a fresh UUID is generated per call when omitted
+)
+
+docs = retriever.invoke("What is the refund policy?")
+for doc in docs:
+    print(doc.page_content)            # the grounded answer text
+    print(doc.metadata["source"])      # cited filepath, e.g. "/docs/policy.md"
+    print(doc.metadata["filename"])    # cited filename, e.g. "policy.md"
+```
+
+`AsyncTocDocRetriever` is the async variant — construct it with an
+`AsyncTocDocClient` and use `await retriever.ainvoke(...)`; it implements the
+native async retrieval path (it does not block the event loop on a sync client).
+
+**Document mapping (a deliberate limitation).** The `/qna` endpoint returns one
+grounded `answer` plus a flat `{filename: filepath}` citation map — there is no
+per-chunk source text. So each returned `langchain_core.documents.Document`
+carries the *answer* as `page_content` and one cited source in `metadata`
+(`source` = filepath, `filename` = filename); one Document is emitted per
+citation (or a single Document with empty source metadata when the answer has no
+citations). This is a retrieval *view* over a QnA endpoint, not a raw vector
+store. Compatible with `langchain-core` 1.x.
 
 ## Admin API
 

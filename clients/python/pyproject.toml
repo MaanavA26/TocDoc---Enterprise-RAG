@@ -27,6 +27,12 @@ dependencies = [
 dev = [
     "pytest>=8",
 ]
+# Optional LangChain integration (tocdoc_sdk.langchain). NOT a core dependency:
+# the SDK imports and runs with only httpx + pydantic. Pinned to langchain-core
+# 1.x to match the version the services run on.
+langchain = [
+    "langchain-core>=1.0,<2.0",
+]
 
 # Console entry point: setuptools wraps this as `sys.exit(main())`, so the
 # `main(argv=None)` return value becomes the process exit code.

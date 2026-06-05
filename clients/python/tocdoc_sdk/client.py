@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import random
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 import httpx
@@ -30,8 +30,38 @@ from ._retry import (
     should_retry_exception,
     should_retry_status,
 )
+from ._sse import iter_sse_data
 from .errors import ApiError
 from .models import BotTurn, QnAAnswer, QnARequest
+
+
+def _build_request(
+    *,
+    session_id: str,
+    bot_tag: str,
+    fr_tag: str,
+    query: str | None,
+    bot: Iterable[BotTurn | dict[str, Any]] | None,
+) -> QnARequest:
+    """Build a :class:`QnARequest` from the ``query``-or-``bot`` argument pair.
+
+    Shared by :meth:`TocDocClient.ask` and :meth:`TocDocClient.stream_ask` (and
+    their async mirrors) so the contract — exactly one of ``query`` / ``bot``,
+    a single-turn wrap for ``query``, dict-or-:class:`BotTurn` for ``bot`` — is
+    defined once.
+
+    Raises:
+        ValueError: If neither or both of ``query`` / ``bot`` are given.
+    """
+    if (query is None) == (bot is None):
+        raise ValueError("provide exactly one of `query` or `bot`")
+
+    if bot is None:
+        turns = [BotTurn(user_query=query)]  # type: ignore[arg-type]
+    else:
+        turns = [t if isinstance(t, BotTurn) else BotTurn(**t) for t in bot]
+
+    return QnARequest(session_id=session_id, bot=turns, fr_tag=fr_tag, bot_tag=bot_tag)
 
 
 class TocDocClient:
@@ -142,20 +172,7 @@ class TocDocClient:
             ValueError: If neither or both of ``query`` / ``bot`` are given.
             ApiError: On any non-2xx response (carries the envelope fields).
         """
-        if (query is None) == (bot is None):
-            raise ValueError("provide exactly one of `query` or `bot`")
-
-        if bot is None:
-            turns = [BotTurn(user_query=query)]  # type: ignore[arg-type]
-        else:
-            turns = [t if isinstance(t, BotTurn) else BotTurn(**t) for t in bot]
-
-        request = QnARequest(
-            session_id=session_id,
-            bot=turns,
-            fr_tag=fr_tag,
-            bot_tag=bot_tag,
-        )
+        request = _build_request(session_id=session_id, bot_tag=bot_tag, fr_tag=fr_tag, query=query, bot=bot)
 
         # The /qna query is idempotent (a read), so it keeps the full transient
         # retry policy: 5xx + any connect/read/write timeout.
@@ -166,6 +183,54 @@ class TocDocClient:
 
         # Non-2xx: parse the P0-6 envelope (defensively) and raise.
         raise ApiError.from_response(response.status_code, safe_json(response))
+
+    def stream_ask(
+        self,
+        *,
+        session_id: str,
+        bot_tag: str,
+        fr_tag: str,
+        query: str | None = None,
+        bot: Iterable[BotTurn | dict[str, Any]] | None = None,
+    ) -> Iterator[str]:
+        """Stream a QnA answer token-by-token from a future ``POST /qna/stream``.
+
+        Same request contract as :meth:`ask`, but the server responds with a
+        Server-Sent-Events (SSE) stream and this method yields each ``data``
+        payload (a token/chunk) as it arrives. Provide exactly one of ``query``
+        or ``bot``.
+
+        The result is a lazy generator: the HTTP connection stays open until the
+        generator is exhausted or closed, so consume it promptly (e.g. in a
+        ``for`` loop) or wrap it in ``with closing(...)``.
+
+        Note: unlike :meth:`ask`, a streaming request is **not** retried — a
+        consumed stream cannot be replayed, and the response status is known only
+        after the stream begins. A non-2xx status raises :class:`ApiError`
+        before any token is yielded (the error body is read and parsed first).
+
+        Yields:
+            Each SSE ``data`` payload in order. The OpenAI-style ``[DONE]``
+            sentinel terminates the stream and is never yielded.
+
+        Raises:
+            ValueError: If neither or both of ``query`` / ``bot`` are given.
+            ApiError: On any non-2xx response (carries the envelope fields).
+        """
+        request = _build_request(session_id=session_id, bot_tag=bot_tag, fr_tag=fr_tag, query=query, bot=bot)
+
+        with self._client.stream(
+            "POST",
+            "/qna/stream",
+            json=request.model_dump(),
+            headers={"Accept": "text/event-stream"},
+        ) as response:
+            if not (200 <= response.status_code < 300):
+                # Read the (small) error body before parsing — we cannot parse an
+                # envelope from a half-consumed stream.
+                response.read()
+                raise ApiError.from_response(response.status_code, safe_json(response))
+            yield from iter_sse_data(response.iter_lines())
 
     def _request_with_retries(
         self, method: str, path: str, *, idempotent: bool, **kwargs: Any
