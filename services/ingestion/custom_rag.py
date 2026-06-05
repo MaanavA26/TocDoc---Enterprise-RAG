@@ -39,8 +39,33 @@ _READ_OVERLAP_TOKENS = 50
 
 # Azure Cognitive Search caps a single indexing batch at 1000 actions, so
 # delete_by_source_path deletes in batches no larger than this. The id list
-# itself is unbounded — paginated above the 1000 per-page read cap.
+# itself is unbounded — paginated above the 1000 per-page read cap. The same
+# cap bounds the merge_or_upload batch size (H3).
 _DELETE_BATCH_SIZE = 1000
+
+
+def _escape_odata(value: str) -> str:
+    """Escape a string literal for an OData filter (single quote → doubled).
+
+    This is the SINK-side injection defense (C1). `bot_tag` is also validated at
+    the /upload route against a strict pattern, but escaping here too is
+    defense-in-depth and protects every other caller (connectors,
+    delete_by_source_path) regardless of upstream validation. Mirrors
+    `SearchAdminService._escape_odata`.
+    """
+    return value.replace("'", "''")
+
+
+def _document_tag_filter(document_id: str, bot_tag: str) -> str:
+    """Build the OData filter selecting all chunks for one (document_id, bot_tag).
+
+    Both values are OData-escaped at this single chokepoint so no caller can
+    interpolate an unescaped quote into the filter that drives delete_documents
+    (C1). Deliberately omits `fr_mode` so a re-upload under a different mode can
+    clear every prior mode's chunks (M3 / L-Ing1 prune).
+    """
+    return f"document_id eq '{_escape_odata(document_id)}' and bot_tag eq '{_escape_odata(bot_tag)}'"
+
 
 # Logging handlers — stdout always, file logging only if LOG_FILE is set
 log_handlers = [logging.StreamHandler(sys.stdout)]
@@ -104,6 +129,13 @@ class rag:
             raise
 
     async def create_search_index(self):
+        # M6: memoize the SearchClient. __init__ sets self.search_client = None;
+        # build it once (running the index-existence check / creation a single
+        # time) and reuse it across every upload()/delete call so the underlying
+        # HTTP transport / connection pool is not rebuilt-and-leaked per request.
+        if self.search_client is not None:
+            return self.search_client
+
         index_name = os.getenv("INDEX_NAME")
 
         logger.info(f"Creating or retrieving search index: {index_name}")
@@ -128,6 +160,7 @@ class rag:
                     credential=AzureKeyCredential(os.getenv("AZURE_SEARCH_KEY")),
                 )
                 logger.info("Search client initialized for existing index")
+                self.search_client = search_client
                 return search_client
 
             logger.info(f"Creating new index: {index_name}")
@@ -278,6 +311,7 @@ class rag:
             )
             logger.info("Search client initialized for new index")
 
+            self.search_client = search_client
             return search_client
 
         except Exception as e:
@@ -334,25 +368,27 @@ class rag:
             logger.info("Initializing search client")
             search_client = await self.create_search_index()
 
-            # Delete any existing chunks for this document+tenant to avoid stale data
-            deleted_stale_chunks = 0
+            # Enumerate prior chunks for this document+tenant so we can prune
+            # stale ones AFTER a successful upsert (L-Ing1: upsert-then-prune
+            # avoids the transient zero-chunk window the old delete-then-rebuild
+            # had). We only READ here; the delete happens post-upsert below.
+            # M3: drain ALL matching ids via `.by_page()` (no `top` cap) so a
+            # document that previously produced >1000 chunks — e.g. under a
+            # different fr_mode — is fully cleared, not orphaned. The filter
+            # omits fr_mode deliberately so re-uploading under read↔layout
+            # clears the other mode's chunks too.
+            stale_ids: list[str] = []
             try:
-                existing = list(
-                    search_client.search(
-                        search_text="*",
-                        filter=f"document_id eq '{document_id}' and bot_tag eq '{tag}'",
-                        select=["id"],
-                        top=1000,
-                    )
+                stale_ids = self._drain_chunk_ids(search_client, _document_tag_filter(document_id, tag))
+                logger.info(
+                    f"Found {len(stale_ids)} prior chunk(s) for "
+                    f"document_id={document_id!r}, bot_tag={tag!r} (pruned after upsert)"
                 )
-                if existing:
-                    search_client.delete_documents(documents=existing)
-                    deleted_stale_chunks = len(existing)
-                    logger.info(
-                        f"Deleted {len(existing)} stale chunks for document_id={document_id!r}, bot_tag={tag!r}"
-                    )
             except Exception as cleanup_err:
-                logger.warning(f"Stale chunk cleanup failed (non-fatal): {cleanup_err}")
+                # Enumeration is best-effort: a failure here must not block the
+                # upsert. Log the exception CLASS only (never str(e), which may
+                # carry index/path detail).
+                logger.warning(f"Stale chunk enumeration failed (non-fatal): {type(cleanup_err).__name__}")
 
             # Load document using Azure AI Document Intelligence
             stage = "document_intelligence"
@@ -565,19 +601,56 @@ class rag:
                 logger.info(f"Uploading {len(azure_docs)} documents to search index")
                 start_time = time.time()
 
-                result = search_client.merge_or_upload_documents(documents=azure_docs)
+                # H3: batch at the 1000-action cap and inspect every
+                # IndexingResult. Azure Search returns 207 on partial success
+                # WITHOUT raising — failed chunks must be surfaced, not reported
+                # as success.
+                failed_keys = self._upsert_in_batches(search_client, azure_docs)
                 end_time = time.time()
 
-                logger.info(f"Documents uploaded successfully in {end_time - start_time:.2f} seconds")
-                logger.debug(f"Upload result: {result}")
+                logger.info(f"Documents uploaded in {end_time - start_time:.2f} seconds")
+                logger.debug(f"Upsert failed_keys: {len(failed_keys)}")
+
+                # L-Ing1: prune stale chunks ONLY after a (here, attempted)
+                # upsert, and only the ids that the fresh write did NOT just
+                # (re)create. Deterministic IDs mean an identical-content
+                # re-upload overwrites in place; the set difference deletes only
+                # the genuine residue (e.g. a previous fr_mode's chunks, or the
+                # tail of a now-shorter document) — never the chunks we just
+                # wrote, and never leaving a zero-chunk window.
+                new_ids = {doc["id"] for doc in azure_docs}
+                to_delete = [cid for cid in stale_ids if cid not in new_ids]
+                deleted_stale_chunks = 0
+                if to_delete:
+                    try:
+                        for d_start in range(0, len(to_delete), _DELETE_BATCH_SIZE):
+                            d_batch = to_delete[d_start : d_start + _DELETE_BATCH_SIZE]
+                            search_client.delete_documents(documents=[{"id": cid} for cid in d_batch])
+                        deleted_stale_chunks = len(to_delete)
+                        logger.info(
+                            f"Pruned {deleted_stale_chunks} stale chunk(s) for "
+                            f"document_id={document_id!r}, bot_tag={tag!r}"
+                        )
+                    except Exception as prune_err:
+                        # Pruning residue is non-fatal: the new content is
+                        # already indexed; orphans are self-healed on re-run.
+                        logger.warning(f"Stale chunk prune failed (non-fatal): {type(prune_err).__name__}")
+
+                # H3: if any chunk failed to index, report a DEGRADED status with
+                # the failed keys — never claim "successful" for a partial write.
+                upsert_status = "successful" if not failed_keys else "degraded"
 
                 log_event(
                     logger,
                     "index_upsert_completed",
                     request_id=request_id,
+                    level=logging.ERROR if failed_keys else logging.INFO,
                     document_id=document_id,
                     bot_tag=tag,
                     chunk_count=len(azure_docs),
+                    failed_chunks=len(failed_keys),
+                    failed_keys=failed_keys if failed_keys else None,
+                    status=upsert_status,
                     deleted_stale_chunks=deleted_stale_chunks,
                     latency_ms=round((end_time - start_time) * 1000, 2),
                 )
@@ -587,10 +660,12 @@ class rag:
 
                 # Create summary statistics
                 stats = {
-                    "status": "successful",
+                    "status": upsert_status,
                     "filename": filename,
                     "total_pages": total_pages,
                     "total_chunks": len(azure_docs),
+                    "failed_chunks": len(failed_keys),
+                    "failed_keys": failed_keys,
                     "max_token": max(token_list),
                     "min_token": min(token_list),
                     "avg_token": sum(token_list) / len(token_list),
@@ -599,10 +674,13 @@ class rag:
                     "avg_character": sum(char_list) / len(char_list),
                 }
 
-                logger.info(f"Upload completed successfully - stats: {stats}")
+                logger.info(f"Upload completed - status={upsert_status} - stats: {stats}")
                 return stats
             else:
-                logger.warning("No documents to upload")
+                # L-Ing1: an empty parse must NOT prune the prior chunks — that
+                # would zero out a document on a transient bad parse. Leave the
+                # existing chunks in place (self-healing on a good re-run).
+                logger.warning("No documents to upload; leaving existing chunks intact")
                 return "No documents to upload"
 
         except Exception as e:
@@ -647,24 +725,19 @@ class rag:
         Returns:
             The number of chunks deleted.
         """
-        safe_path = source_path.replace("'", "''")
-        safe_tag = bot_tag.replace("'", "''")
-        filter_expr = f"source_path eq '{safe_path}' and bot_tag eq '{safe_tag}'"
+        filter_expr = (
+            f"source_path eq '{_escape_odata(source_path)}' and bot_tag eq '{_escape_odata(bot_tag)}'"
+        )
 
         search_client = await self.create_search_index()
 
         # Drain ALL matching ids first (across every page), THEN delete. We never
         # delete while the search pager is open: deleting mutates the index, which
-        # can invalidate continuation tokens mid-walk. We do not pass `top` — in
-        # the azure-search-documents SDK it maps to OData $top, which can be
-        # interpreted as a hard total cap and silently truncate results; the
-        # `.by_page()` continuation-token walk visits every match instead.
-        result = search_client.search(
-            search_text="*",
-            filter=filter_expr,
-            select=["id"],
-        )
-        ids = [doc["id"] for page in result.by_page() for doc in page if doc.get("id")]
+        # can invalidate continuation tokens mid-walk. `_drain_chunk_ids` does not
+        # pass `top` — in the azure-search-documents SDK it maps to OData $top,
+        # which can be interpreted as a hard total cap and silently truncate
+        # results; the `.by_page()` continuation-token walk visits every match.
+        ids = self._drain_chunk_ids(search_client, filter_expr)
 
         for start in range(0, len(ids), _DELETE_BATCH_SIZE):
             batch = ids[start : start + _DELETE_BATCH_SIZE]
@@ -675,6 +748,44 @@ class rag:
             f"source_path={source_path!r}, bot_tag={bot_tag!r}"
         )
         return len(ids)
+
+    @staticmethod
+    def _drain_chunk_ids(search_client, filter_expr: str) -> list[str]:
+        """Collect EVERY chunk id matching ``filter_expr`` across all pages.
+
+        Mirrors the paginated drain in ``delete_by_source_path`` (M3): no ``top``
+        (which the SDK maps to OData $top and can silently cap the total), and a
+        ``.by_page()`` continuation-token walk so documents that previously
+        produced >1000 chunks are fully enumerated instead of orphaned.
+        """
+        result = search_client.search(
+            search_text="*",
+            filter=filter_expr,
+            select=["id"],
+        )
+        return [doc["id"] for page in result.by_page() for doc in page if doc.get("id")]
+
+    @staticmethod
+    def _upsert_in_batches(search_client, azure_docs: list[dict]) -> list[str]:
+        """Batch merge_or_upload at the 1000-action cap and check every result.
+
+        H3: Azure Search returns HTTP 207 on partial success WITHOUT raising, and
+        the per-document ``IndexingResult`` list was previously only logged at
+        debug — so failed chunks were silently reported as success. Here we batch
+        at ``_DELETE_BATCH_SIZE`` and inspect each result, collecting the keys of
+        any chunk where ``not r.succeeded``.
+
+        Returns:
+            The list of chunk ids that FAILED to index (empty on full success).
+        """
+        failed_keys: list[str] = []
+        for start in range(0, len(azure_docs), _DELETE_BATCH_SIZE):
+            batch = azure_docs[start : start + _DELETE_BATCH_SIZE]
+            results = search_client.merge_or_upload_documents(documents=batch)
+            for r in results:
+                if not getattr(r, "succeeded", False):
+                    failed_keys.append(getattr(r, "key", "<unknown>"))
+        return failed_keys
 
     async def _chunk_text_by_tokens(self, text: str, max_tokens: int = 500, overlap: int = 50) -> list[str]:
         """Chunk text by real token count using tiktoken (cl100k_base encoding).

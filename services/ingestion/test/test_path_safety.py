@@ -149,6 +149,9 @@ class TestUploadEndpointFolderMode:
         from unittest import mock
 
         monkeypatch.setenv(ALLOWED_UPLOAD_ROOT_ENV, str(tmp_path))
+        # /upload now requires X-Admin-Token (H2); configure a known token so
+        # these route-level tests authenticate.
+        monkeypatch.setenv("ADMIN_API_TOKEN", "test-admin-token")
 
         # Stub `custom_rag` before importing `app` so no heavy deps load.
         # `rag` must be a class: `app.py` calls `custom_rag.rag()` and
@@ -170,11 +173,14 @@ class TestUploadEndpointFolderMode:
 
         return TestClient(app_module.app, raise_server_exceptions=False), rag_mock
 
+    _AUTH = {"X-Admin-Token": "test-admin-token"}
+
     def test_folder_mode_traversal_rejected_with_envelope(self, app_client):
         client, _ = app_client
         r = client.post(
             "/upload",
             params={"bot_tag": "t1", "filepath": "../../etc"},
+            headers=self._AUTH,
         )
         assert r.status_code == 400
         body = r.json()
@@ -197,6 +203,7 @@ class TestUploadEndpointFolderMode:
         r = client.post(
             "/upload",
             params={"bot_tag": "t1", "filepath": "batch"},
+            headers=self._AUTH,
         )
         assert r.status_code == 200
         results = r.json()
