@@ -158,6 +158,26 @@ def _get_env(canonical: str, default: str | None = None) -> str | None:
     return default
 
 
+def _int_env(name: str, default: int) -> int:
+    """Read a positive-int env var (canonical-aware), falling back to default.
+
+    A malformed or non-positive value falls back to ``default`` with a warning
+    rather than raising at import — a bad knob must never crash the process.
+    """
+    raw = _get_env(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning("Invalid int for %s=%r; using default %d", name, raw, default)
+        return default
+    if value <= 0:
+        logger.warning("Non-positive value for %s=%d; using default %d", name, value, default)
+        return default
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Minimal runtime guardrails: ensure critical env vars exist at process start.
 # NOTE: These checks run BEFORE any Key Vault fetch (preserved P0-7 behavior).
@@ -325,6 +345,21 @@ class Settings:
 _TRUTHY = {"1", "true", "yes", "on"}
 
 
+def is_map_reduce_enabled() -> bool:
+    """Whether the P3-2 map-reduce summariser node is live (default OFF).
+
+    A **sub-flag** under the master ``QNA_AGENT_ENABLED``: the map-reduce route
+    only runs when BOTH this flag and the master flag are on. Read live from the
+    environment on every call so it is a no-redeploy kill-switch and tests can
+    toggle it with ``monkeypatch.setenv``. Parsed explicitly so the literal
+    string ``"false"`` is correctly falsy.
+
+    With this flag unset/empty/falsy, a ``map_reduce`` classification collapses
+    to ``standard_route`` — behaviour is byte-for-byte identical to today.
+    """
+    return (os.getenv("QNA_AGENT_MAP_REDUCE") or "").strip().lower() in _TRUTHY
+
+
 def is_agent_enabled() -> bool:
     """Whether the P3 LangGraph agentic layer handles ``/qna`` (default OFF).
 
@@ -405,6 +440,22 @@ class LocalConfig:
         # existing fallback values when that happens.
         self.AZURE_LLM_MODEL = _get_env("AZURE_OPENAI_LLM_MODEL") or "gpt-4o-mini"
         self.TOP_K = 20
+
+        # --- P3-2 map-reduce summariser knobs (canonical UPPER_SNAKE; new in
+        # P3 so no legacy alias). All optional with sensible defaults so parity
+        # and tests work without any new env. ---
+        # Chunks per map (extract) LLM call.
+        self.MAP_REDUCE_BATCH_SIZE: int = _int_env("MAP_REDUCE_BATCH_SIZE", 20)
+        # Max concurrent in-flight map calls (semaphore bound). Sized small to
+        # respect the synchronous Azure OpenAI client + bounded executor.
+        self.MAP_REDUCE_CONCURRENCY: int = _int_env("MAP_REDUCE_CONCURRENCY", 4)
+        # Hard ceiling on how many chunks "retrieve all" pulls in one search, so
+        # fetch_all is bounded (Azure caps a single query near ~1000 anyway).
+        self.MAP_REDUCE_MAX_CHUNKS: int = _int_env("MAP_REDUCE_MAX_CHUNKS", 1000)
+        # Reduce-step model: a separate (typically larger) deployment for the
+        # final synthesis. Falls back to the standard LLM model so the node
+        # works without new env in tests/parity.
+        self.AZURE_OPENAI_REDUCE_MODEL: str = _get_env("AZURE_OPENAI_REDUCE_MODEL") or self.AZURE_LLM_MODEL
         # Empty string = semantic reranking disabled (default, no behavior
         # change). Canonical UPPER_SNAKE name; no legacy alias (new in P2-1).
         self.AZURE_SEARCH_SEMANTIC_CONFIG: str = _get_env("AZURE_SEARCH_SEMANTIC_CONFIG") or ""

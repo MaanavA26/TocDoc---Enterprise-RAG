@@ -8,7 +8,12 @@ from inspect import isawaitable
 
 from src.config.config import LocalConfig
 from src.core.logger import logger
-from src.llm.prompts import generate_bot, rephrasal_prompt
+from src.llm.prompts import (
+    generate_bot,
+    map_extract_prompt,
+    reduce_combine_prompt,
+    rephrasal_prompt,
+)
 
 # ---------------------------------------------------------------------------
 # Executors / local config
@@ -291,6 +296,55 @@ def _structured_completion_sync(
 
     content = response.choices[0].message.content or "{}"
     return json.loads(content)
+
+
+def map_extract_sync(azure, *, query: str, sources: str, model: str | None = None) -> str:
+    """Synchronous **map** step: extract the facts in one batch of chunks that
+    are relevant to ``query``.
+
+    Module-level (not nested) so the P3-2 map-reduce node can offload it via
+    ``run_in_executor`` and tests can monkeypatch it to observe the
+    bounded-executor / semaphore fan-out. Returns the model's free-text extract
+    ("NO_RELEVANT_INFORMATION" when the batch is irrelevant, by prompt
+    contract). Raises on transport error — the caller owns retry/backoff.
+
+    The chat call mirrors the sync-client style used elsewhere in this module
+    (``azure.openai_client.chat.completions.create(...)``).
+    """
+    deployment_name = model or localconfig.AZURE_LLM_MODEL
+    prompt = map_extract_prompt.format(query=query, sources=sources)
+
+    response = azure.openai_client.chat.completions.create(
+        messages=[{"role": "user", "content": prompt}],
+        model=deployment_name,
+    )
+    if isawaitable(response):
+        logger.debug("map_extract create returned awaitable; running to completion in sync context")
+        response = asyncio.run(response)
+
+    return response.choices[0].message.content or ""
+
+
+def reduce_combine_sync(azure, *, query: str, extracts: str, model: str | None = None) -> str:
+    """Synchronous **reduce** step: combine the per-batch extracts into the
+    final grounded answer (with a ``**Sources:`` section the existing
+    ``extract_answer_and_filenames_from_text`` parser understands).
+
+    Module-level + monkeypatchable like ``map_extract_sync``. Uses the
+    (typically larger) reduce model by default. Raises on transport error.
+    """
+    deployment_name = model or localconfig.AZURE_OPENAI_REDUCE_MODEL
+    prompt = reduce_combine_prompt.format(query=query, extracts=extracts)
+
+    response = azure.openai_client.chat.completions.create(
+        messages=[{"role": "user", "content": prompt}],
+        model=deployment_name,
+    )
+    if isawaitable(response):
+        logger.debug("reduce_combine create returned awaitable; running to completion in sync context")
+        response = asyncio.run(response)
+
+    return response.choices[0].message.content or ""
 
 
 async def classify_route(azure, query: str) -> str:

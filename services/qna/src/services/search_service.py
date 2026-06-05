@@ -19,7 +19,7 @@ localconfig = LocalConfig()
 
 
 async def perform_search(
-    azure, query: str, vector: list[float], fr_mode: str, bot_tag: str
+    azure, query: str, vector: list[float], fr_mode: str, bot_tag: str, fetch_all: bool = False
 ) -> list[dict[str, Any]]:
     """
     Execute a hybrid (text + vector) search against Azure Cognitive Search.
@@ -36,6 +36,13 @@ async def perform_search(
         fr_mode (str): Retrieval mode tag (e.g., "fr_read" or "fr_layout").
         bot_tag (str): Bot/tenant identifier used for search isolation. Must
             be non-empty; an empty value is rejected before any search runs.
+        fetch_all (bool): When False (default), retrieval is capped at
+            ``localconfig.TOP_K`` — byte-identical to the historical behaviour
+            for every existing caller. When True (P3-2 map-reduce), the cap is
+            lifted to a **bounded** ceiling (``localconfig.MAP_REDUCE_MAX_CHUNKS``)
+            so the map-reduce node can summarise the whole corpus for the
+            ``(bot_tag, fr_mode)`` slice. It is bounded, never unbounded — Azure
+            caps a single query near ~1000 results regardless.
 
     Returns:
         List[Dict[str, Any]]: Materialized list of search results.
@@ -47,7 +54,16 @@ async def perform_search(
     if not bot_tag or not bot_tag.strip():
         raise ValueError("bot_tag is required for search isolation — empty bot_tag rejected")
 
-    logger.info(f"Performing search with query: '{query}', fr_mode: '{fr_mode}', bot_tag: '{bot_tag}'")
+    # Default: the historical TOP_K cap. fetch_all lifts it to the bounded
+    # map-reduce ceiling. Resolving `top` here (not inside _search_sync) keeps
+    # the sync helper's signature unchanged, so its kwargs stay byte-identical
+    # for the default path.
+    top = localconfig.MAP_REDUCE_MAX_CHUNKS if fetch_all else localconfig.TOP_K
+
+    logger.info(
+        f"Performing search with query: '{query}', fr_mode: '{fr_mode}', "
+        f"bot_tag: '{bot_tag}', fetch_all: {fetch_all}, top: {top}"
+    )
 
     try:
         start_time = time.time()
@@ -60,7 +76,7 @@ async def perform_search(
             vector=vector,
             fr_mode=fr_mode,
             bot_tag=bot_tag,
-            top=localconfig.TOP_K,
+            top=top,
         )
         results = await loop.run_in_executor(search_executor, search_fn)
 

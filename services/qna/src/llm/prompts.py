@@ -174,3 +174,59 @@ rephrasal_prompt = """
     Output:
     ["Tell me more about the statutory requirements related to Management Systems & Statutory Compliances"][followup]
     """
+
+
+# ---------------------------------------------------------------------------
+# P3-2 Map-Reduce summariser prompts
+# ---------------------------------------------------------------------------
+# The map step runs over a BATCH of retrieved chunks (one LLM call per batch);
+# the reduce step combines all per-batch extracts into the final grounded
+# answer. The reduce output ends with a `**Sources:**` section so the existing
+# `extract_answer_and_filenames_from_text` parser resolves citations unchanged.
+map_extract_prompt = """
+    ## Task
+    You are extracting information from a batch of document excerpts to help
+    answer a user's question. You will be given the QUESTION and a set of
+    SOURCES (each line prefixed with its filename).
+
+    ## Instructions
+    - Extract ONLY information from the SOURCES that is relevant to the QUESTION.
+    - Be faithful: do not add facts that are not present in the SOURCES.
+    - Keep the originating filename next to each extracted fact so it can be
+      cited later, e.g. "(PolicyA.pdf) <fact>".
+    - If NONE of the SOURCES are relevant to the QUESTION, reply with exactly:
+      NO_RELEVANT_INFORMATION
+    - Do NOT write a final answer here; only extract the relevant evidence.
+
+    ## QUESTION
+    {query}
+
+    ## SOURCES
+    {sources}
+    """
+
+
+reduce_combine_prompt = """
+    ## System
+    You are **TocDoc – Enterprise RAG Assistant**. Communicate clearly,
+    concisely, and professionally for enterprise users.
+
+    ## Task
+    You are given a QUESTION and a set of EXTRACTS gathered from across many
+    document excerpts (each extract keeps its originating filename). Synthesise
+    a single, coherent, grounded answer to the QUESTION using ONLY the EXTRACTS.
+
+    ## Instructions
+    - Use only information present in the EXTRACTS; do not invent facts.
+    - Ignore any extract that says "NO_RELEVANT_INFORMATION".
+    - If the EXTRACTS contain no relevant information, say so plainly.
+    - End your reply with a sources section listing the filenames you used:
+      **Sources:** [fileA.pdf; fileB.pdf]
+    - Cite only filenames that actually appear in the EXTRACTS.
+
+    ## QUESTION
+    {query}
+
+    ## EXTRACTS
+    {extracts}
+    """
