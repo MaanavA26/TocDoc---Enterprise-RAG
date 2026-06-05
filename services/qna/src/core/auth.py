@@ -135,6 +135,16 @@ class AuthUtils:
             # Attach email to request.state (downstream handlers can rely on it)
             request.state.email = email
 
+            # Attach the validated tenant id (`tid` claim) to request.state so
+            # the request-path tenant-binding guard can enforce a bot_tag<->tid
+            # allowlist (see src/core/tenant_binding.py). This is inert unless
+            # QNA_ENFORCE_TENANT_BINDING is on; it is set unconditionally here
+            # because it derives from the cryptographically validated token and
+            # carries no behavioural cost when the guard is OFF. May be None for
+            # token shapes without a `tid` claim — the guard fails closed on a
+            # missing tid only when enforcement is enabled.
+            request.state.tid = decoded.get("tid")
+
         except TokenValidationError as e:
             # `e.status_code` is 401 for client-side token issues (expired,
             # wrong audience, malformed) and 503 for JWKS-unavailable cases.
