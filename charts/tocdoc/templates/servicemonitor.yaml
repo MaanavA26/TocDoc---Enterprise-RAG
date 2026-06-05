@@ -1,0 +1,51 @@
+{{- /*
+Prometheus Operator ServiceMonitor per enabled service (toggle via
+metrics.serviceMonitor.enabled, default off).
+
+monitoring.coreos.com/v1 is a CRD installed by the Prometheus Operator. It is NOT
+present on every cluster, so this defaults OFF — enabling it on a cluster without
+the CRD would fail at apply time (helm template still renders fine either way).
+
+The application MUST expose Prometheus metrics on metrics.path (default /metrics)
+on its HTTP container port for this to collect anything. endpoints.port references
+the Service's named port ("http"); the selector matches the per-service Service
+labels emitted by service.yaml.
+
+If you do not run the Prometheus Operator, set metrics.serviceMonitor.enabled=false
+and instead enable metrics.podAnnotations.enabled to emit prometheus.io/* scrape
+annotations on the pods (see deployment.yaml).
+*/ -}}
+{{- $root := . -}}
+{{- $fullname := include "tocdoc.fullname" . -}}
+{{- if .Values.metrics.serviceMonitor.enabled }}
+{{- range $svcName, $svc := .Values.services }}
+{{- if $svc.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ $fullname }}-{{ $svcName }}
+  labels:
+    {{- include "tocdoc.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $svcName }}
+    {{- with $root.Values.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "tocdoc.name" $root }}
+      app.kubernetes.io/instance: {{ $root.Release.Name }}
+      app.kubernetes.io/component: {{ $svcName }}
+  endpoints:
+    - port: http
+      path: {{ $root.Values.metrics.path | quote }}
+      interval: {{ $root.Values.metrics.serviceMonitor.interval | quote }}
+      scrapeTimeout: {{ $root.Values.metrics.serviceMonitor.scrapeTimeout | quote }}
+      scheme: http
+  namespaceSelector:
+    matchNames:
+      - {{ $root.Release.Namespace }}
+{{- end }}
+{{- end }}
+{{- end }}
