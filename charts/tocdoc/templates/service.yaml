@@ -1,0 +1,26 @@
+{{- /* ClusterIP Service for each enabled service, fronting the container port. */ -}}
+{{- $root := . -}}
+{{- $fullname := include "tocdoc.fullname" . -}}
+{{- range $svcName, $svc := .Values.services }}
+{{- if $svc.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-{{ $svcName }}
+  labels:
+    {{- include "tocdoc.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $svcName }}
+spec:
+  type: {{ $svc.service.type }}
+  ports:
+    - name: http
+      port: {{ $svc.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: {{ include "tocdoc.name" $root }}
+    app.kubernetes.io/instance: {{ $root.Release.Name }}
+    app.kubernetes.io/component: {{ $svcName }}
+{{- end }}
+{{- end }}

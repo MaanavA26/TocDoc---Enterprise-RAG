@@ -1,0 +1,43 @@
+{{- /*
+HorizontalPodAutoscaler per enabled service when autoscaling.enabled.
+Note: minReplicas is >= 1. The Bicep/ACA path scales to zero (an ACA feature);
+a stock k8s HPA cannot scale to zero without KEDA, so the floor is kept at 1+.
+*/ -}}
+{{- $root := . -}}
+{{- $fullname := include "tocdoc.fullname" . -}}
+{{- range $svcName, $svc := .Values.services }}
+{{- if and $svc.enabled $svc.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $fullname }}-{{ $svcName }}
+  labels:
+    {{- include "tocdoc.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $svcName }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ $fullname }}-{{ $svcName }}
+  minReplicas: {{ max 1 (int $svc.autoscaling.minReplicas) }}
+  maxReplicas: {{ $svc.autoscaling.maxReplicas }}
+  metrics:
+    {{- if $svc.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $svc.autoscaling.targetCPUUtilizationPercentage }}
+    {{- end }}
+    {{- if $svc.autoscaling.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ $svc.autoscaling.targetMemoryUtilizationPercentage }}
+    {{- end }}
+{{- end }}
+{{- end }}

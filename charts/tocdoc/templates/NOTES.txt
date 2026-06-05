@@ -1,0 +1,30 @@
+TocDoc has been deployed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Services:
+{{- range $svcName, $svc := .Values.services }}
+{{- if $svc.enabled }}
+  - {{ $.Release.Name }}-{{ include "tocdoc.name" $ }}-{{ $svcName }} (port {{ $svc.service.port }} -> container {{ $svc.containerPort }})
+{{- end }}
+{{- end }}
+
+Secret wiring:
+{{- if .Values.secret.create }}
+  WARNING: secret.create=true — a placeholder Secret "{{ include "tocdoc.fullname" . }}" was
+  rendered from secret.data. Use this for non-production bootstrap ONLY. For
+  production, set secret.create=false and sync secrets from Azure Key Vault.
+{{- else }}
+  Env secrets are sourced from Secret "{{ include "tocdoc.secretName" . }}".
+  {{- if .Values.keyVaultCSI.enabled }}
+  A SecretProviderClass "{{ include "tocdoc.fullname" . }}-kv" was rendered to sync
+  Key Vault objects into Secret "{{ .Values.keyVaultCSI.syncedSecretName }}".
+  {{- else }}
+  Ensure that Secret exists (e.g. created by the Secrets Store CSI driver or
+  External Secrets Operator) before pods can start. Enable keyVaultCSI to render
+  a SecretProviderClass scaffold.
+  {{- end }}
+{{- end }}
+
+Check rollout:
+  kubectl get pods -l app.kubernetes.io/instance={{ .Release.Name }} -n {{ .Release.Namespace }}
+
+Health checks hit /health on each service.
