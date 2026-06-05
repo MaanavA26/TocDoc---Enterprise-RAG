@@ -1,0 +1,19 @@
+# Teams Bot adapter (P4-1) — runtime dependencies.
+#
+# Pins are verified to resolve and install together via the dev pip proxy.
+# Versions mirror the rest of the repo where the package overlaps
+# (httpx/pydantic match clients/python and services/qna).
+#
+# botbuilder-core pulls in botframework-connector, which provides the
+# inbound Bot Framework JWT validation (JwtTokenValidation) — the adapter's
+# trust boundary.
+botbuilder-core==4.17.1
+aiohttp==3.12.14
+
+# QnA contract: typed request/response/error models + the httpx client.
+# Reuse the in-repo SDK (editable) rather than re-implementing the envelope
+# parsing. httpx/pydantic are transitive via the SDK but pinned here too so
+# the adapter's behavior is reproducible independent of the SDK's resolution.
+-e ../../clients/python
+httpx==0.28.1
+pydantic==2.13.4
