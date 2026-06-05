@@ -1,6 +1,6 @@
 using '../main.bicep'
 
-param prefix = 'tocdocdev'
+param prefix = 'tocdev'
 param environment = 'dev'
 param location = 'eastus'
 param tenantId = '<your-azure-tenant-id>'

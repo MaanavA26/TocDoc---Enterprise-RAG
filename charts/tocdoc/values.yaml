@@ -239,7 +239,12 @@ services:
       behavior: {}
     podDisruptionBudget:
       enabled: true
-      minAvailable: 1
+      # Default is maxUnavailable:1, not minAvailable:1. With the single-replica
+      # default (replicaCount/minReplicas:1), minAvailable:1 would block ALL
+      # voluntary disruption (node drains stall). maxUnavailable:1 still bounds
+      # disruption but lets a 1-replica drain proceed. For multi-replica HA,
+      # override with minAvailable (values-production.yaml does, with replicas:2).
+      maxUnavailable: 1
     ingress:
       enabled: false
       className: ""
@@ -310,7 +315,12 @@ services:
       behavior: {}
     podDisruptionBudget:
       enabled: true
-      minAvailable: 1
+      # Default is maxUnavailable:1, not minAvailable:1. With the single-replica
+      # default (replicaCount/minReplicas:1), minAvailable:1 would block ALL
+      # voluntary disruption (node drains stall). maxUnavailable:1 still bounds
+      # disruption but lets a 1-replica drain proceed. For multi-replica HA,
+      # override with minAvailable (values-production.yaml does, with replicas:2).
+      maxUnavailable: 1
     ingress:
       enabled: false
       className: ""
