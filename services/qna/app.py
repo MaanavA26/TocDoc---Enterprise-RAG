@@ -611,18 +611,40 @@ async def custom_rag_qna_stream(payload: Payload, request: Request):
     # Note: any other exception propagates to the global handler -> envelope.
 
     async def event_source():
+        # IMPORTANT: do NOT emit `[DONE]` from a `finally`. On client disconnect
+        # Starlette calls `aclose()` on this body iterator, which throws
+        # `GeneratorExit` (a BaseException, so it bypasses `except Exception`)
+        # at the suspended `yield`. Yielding while a GeneratorExit is propagating
+        # raises `RuntimeError: async generator ignored GeneratorExit`, which
+        # kills this generator before the inner stream is closed — deferring the
+        # inner cooperative-stop `finally` (worker stop + queue drain) to GC and
+        # re-opening the executor-slot / denial-of-wallet leak it prevents.
+        # Instead, emit `[DONE]` only on the normal-completion and caught-
+        # `Exception` paths, and close the inner stream in an inner `finally` so
+        # its cooperative stop runs PROMPTLY on disconnect. `stream.aclose()`
+        # receives GeneratorExit cleanly (it does not yield), so the inner stop
+        # runs as part of disconnect teardown rather than at GC.
         try:
-            if first_item is not None:
-                kind, payload_value = first_item
-                if kind == "token":
-                    yield _sse_event(payload_value)
-                elif kind == "citation":
-                    yield _sse_event(json.dumps(payload_value), event="citation")
-            async for kind, payload_value in stream:
-                if kind == "token":
-                    yield _sse_event(payload_value)
-                elif kind == "citation":
-                    yield _sse_event(json.dumps(payload_value), event="citation")
+            try:
+                if first_item is not None:
+                    kind, payload_value = first_item
+                    if kind == "token":
+                        yield _sse_event(payload_value)
+                    elif kind == "citation":
+                        yield _sse_event(json.dumps(payload_value), event="citation")
+                async for kind, payload_value in stream:
+                    if kind == "token":
+                        yield _sse_event(payload_value)
+                    elif kind == "citation":
+                        yield _sse_event(json.dumps(payload_value), event="citation")
+            finally:
+                # Prompt inner-stream teardown on every exit path (normal,
+                # mid-stream raise, AND client disconnect). Safe to call after
+                # normal exhaustion (aclose() on an exhausted generator is a
+                # no-op). Receives GeneratorExit without yielding.
+                await stream.aclose()
+            # Normal completion only.
+            yield _SSE_DONE
         except Exception as e:
             # Mid-stream failure: headers are already sent, so we cannot emit the
             # structured envelope. Surface a terminal error event (no raw
@@ -636,7 +658,6 @@ async def custom_rag_qna_stream(payload: Payload, request: Request):
                 }
             }
             yield _sse_event(json.dumps(error_payload), event="error")
-        finally:
             yield _SSE_DONE
 
     return StreamingResponse(

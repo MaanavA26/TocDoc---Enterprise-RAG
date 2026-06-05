@@ -10,13 +10,23 @@ refine pass and re-grades. The refine is NON-DESTRUCTIVE: the original answer is
 kept unless the refined answer clears the acceptance bar (it is not a score
 comparison — a refine that scores higher but still fails the bar is discarded).
 
-The refine re-runs the **unchanged** grounded generation
-(``generate_openai_response``) over the same ``retrieved_chunks`` as a single
-bounded second attempt, so the refined answer obeys the identical prompt +
-``**Sources:**`` citation contract as the original. It is a deliberate
-re-generation (one retry), not a different "stricter" prompt — the bar is
-re-applied by re-grading, and if the retry still fails the original answer is
-kept unchanged (non-destructive).
+The refine re-runs the grounded generation (``generate_openai_response``) over
+the same ``retrieved_chunks`` as a single bounded second attempt, so the refined
+answer obeys the identical prompt + ``**Sources:**`` citation contract as the
+original. It is a deliberate re-generation (one retry), not a different
+"stricter" prompt — the bar is re-applied by re-grading, and if the retry still
+fails the original answer is kept unchanged (non-destructive).
+
+**Known limitation (documented):** the refine is a re-generation, not a
+claim-targeted repair. The grader's ``unsupported_claims`` are surfaced to the
+caller but are NOT fed back into the refine prompt, so the only thing that can
+make the refined answer differ from the original is sampling variance. The
+original synthesis runs at the API-default temperature; the refine therefore
+pins an explicit non-zero ``_REFINE_TEMPERATURE`` so a genuinely *different*
+sample is at least possible (without it the re-roll risks an effectively
+identical answer — wasted cost/latency with no remediation mechanism). A
+claim-targeted critique prompt that feeds ``unsupported_claims`` back into the
+generation is a deliberately deferred follow-up, out of scope here.
 
 The refine is gated to the ``react`` route only: it feeds ALL retrieved chunks
 into one generation, which on the ``map_reduce`` route would be the wide-context
@@ -61,6 +71,15 @@ from src.services.openai_service import generate_openai_response
 from src.services.text_processor import extract_answer_and_filenames_from_text
 
 localconfig = LocalConfig()
+
+# Sampling temperature for the single bounded refine pass. The refine re-grounds
+# over the SAME chunks with the SAME prompt — it has no signal directing it at
+# the specific unsupported claims (a known limitation; see the module docstring),
+# so its only lever to differ from the original draft is sampling variance. The
+# original synthesis path runs at the API-default temperature; pinning a distinct
+# non-zero value here makes a *different* sample at least possible (a true
+# re-roll) rather than re-requesting an effectively identical generation.
+_REFINE_TEMPERATURE = 0.7
 
 # Structured-output schema for the groundedness grade. ``strict`` +
 # ``additionalProperties: False`` so the verdict is machine-checkable (the same
@@ -224,13 +243,25 @@ async def verifier(state: AgentState) -> dict:
         # SAME generation path/contract, then re-grade. Keep the original unless
         # the refine clears the bar. The best-effort catch below keeps the
         # original answer if the refine raises, so it degrades safely rather
-        # than failing the request. ---
+        # than failing the request.
+        #
+        # LIMITATION (documented, not silently accepted): this is a deliberate
+        # re-generation, NOT a stricter/critique-driven prompt — the grader's
+        # ``unsupported_claims`` are surfaced to the caller but are not fed back
+        # into the prompt, so the refine has no signal targeting the specific
+        # groundedness failure. Its only lever is sampling variance, so we set an
+        # explicit non-zero ``_REFINE_TEMPERATURE`` (vs. the original draft's
+        # API-default sample) so a genuinely different sample is at least
+        # possible; without it the re-roll could draw an effectively identical
+        # answer and waste the pass. A claim-targeted critique prompt is a
+        # deliberately deferred follow-up. ---
         refined_raw = await generate_openai_response(
             query=query,
             knowledge_source=_knowledge_source(chunks),
             is_greeting=False,
             is_follow_up=False,
             azure=azure,
+            temperature=_REFINE_TEMPERATURE,
         )
         refined_answer, refined_filenames = await extract_answer_and_filenames_from_text(refined_raw)
 

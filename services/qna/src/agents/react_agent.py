@@ -261,6 +261,10 @@ async def react_agent(state: AgentState) -> dict:
             # (NOT a bare gather over sync calls — each search is offloaded by
             # the search/embedding services, and the semaphore bounds how many
             # run at once). ---
+            # `return_exceptions=True`: a single flaky sub-query search (transient
+            # embedding/search SDK error) must degrade THAT lookup only, not abort
+            # the whole multi-hop loop and discard every chunk gathered so far. We
+            # merge the successful batches and skip (count) the failed ones.
             results = await asyncio.gather(
                 *(
                     _search_one(
@@ -271,11 +275,25 @@ async def react_agent(state: AgentState) -> dict:
                         semaphore=semaphore,
                     )
                     for sq in sub_queries
-                )
+                ),
+                return_exceptions=True,
             )
             added = 0
+            failed = 0
             for batch in results:
+                if isinstance(batch, BaseException):
+                    failed += 1
+                    continue
                 added += _merge_chunks(chunks, batch, seen_ids)
+            if failed:
+                # Count only — never the sub-query text or the exception detail.
+                logger.warning(
+                    "[%s] react: %d/%d sub-query searches failed this iteration; "
+                    "continuing with the successful batches",
+                    request_id,
+                    failed,
+                    len(sub_queries),
+                )
 
             reasoning_trace.append(
                 {
@@ -283,7 +301,7 @@ async def react_agent(state: AgentState) -> dict:
                     "thought": thought,
                     "action": "search",
                     # Log COUNTS, never the raw sub-query text or chunk content.
-                    "observation": f"{len(sub_queries)} sub-queries; {added} new chunks",
+                    "observation": (f"{len(sub_queries)} sub-queries; {added} new chunks; {failed} failed"),
                 }
             )
 

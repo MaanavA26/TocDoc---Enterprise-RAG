@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import re
 import threading
 import time
@@ -20,7 +21,25 @@ from src.llm.prompts import (
 # ---------------------------------------------------------------------------
 # Executors / local config
 # ---------------------------------------------------------------------------
+# Short-call executor: every BOUNDED, single-round-trip blocking LLM call goes
+# here — `_generate_response_sync`, `_rephrase_sync`, `classify_route`, and the
+# map/reduce helpers. These were sized at 2 on the assumption of short hold
+# times, which is correct for them.
 openai_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="openai")
+
+# Stream executor: a SSE stream worker (`_drain_stream_sync`) iterates the
+# upstream `stream=True` response to completion, so it holds a thread for the
+# FULL lifetime of the stream — an UNBOUNDED hold time, unlike every short-call
+# user above. Sharing the 2-worker pool would let a couple of long-lived streams
+# starve rephrase/classify/non-streaming calls (head-of-line blocking). So
+# streams get their OWN executor, sized to the intended concurrent-stream count.
+# It is aligned with the request concurrency gate (QNA_MAX_CONCURRENCY, default
+# 16 — see app.py): up to that many /qna/stream requests can be admitted, so the
+# stream pool must be able to back that many concurrent streams without starving
+# the short-call pool. Sized via QNA_STREAM_MAX_WORKERS (default 16) so it can be
+# tuned without code changes; the short-call pool stays at 2.
+_STREAM_MAX_WORKERS = max(1, int(os.getenv("QNA_STREAM_MAX_WORKERS", "16")))
+stream_executor = ThreadPoolExecutor(max_workers=_STREAM_MAX_WORKERS, thread_name_prefix="openai-stream")
 localconfig = LocalConfig()
 
 
@@ -30,6 +49,7 @@ async def generate_openai_response(
     is_greeting: bool,
     is_follow_up: bool,
     azure,
+    temperature: float | None = None,
 ) -> str:
     """
     Generate an OpenAI response using a grounded prompt.
@@ -43,6 +63,11 @@ async def generate_openai_response(
         is_greeting: Whether the turn was detected as a greeting.
         is_follow_up: Whether the turn was detected as a follow-up.
         azure: Holder with `openai_client` (AzureOpenAI).
+        temperature: Optional sampling temperature. When ``None`` (the default)
+            NO ``temperature`` kwarg is passed to the API, preserving the
+            API-default path byte-for-byte for every existing caller. Only the
+            verifier refine pass sets an explicit non-zero value, so a re-roll
+            can actually draw a different sample (see verifier.py).
 
     Returns:
         The model-composed answer as a string.
@@ -68,6 +93,7 @@ async def generate_openai_response(
             is_greeting,
             is_follow_up,
             azure,
+            temperature,
         )
 
         if isawaitable(ans):
@@ -91,6 +117,7 @@ def _generate_response_sync(
     is_greeting: bool,
     is_follow_up: bool,
     azure,
+    temperature: float | None = None,
 ) -> str:
     """
     Synchronous helper that composes the grounded prompt and calls the chat API.
@@ -108,6 +135,12 @@ def _generate_response_sync(
     deployment_name = localconfig.AZURE_LLM_MODEL
     logger.debug(f"Using deployment: {deployment_name}")
 
+    # Only pass `temperature` when the caller set it explicitly, so the default
+    # (None) path is byte-identical to the prior API-default behaviour.
+    kwargs: dict = {}
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+
     response = azure.openai_client.chat.completions.create(
         messages=[
             {
@@ -121,6 +154,7 @@ def _generate_response_sync(
             }
         ],
         model=localconfig.AZURE_LLM_MODEL,
+        **kwargs,
     )
 
     if isawaitable(response):
@@ -137,8 +171,11 @@ def _generate_response_sync(
 # answer token-by-token instead of returning the whole string. The Azure
 # OpenAI client is SYNCHRONOUS, and its `stream=True` iterator blocks on each
 # network read. Iterating it directly on the event loop would stall every other
-# coroutine, so the blocking iteration runs in the shared `openai_executor`
-# thread and each token is handed back to the loop via a bounded `asyncio.Queue`.
+# coroutine, so the blocking iteration runs in the dedicated `stream_executor`
+# thread (sized to the concurrent-stream count, separate from the short-call
+# `openai_executor` so an unbounded-hold stream worker cannot starve the bounded
+# rephrase/classify/non-streaming calls) and each token is handed back to the
+# loop via a bounded `asyncio.Queue`.
 # The queue is NOT thread-safe, so the worker thread enqueues by scheduling a
 # real coroutine `queue.put` on the loop via `asyncio.run_coroutine_threadsafe`
 # and BLOCKING on its result — that gives genuine backpressure (a slow client
@@ -272,10 +309,13 @@ async def stream_openai_response(
             if not stop.is_set():
                 _put(_STREAM_DONE)
 
-    # Submit the blocking work to the shared executor; do NOT await the future
+    # Submit the blocking work to the DEDICATED stream executor (not the
+    # short-call `openai_executor`): this worker holds its thread for the whole
+    # stream, so a separate, stream-sized pool keeps long-lived streams from
+    # starving rephrase/classify/non-streaming calls. Do NOT await the future
     # here — that would block until the whole stream completes. We drain the
     # queue instead and consult the future only for sentinel/error handling.
-    future = loop.run_in_executor(openai_executor, _drain_stream_sync)
+    future = loop.run_in_executor(stream_executor, _drain_stream_sync)
 
     try:
         while True:
