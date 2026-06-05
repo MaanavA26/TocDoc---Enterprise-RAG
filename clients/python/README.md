@@ -1,6 +1,8 @@
 # tocdoc-sdk
 
-A typed, dependency-light Python client for the TocDoc HTTP APIs.
+A typed, dependency-light Python client for the TocDoc HTTP APIs — sync and
+async QnA, token streaming, an admin/connector control-plane, a `tocdoc` CLI,
+and an optional LangChain retriever.
 
 It mirrors the services' request/response/error contracts with Pydantic v2
 models and wraps the endpoints behind small, retrying `httpx` clients. The
@@ -31,8 +33,14 @@ pip install -e clients/python
 pip install "tocdoc-sdk[langchain]"
 ```
 
-Requires Python 3.10+. The core install pulls in only `httpx` and `pydantic`;
-`langchain-core` (1.x) is installed only by the `[langchain]` extra.
+Requires Python 3.10+ (tested on 3.10–3.12). The core install pulls in only
+`httpx` and `pydantic`. Two optional extras layer on top without changing that
+core footprint:
+
+- **`tocdoc-sdk[langchain]`** — installs `langchain-core` (1.x) for the
+  `tocdoc_sdk.langchain` retrievers.
+- **`tocdoc-sdk[dev]`** — installs the test toolchain (`pytest`) for local
+  development.
 
 ## Quickstart
 

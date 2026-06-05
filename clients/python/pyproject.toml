@@ -12,9 +12,43 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tocdoc-sdk"
 version = "0.1.0"
-description = "Typed Python client for the TocDoc QnA HTTP API."
+description = "Typed, dependency-light Python client for the TocDoc QnA and admin HTTP APIs."
 readme = "README.md"
 requires-python = ">=3.10"
+# SPDX expression for the Business Source License 1.1 (PEP 639); the full text
+# ships alongside the package via `license-files`.
+license = "BUSL-1.1"
+license-files = ["LICENSE"]
+authors = [
+    { name = "TocDoc" },
+]
+keywords = [
+    "tocdoc",
+    "rag",
+    "retrieval-augmented-generation",
+    "qna",
+    "llm",
+    "api-client",
+    "sdk",
+    "httpx",
+    "pydantic",
+    "langchain",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
 # Exact pins mirror the versions the services already run on
 # (services/qna/requirements.txt) so the SDK deserializes the live contract
 # against the same pydantic/httpx behavior.
@@ -22,6 +56,11 @@ dependencies = [
     "httpx==0.28.1",
     "pydantic==2.13.4",
 ]
+
+[project.urls]
+Homepage = "https://github.com/MaanavA26/TocDoc---Enterprise-RAG"
+Repository = "https://github.com/MaanavA26/TocDoc---Enterprise-RAG"
+Issues = "https://github.com/MaanavA26/TocDoc---Enterprise-RAG/issues"
 
 [project.optional-dependencies]
 dev = [
@@ -42,3 +81,8 @@ tocdoc = "tocdoc_sdk.cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["tocdoc_sdk*"]
+
+# Ship the PEP 561 `py.typed` marker so type checkers (mypy, pyright) treat the
+# installed package as typed. setuptools does not package it automatically.
+[tool.setuptools.package-data]
+tocdoc_sdk = ["py.typed"]
