@@ -28,6 +28,11 @@ dev = [
     "pytest>=8",
 ]
 
+# Console entry point: setuptools wraps this as `sys.exit(main())`, so the
+# `main(argv=None)` return value becomes the process exit code.
+[project.scripts]
+tocdoc = "tocdoc_sdk.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["tocdoc_sdk*"]
