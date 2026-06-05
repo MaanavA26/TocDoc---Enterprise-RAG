@@ -1,0 +1,101 @@
+{{- /*
+NetworkPolicy per enabled service (toggle via networkPolicy.enabled, default off).
+
+Built-in API (networking.k8s.io/v1) — always renders when enabled; no CRD risk.
+Default off because it only takes effect on clusters with a CNI that enforces
+NetworkPolicy (Azure CNI / Calico). Scoped to THIS chart's pods (matched by the
+per-component selector) so it never clobbers co-tenant workloads in the namespace.
+
+Shape: default-deny for the selected pods, then explicit allows:
+  - Ingress: from pods carrying networkPolicy.allowFromLabels (e.g. an ingress
+    controller), on the service's container port. Empty list keeps ingress fully
+    denied (in-cluster Service traffic from matching sources only).
+  - Egress: to networkPolicy.egressPorts. Defaults include 53 (DNS — required or
+    pods cannot resolve Azure OpenAI / Search / Key Vault) and 443 (HTTPS to
+    those Azure services). Restricting egress without 53 would break DNS, so the
+    DNS rule is emitted whenever any UDP/TCP 53 port is listed.
+*/ -}}
+{{- $root := . -}}
+{{- $fullname := include "tocdoc.fullname" . -}}
+{{- if .Values.networkPolicy.enabled }}
+{{- range $svcName, $svc := .Values.services }}
+{{- if $svc.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-{{ $svcName }}
+  labels:
+    {{- include "tocdoc.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $svcName }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "tocdoc.name" $root }}
+      app.kubernetes.io/instance: {{ $root.Release.Name }}
+      app.kubernetes.io/component: {{ $svcName }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    {{- /*
+    Explicit allow sources; empty -> ingress stays denied. Each entry is a map of
+    `podLabels` (matchLabels for the source pods) and/or `namespaceLabels`
+    (matchLabels for the source namespace). A bare podSelector matches only the
+    SAME namespace, so cross-namespace sources (Prometheus, an ingress controller
+    in its own namespace) MUST set namespaceLabels or they are silently denied.
+    Back-compat: a plain matchLabels map (no podLabels/namespaceLabels key) is
+    treated as same-namespace podLabels.
+    */}}
+    {{- with $root.Values.networkPolicy.allowFromLabels }}
+    - from:
+        {{- range $sel := . }}
+        {{- $podLabels := $sel }}
+        {{- $nsLabels := dict }}
+        {{- if or (hasKey $sel "podLabels") (hasKey $sel "namespaceLabels") }}
+        {{- $podLabels = ($sel.podLabels | default dict) }}
+        {{- $nsLabels = ($sel.namespaceLabels | default dict) }}
+        {{- end }}
+        - {{ if $podLabels }}podSelector:
+            matchLabels:
+              {{- toYaml $podLabels | nindent 14 }}{{ else }}podSelector: {}{{ end }}
+          {{- if $nsLabels }}
+          namespaceSelector:
+            matchLabels:
+              {{- toYaml $nsLabels | nindent 14 }}
+          {{- end }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ $svc.containerPort }}
+    {{- end }}
+    {{- with $root.Values.networkPolicy.extraIngress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  egress:
+    {{- $egressPorts := $root.Values.networkPolicy.egressPorts }}
+    {{- $hasDNS := false }}
+    {{- range $p := $egressPorts }}{{- if eq (int $p) 53 }}{{- $hasDNS = true }}{{- end }}{{- end }}
+    {{- if $hasDNS }}
+    {{- /* DNS to kube-dns: both UDP and TCP on 53, or pods cannot resolve names. */}}
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- end }}
+    {{- $nonDNS := list }}
+    {{- range $p := $egressPorts }}{{- if ne (int $p) 53 }}{{- $nonDNS = append $nonDNS $p }}{{- end }}{{- end }}
+    {{- if $nonDNS }}
+    - ports:
+        {{- range $p := $nonDNS }}
+        - protocol: TCP
+          port: {{ int $p }}
+        {{- end }}
+    {{- end }}
+    {{- with $root.Values.networkPolicy.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

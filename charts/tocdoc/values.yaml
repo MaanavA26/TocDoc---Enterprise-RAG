@@ -96,6 +96,88 @@ keyVaultCSI:
       secretKey: "AZURE_CLIENT_SECRET"
 
 # ─────────────────────────────────────────────────────────────────────────────
+# NetworkPolicy (default off)
+#
+# Renders a NetworkPolicy per enabled service scoped to THIS chart's pods (never
+# the whole namespace). Shape: default-deny ingress + explicit allows, and egress
+# restricted to egressPorts. Only takes effect on clusters whose CNI enforces
+# NetworkPolicy (Azure CNI / Calico). Off by default so a cluster without an
+# enforcing CNI — or one where you manage policy centrally — is unaffected.
+#
+# IMPORTANT: egressPorts MUST include 53 (DNS) or pods cannot resolve the Azure
+# OpenAI / Search / Key Vault hostnames. 443 covers HTTPS to those services.
+# ─────────────────────────────────────────────────────────────────────────────
+networkPolicy:
+  enabled: false
+  # Sources allowed to reach the services on their container port. Each entry is
+  # either a plain matchLabels map (same-namespace pods) OR a map with
+  # `podLabels` and/or `namespaceLabels` to allow cross-namespace sources.
+  # A source in another namespace (Prometheus, an ingress controller in its own
+  # namespace) MUST set namespaceLabels or it is silently denied.
+  # Empty = no extra ingress sources allowed (ingress effectively denied).
+  allowFromLabels: []
+  #  - podLabels:
+  #      app.kubernetes.io/name: ingress-nginx
+  #    namespaceLabels:
+  #      kubernetes.io/metadata.name: ingress-nginx
+  # Egress destination ports. 53 emits a UDP+TCP DNS allow rule; everything else
+  # is emitted as a TCP allow. Restricting egress without 53 breaks DNS.
+  egressPorts:
+    - 53
+    - 443
+  # Raw extra ingress/egress rules appended verbatim (advanced; full NetworkPolicy
+  # rule objects). Use for CIDR allowlists, namespace selectors, etc.
+  extraIngress: []
+  extraEgress: []
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Metrics / Prometheus (default off)
+#
+# Two mutually-usable options for scraping app metrics:
+#   - serviceMonitor: a Prometheus Operator ServiceMonitor CRD (monitoring.coreos
+#     .com/v1). Requires the operator + CRD installed on the cluster.
+#   - podAnnotations: prometheus.io/* scrape annotations on the pods, for plain
+#     Prometheus (no operator).
+# Both default OFF. THE APPLICATION MUST EXPOSE PROMETHEUS METRICS on `path`
+# (default /metrics) on its HTTP container port for either to collect anything.
+# ─────────────────────────────────────────────────────────────────────────────
+metrics:
+  # HTTP path the app serves Prometheus metrics on. Shared by both options below.
+  path: /metrics
+  serviceMonitor:
+    # Off by default — enabling without the Prometheus Operator CRD fails at apply.
+    enabled: false
+    # Scrape cadence and per-scrape timeout.
+    interval: "30s"
+    scrapeTimeout: "10s"
+    # Extra labels (e.g. release: kube-prometheus-stack) so the operator's
+    # serviceMonitorSelector picks this up.
+    labels: {}
+  podAnnotations:
+    # Emit prometheus.io/scrape, /path, /port annotations on each pod.
+    enabled: false
+
+# ─────────────────────────────────────────────────────────────────────────────
+# High-availability scheduling (default off)
+#
+# podAntiAffinity: spread replicas of a service across nodes (soft/preferred).
+# topologySpread:  even spread across a topology domain (zone/host).
+# Both are skipped when a service sets its own `affinity` /
+# `topologySpreadConstraints` (those take precedence). Off by default so a
+# single-node / dev cluster still schedules pods.
+# ─────────────────────────────────────────────────────────────────────────────
+podAntiAffinity:
+  enabled: false
+  topologyKey: kubernetes.io/hostname
+
+topologySpread:
+  enabled: false
+  maxSkew: 1
+  topologyKey: topology.kubernetes.io/zone
+  # DoNotSchedule (hard) | ScheduleAnyway (soft).
+  whenUnsatisfiable: ScheduleAnyway
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Per-service configuration
 #
 # Each service shares the global config above and adds its own plain env vars,
@@ -150,6 +232,11 @@ services:
       maxReplicas: 3
       targetCPUUtilizationPercentage: 70
       targetMemoryUtilizationPercentage: 80
+      # Optional extra HPA metrics (custom/external/pods), appended verbatim under
+      # spec.metrics. Example: a Pods metric for requests-per-second.
+      extraMetrics: []
+      # Optional spec.behavior block (scale-up/down stabilization & policies).
+      behavior: {}
     podDisruptionBudget:
       enabled: true
       minAvailable: 1
@@ -164,7 +251,10 @@ services:
     podAnnotations: {}
     nodeSelector: {}
     tolerations: []
+    # Explicit affinity wins over the global podAntiAffinity toggle when set.
     affinity: {}
+    # Explicit constraints win over the global topologySpread toggle when set.
+    topologySpreadConstraints: []
 
   qna:
     enabled: true
@@ -213,6 +303,11 @@ services:
       maxReplicas: 3
       targetCPUUtilizationPercentage: 70
       targetMemoryUtilizationPercentage: 80
+      # Optional extra HPA metrics (custom/external/pods), appended verbatim under
+      # spec.metrics. Example: a Pods metric for requests-per-second.
+      extraMetrics: []
+      # Optional spec.behavior block (scale-up/down stabilization & policies).
+      behavior: {}
     podDisruptionBudget:
       enabled: true
       minAvailable: 1
@@ -227,4 +322,7 @@ services:
     podAnnotations: {}
     nodeSelector: {}
     tolerations: []
+    # Explicit affinity wins over the global podAntiAffinity toggle when set.
     affinity: {}
+    # Explicit constraints win over the global topologySpread toggle when set.
+    topologySpreadConstraints: []

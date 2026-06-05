@@ -17,7 +17,11 @@ paths stay interchangeable.
 | Image (default) | `tocdoc/ingestion` | `tocdoc/qna` |
 
 Each enabled service gets a Deployment, Service (ClusterIP), optional Ingress,
-HorizontalPodAutoscaler, and PodDisruptionBudget.
+HorizontalPodAutoscaler, and PodDisruptionBudget. Optional production-hardening
+resources — NetworkPolicy, a Prometheus ServiceMonitor (or scrape annotations),
+pod anti-affinity and topology spread — are all off by default and toggled in
+`values.yaml`. A ready-to-edit [`values-production.yaml`](values-production.yaml)
+turns the recommended set on.
 
 ## Requirements
 
@@ -161,11 +165,60 @@ helm upgrade --install tocdoc charts/tocdoc \
 | `autoscaling.minReplicas` | `1` | HPA floor (clamped to ≥ 1 — stock HPA cannot scale to zero; the ACA path's scale-to-zero needs KEDA). |
 | `autoscaling.maxReplicas` | `3` | HPA ceiling (matches the Bicep `maxReplicas`). |
 | `autoscaling.target{CPU,Memory}UtilizationPercentage` | `70` / `80` | HPA targets. |
+| `autoscaling.extraMetrics` | `[]` | Extra HPA metrics (custom/external/pods) appended under `spec.metrics`. |
+| `autoscaling.behavior` | `{}` | Optional HPA `spec.behavior` (scale-up/down stabilization & policies). |
 | `podDisruptionBudget.enabled` | `true` | Render a PDB. |
 | `podDisruptionBudget.minAvailable` | `1` | PDB floor. |
 | `ingress.enabled` | `false` | Render an Ingress for this service. |
 | `ingress.className` / `annotations` / `host` / `path` / `pathType` / `tls` | see `values.yaml` | Ingress routing. |
 | `podAnnotations` / `nodeSelector` / `tolerations` / `affinity` | empty | Standard pod scheduling knobs. |
+| `topologySpreadConstraints` | `[]` | Explicit spread constraints; overrides the global `topologySpread` toggle for this service. |
+
+### Production hardening (all optional, default off)
+
+These chart-wide toggles add production resources. Every one defaults to **off**
+so a default `helm template` / install on a plain or single-node cluster still
+renders and schedules. Enable them in `values.yaml` or via
+[`values-production.yaml`](values-production.yaml).
+
+#### NetworkPolicy (`networkPolicy.*`)
+
+Renders a `NetworkPolicy` per enabled service, **scoped to this chart's own pods**
+(never the whole namespace, so co-tenant workloads are untouched). Default-deny
+ingress with explicit allows, plus egress limited to `egressPorts`. Only enforced
+on clusters whose CNI supports NetworkPolicy (Azure CNI / Calico).
+
+| Key | Default | Description |
+|---|---|---|
+| `networkPolicy.enabled` | `false` | Render NetworkPolicies. |
+| `networkPolicy.allowFromLabels` | `[]` | Sources allowed to reach the services on their container port. Each entry is either a plain `matchLabels` map (same-namespace pods) or a map with `podLabels` and/or `namespaceLabels`. **Cross-namespace sources (Prometheus, an ingress controller in its own namespace) must set `namespaceLabels`** or they are silently denied. Empty = no extra ingress sources. |
+| `networkPolicy.egressPorts` | `[53, 443]` | Allowed egress ports. **Must include `53`** or DNS breaks (pods can't resolve Azure OpenAI / Search / Key Vault); `53` emits a UDP+TCP rule, others emit TCP. `443` covers HTTPS to Azure. |
+| `networkPolicy.extraIngress` / `extraEgress` | `[]` | Raw additional rule objects appended verbatim (CIDR allowlists, namespace selectors, etc.). |
+
+#### Metrics / Prometheus (`metrics.*`)
+
+> **The application must expose Prometheus metrics on `metrics.path` (default
+> `/metrics`) on its HTTP container port** for either option below to collect
+> anything. The chart only wires up scraping; it does not add a metrics endpoint.
+
+| Key | Default | Description |
+|---|---|---|
+| `metrics.path` | `/metrics` | HTTP path the app serves Prometheus metrics on. |
+| `metrics.serviceMonitor.enabled` | `false` | Render a Prometheus Operator `ServiceMonitor` (CRD `monitoring.coreos.com/v1`). Requires the operator + CRD on the cluster. |
+| `metrics.serviceMonitor.interval` / `scrapeTimeout` | `30s` / `10s` | Scrape cadence and per-scrape timeout. |
+| `metrics.serviceMonitor.labels` | `{}` | Extra labels so the operator's `serviceMonitorSelector` picks it up (e.g. `release: kube-prometheus-stack`). |
+| `metrics.podAnnotations.enabled` | `false` | Alternative for plain Prometheus (no operator): emit `prometheus.io/scrape`, `/path`, `/port` annotations on each pod. |
+
+#### High-availability scheduling (`podAntiAffinity.*`, `topologySpread.*`)
+
+| Key | Default | Description |
+|---|---|---|
+| `podAntiAffinity.enabled` | `false` | Generate a soft (preferred) pod anti-affinity spreading a service's replicas across nodes. Skipped for any service that sets its own `affinity` (explicit wins; the `affinity` key is emitted at most once). |
+| `podAntiAffinity.topologyKey` | `kubernetes.io/hostname` | Topology key for the anti-affinity term. |
+| `topologySpread.enabled` | `false` | Generate `topologySpreadConstraints` spreading replicas across a topology domain. Skipped for any service that sets its own `topologySpreadConstraints`. |
+| `topologySpread.maxSkew` | `1` | Max skew between domains. |
+| `topologySpread.topologyKey` | `topology.kubernetes.io/zone` | Domain to spread across. |
+| `topologySpread.whenUnsatisfiable` | `ScheduleAnyway` | `DoNotSchedule` (hard) or `ScheduleAnyway` (soft). |
 
 ## Differences from the Bicep / ACA path
 
@@ -182,11 +235,28 @@ helm upgrade --install tocdoc charts/tocdoc \
 ## Validation
 
 ```bash
-helm lint charts/tocdoc
+helm lint --strict charts/tocdoc
 helm template tocdoc charts/tocdoc            # default render
+
+# All toggles on
 helm template tocdoc charts/tocdoc \
   --set secret.create=true \
   --set keyVaultCSI.enabled=true \
   --set services.ingestion.ingress.enabled=true \
-  --set services.qna.ingress.enabled=true     # all toggles on
+  --set services.qna.ingress.enabled=true \
+  --set networkPolicy.enabled=true \
+  --set metrics.serviceMonitor.enabled=true \
+  --set metrics.podAnnotations.enabled=true \
+  --set podAntiAffinity.enabled=true \
+  --set topologySpread.enabled=true
+
+# Example production overrides
+helm template tocdoc charts/tocdoc -f charts/tocdoc/values-production.yaml
+```
+
+Each render can be piped through a YAML parser to confirm valid output, e.g.:
+
+```bash
+helm template tocdoc charts/tocdoc \
+  | python3 -c "import sys,yaml; list(yaml.safe_load_all(sys.stdin))"
 ```

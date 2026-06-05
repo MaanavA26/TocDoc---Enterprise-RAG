@@ -1,0 +1,132 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Example production overrides for the TocDoc chart.
+#
+# Layer this on top of the defaults:
+#   helm template tocdoc charts/tocdoc -f charts/tocdoc/values-production.yaml
+#   helm upgrade --install tocdoc charts/tocdoc -f charts/tocdoc/values-production.yaml \
+#     --set global.imageRegistry=myregistry.azurecr.io
+#
+# It enables the production-hardening toggles. NO SECRETS LIVE HERE — secrets come
+# from Key Vault via the CSI driver (keyVaultCSI.* below) or a pre-existing Secret.
+# Replace every <placeholder> with your real values.
+# ─────────────────────────────────────────────────────────────────────────────
+
+global:
+  environment: prod
+  imageRegistry: "<your-registry>.azurecr.io"
+  config:
+    AZURE_OPENAI_ENDPOINT: "https://<your-openai-resource>.openai.azure.com/"
+    AZURE_SEARCH_ENDPOINT: "https://<your-search-resource>.search.windows.net"
+    LOG_LEVEL: "INFO"
+
+# Secrets from Azure Key Vault via the Secrets Store CSI driver (recommended).
+secret:
+  create: false
+  externalSecretName: "tocdoc-secrets"
+
+keyVaultCSI:
+  enabled: true
+  keyvaultName: "<your-keyvault-name>"
+  tenantId: "<your-azure-tenant-id>"
+  userAssignedIdentityID: "<your-uami-client-id>"
+  syncedSecretName: "tocdoc-secrets"
+
+# Default-deny network posture: only DNS (53) + HTTPS (443) egress, ingress only
+# from explicitly allowlisted sources. Cross-namespace sources MUST set
+# namespaceLabels or they are silently denied. The examples below allow an
+# ingress controller and Prometheus, each in its own namespace — REPLACE the
+# namespace/label values with your cluster's real ones. (The standard
+# `kubernetes.io/metadata.name` namespace label is set automatically by k8s.)
+networkPolicy:
+  enabled: true
+  allowFromLabels:
+    # Ingress controller (adjust to your controller's pod labels + namespace).
+    - podLabels:
+        app.kubernetes.io/name: ingress-nginx
+      namespaceLabels:
+        kubernetes.io/metadata.name: ingress-nginx
+    # Prometheus (so the ServiceMonitor scrape below can reach /metrics).
+    - podLabels:
+        app.kubernetes.io/name: prometheus
+      namespaceLabels:
+        kubernetes.io/metadata.name: monitoring
+  egressPorts:
+    - 53
+    - 443
+
+# Prometheus Operator scraping of the app's /metrics endpoint. Requires the
+# Prometheus Operator + ServiceMonitor CRD on the cluster, and the app to expose
+# Prometheus metrics on /metrics. If you do NOT run the operator, set
+# serviceMonitor.enabled=false and podAnnotations.enabled=true instead.
+metrics:
+  path: /metrics
+  serviceMonitor:
+    enabled: true
+    interval: "30s"
+    scrapeTimeout: "10s"
+    labels:
+      release: kube-prometheus-stack
+  podAnnotations:
+    enabled: false
+
+# Spread replicas across nodes and zones for resilience.
+podAntiAffinity:
+  enabled: true
+  topologyKey: kubernetes.io/hostname
+
+topologySpread:
+  enabled: true
+  maxSkew: 1
+  topologyKey: topology.kubernetes.io/zone
+  whenUnsatisfiable: ScheduleAnyway
+
+services:
+  ingestion:
+    replicaCount: 2
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "1Gi"
+      limits:
+        cpu: "1"
+        memory: "2Gi"
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 6
+      targetCPUUtilizationPercentage: 70
+      targetMemoryUtilizationPercentage: 80
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 300
+    podDisruptionBudget:
+      enabled: true
+      minAvailable: 1
+    config:
+      DOC_INTELLIGENCE_ENDPOINT: "https://<your-doc-intelligence-resource>.cognitiveservices.azure.com/"
+
+  qna:
+    replicaCount: 2
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "1Gi"
+      limits:
+        cpu: "1"
+        memory: "2Gi"
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 8
+      targetCPUUtilizationPercentage: 70
+      targetMemoryUtilizationPercentage: 80
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 300
+    podDisruptionBudget:
+      enabled: true
+      minAvailable: 1
+    config:
+      AZURE_KEY_VAULT: "<your-keyvault-name>"
+      AZURE_TENANT_ID: "<your-azure-tenant-id>"
+      AUDIENCE_ID: "<your-app-registration-client-id-or-audience>"

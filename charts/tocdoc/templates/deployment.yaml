@@ -30,7 +30,19 @@ spec:
       labels:
         {{- include "tocdoc.labels" $root | nindent 8 }}
         app.kubernetes.io/component: {{ $svcName }}
+      {{- /*
+      Pod annotations: optional Prometheus scrape annotations (for clusters
+      without the Prometheus Operator / ServiceMonitor CRD) merged with any
+      user-supplied podAnnotations. User values win on key conflicts.
+      */}}
+      {{- $annotations := dict }}
+      {{- if $root.Values.metrics.podAnnotations.enabled }}
+      {{- $annotations = merge $annotations (dict "prometheus.io/scrape" "true" "prometheus.io/path" $root.Values.metrics.path "prometheus.io/port" (toString $svc.containerPort)) }}
+      {{- end }}
       {{- with $svc.podAnnotations }}
+      {{- $annotations = merge (deepCopy .) $annotations }}
+      {{- end }}
+      {{- with $annotations }}
       annotations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
@@ -126,9 +138,42 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with $svc.affinity }}
+      {{- /*
+      Affinity precedence: an explicit $svc.affinity always wins. Otherwise, if
+      podAntiAffinity.enabled, generate a soft (preferred) anti-affinity that
+      spreads replicas of THIS service across nodes. Either way the `affinity`
+      key is emitted at most once (a duplicate key would break YAML parsing).
+      */}}
+      {{- if $svc.affinity }}
       affinity:
-        {{- toYaml . | nindent 8 }}
+        {{- toYaml $svc.affinity | nindent 8 }}
+      {{- else if $root.Values.podAntiAffinity.enabled }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: {{ $root.Values.podAntiAffinity.topologyKey | quote }}
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: {{ include "tocdoc.name" $root }}
+                    app.kubernetes.io/instance: {{ $root.Release.Name }}
+                    app.kubernetes.io/component: {{ $svcName }}
+      {{- end }}
+      {{- /* topologySpreadConstraints: separate field, no conflict with affinity. */}}
+      {{- if $svc.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml $svc.topologySpreadConstraints | nindent 8 }}
+      {{- else if $root.Values.topologySpread.enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ $root.Values.topologySpread.maxSkew }}
+          topologyKey: {{ $root.Values.topologySpread.topologyKey | quote }}
+          whenUnsatisfiable: {{ $root.Values.topologySpread.whenUnsatisfiable | quote }}
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "tocdoc.name" $root }}
+              app.kubernetes.io/instance: {{ $root.Release.Name }}
+              app.kubernetes.io/component: {{ $svcName }}
       {{- end }}
 {{- end }}
 {{- end }}

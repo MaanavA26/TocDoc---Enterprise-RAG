@@ -39,5 +39,14 @@ spec:
           type: Utilization
           averageUtilization: {{ $svc.autoscaling.targetMemoryUtilizationPercentage }}
     {{- end }}
+    {{- /* Optional custom/external metrics passthrough (e.g. requests-per-second). */}}
+    {{- with $svc.autoscaling.extraMetrics }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- /* Optional scale-up/scale-down behavior tuning (stabilization windows, policies). */}}
+  {{- with $svc.autoscaling.behavior }}
+  behavior:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 {{- end }}
 {{- end }}
