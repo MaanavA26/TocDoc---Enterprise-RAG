@@ -16,6 +16,7 @@ Covers the streaming contract added alongside the SDK's ``stream_ask`` client:
 No live Azure: the OpenAI streaming client is a fake yielding chunk objects.
 """
 
+import asyncio
 import json
 import os
 
@@ -534,3 +535,110 @@ async def test_non_streaming_qna_still_works():
     # Byte-identical top-level shape preserved.
     assert set(body.keys()) == {"answer", "citation"}
     assert body["citation"]["fileA.md"] == "/docs/fileA.md"
+
+
+# ===========================================================================
+# HIGH fix 1 — SSE backpressure: a full queue must NOT drop tokens, and the
+# terminal sentinel must survive (no sentinel-loss deadlock). With the queue
+# shrunk to maxsize=1 a slow consumer forces the worker to PARK on `put`; the
+# old fire-and-forget `put_nowait` dropped tokens here (and could drop the
+# sentinel, hanging forever). Every consumption is `wait_for`-bounded so a
+# regression surfaces as a fast test failure, not a suite-wide hang.
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_stream_full_queue_does_not_drop_tokens_or_sentinel(monkeypatch):
+    from src.services import openai_service as oai
+
+    # Shrink the bridge queue so a slow consumer guarantees the worker parks on
+    # a blocking put (the backpressure path) for nearly every token.
+    monkeypatch.setattr(oai, "_STREAM_QUEUE_MAXSIZE", 1, raising=True)
+
+    tokens = [f"t{i}" for i in range(50)]
+    azure = FakeAzure(tokens=tokens)
+
+    received = []
+    agen = oai.stream_openai_response("q", [], False, False, azure)
+    try:
+        while True:
+            # wait_for is the assertion for "sentinel survived": if the terminal
+            # sentinel were dropped this get would hang and time out.
+            try:
+                tok = await asyncio.wait_for(agen.__anext__(), timeout=5.0)
+            except StopAsyncIteration:
+                break
+            received.append(tok)
+            # Yield control each token so the queue stays full and the worker
+            # is forced to block on put (exercise real backpressure).
+            await asyncio.sleep(0)
+    finally:
+        await agen.aclose()
+
+    # No drops, correct order, and the stream terminated cleanly (sentinel
+    # delivered) rather than hanging.
+    assert received == tokens
+
+
+# ===========================================================================
+# HIGH fix 2 — cooperative cancel: a consumer that abandons the stream
+# (disconnect / generator close) must STOP the worker promptly instead of
+# letting it drain the whole upstream response (executor-slot + denial-of-wallet
+# leak). The fake stream yields effectively unbounded tokens into a shared list;
+# after the consumer reads a couple and closes, that list must STOP growing far
+# below the unbounded ceiling. `future.cancel()` alone could not achieve this.
+# ===========================================================================
+class _UnboundedStreamCompletions:
+    """Streaming completions whose iterator yields tokens forever (until the
+    worker cooperatively stops), recording each produced token so the test can
+    observe whether the worker kept running after the consumer left."""
+
+    def __init__(self, produced, ceiling=100000):
+        self._produced = produced
+        self._ceiling = ceiling
+
+    def create(self, *args, stream=False, **kwargs):
+        produced = self._produced
+        ceiling = self._ceiling
+
+        def _gen():
+            i = 0
+            while i < ceiling:
+                tok = f"tok{i}"
+                produced.append(tok)
+                yield _StreamChunk(tok)
+                i += 1
+
+        return _gen()
+
+
+@pytest.mark.asyncio
+async def test_stream_consumer_cancel_stops_worker(monkeypatch):
+    from src.services import openai_service as oai
+
+    # Small queue so the worker is forced to keep pace with the consumer (it
+    # parks on put once the consumer stops reading) — makes the "stop growing"
+    # signal sharp.
+    monkeypatch.setattr(oai, "_STREAM_QUEUE_MAXSIZE", 4, raising=True)
+
+    produced: list[str] = []
+    azure = FakeAzure(tokens=[])
+    azure.openai_client = _FakeOpenAIClient(_UnboundedStreamCompletions(produced))
+
+    agen = oai.stream_openai_response("q", [], False, False, azure)
+    read = []
+    for _ in range(2):
+        read.append(await asyncio.wait_for(agen.__anext__(), timeout=5.0))
+    # Abandon the stream: this triggers the consumer `finally` (stop event set +
+    # queue drained) which must release and stop the worker.
+    await agen.aclose()
+    assert read == ["tok0", "tok1"]
+
+    # Give the worker a moment, then confirm production has STOPPED (it does not
+    # keep climbing toward the ceiling). Sample twice with a yield in between.
+    await asyncio.sleep(0.2)
+    count_after_close = len(produced)
+    await asyncio.sleep(0.2)
+    assert len(produced) == count_after_close, (
+        "worker kept producing after consumer cancelled — cooperative stop failed"
+    )
+    # And it stopped promptly: nowhere near the unbounded ceiling.
+    assert count_after_close < 1000

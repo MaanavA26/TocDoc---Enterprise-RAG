@@ -266,3 +266,66 @@ async def test_verifier_empty_refine_keeps_original(monkeypatch):
     out = await v.verifier(_state())
     assert out["verified"] is False
     assert "final_answer" not in out
+
+
+# ===========================================================================
+# Refine-scope guard (MED audit finding): the single-shot refine re-grounds
+# over ALL retrieved chunks. On the map_reduce route that is the wide-context
+# corpus slice map_reduce exists to avoid, so the refine is SKIPPED there (keep
+# original, flag unverified) and only runs on the react route (TOP_K-bounded).
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_verifier_skips_refine_on_map_reduce_route(monkeypatch):
+    """A failing grade on the map_reduce route must NOT trigger the over-context
+    single-shot refine; the original answer is kept, flagged unverified."""
+    from src.agents import verifier as v
+
+    monkeypatch.setenv("QNA_AGENT_VERIFY", "true")
+
+    async def fail_grade(azure, *, query, answer, chunks):
+        return {"supported": False, "score": 30, "unsupported_claims": ["claim z"]}
+
+    monkeypatch.setattr(v, "_grade", fail_grade, raising=True)
+
+    refine_calls = {"n": 0}
+
+    async def must_not_refine(**kwargs):
+        refine_calls["n"] += 1
+        raise AssertionError("refine must NOT run on the map_reduce route")
+
+    monkeypatch.setattr(v, "generate_openai_response", must_not_refine, raising=True)
+
+    out = await v.verifier(_state(route="map_reduce"))
+
+    assert refine_calls["n"] == 0  # refine skipped on map_reduce
+    assert out["verified"] is False
+    assert out["unsupported_claims"] == ["claim z"]
+    assert "final_answer" not in out
+    assert "citations" not in out
+
+
+@pytest.mark.asyncio
+async def test_verifier_still_refines_on_react_route(monkeypatch):
+    """Regression guard for the scope fix: the react route (bounded retrieval)
+    still runs exactly one refine pass on a failing grade."""
+    from src.agents import verifier as v
+
+    monkeypatch.setenv("QNA_AGENT_VERIFY", "true")
+
+    async def fail_grade(azure, *, query, answer, chunks):
+        return {"supported": False, "score": 30, "unsupported_claims": ["claim z"]}
+
+    monkeypatch.setattr(v, "_grade", fail_grade, raising=True)
+
+    refine_calls = {"n": 0}
+
+    async def fake_generate(**kwargs):
+        refine_calls["n"] += 1
+        return "still ungrounded\n**Sources:** None"
+
+    monkeypatch.setattr(v, "generate_openai_response", fake_generate, raising=True)
+
+    out = await v.verifier(_state(route="react"))
+
+    assert refine_calls["n"] == 1  # refine DID run on react
+    assert out["verified"] is False

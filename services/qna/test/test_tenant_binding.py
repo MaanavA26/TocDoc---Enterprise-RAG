@@ -388,3 +388,43 @@ class TestRealAppGuardShortCircuits:
             result = asyncio.run(qna_app.custom_rag_qna(payload, req))  # type: ignore[arg-type]
         legacy.assert_awaited_once()
         assert result == {"answer": "x", "citation": {}}
+
+    def test_stream_handler_rejects_before_pipeline(self, monkeypatch):
+        """Audit coverage gap: the SAME binding guard must reject on the
+        streaming route BEFORE generate_answer_stream is ever constructed.
+
+        Mirrors test_real_handler_rejects_before_pipeline for /qna/stream: a
+        non-allowlisted (tid, bot_tag) raises 403 synchronously and the stream
+        pipeline is never invoked (the guard at app.py fires before the stream
+        generator is built)."""
+        monkeypatch.setenv("QNA_ENFORCE_TENANT_BINDING", "true")
+        monkeypatch.setenv("QNA_TENANT_BOT_TAG_MAP", MAP_JSON)
+        import asyncio
+
+        import app as qna_app
+        from src.utils.util import Payload
+
+        payload = Payload(
+            session_id="s1",
+            bot=[{"user_query": "hello", "bot_response": None}],
+            bot_tag="workspace-b",  # not allowed for TID_A
+            fr_tag="read",
+        )
+
+        req = _FakeRequest(tid=TID_A)
+        req.app = MagicMock()
+        req.app.state.azure = MagicMock()
+
+        # If the guard regresses (moves/removed on the stream path) this mock
+        # WOULD be invoked; assert_not_called is the load-bearing check.
+        stream_mock = MagicMock(name="generate_answer_stream")
+        with patch.object(
+            qna_app.src.pipeline.qna_pipeline,
+            "generate_answer_stream",
+            new=stream_mock,
+        ):
+            with pytest.raises(HTTPException) as ei:
+                asyncio.run(qna_app.custom_rag_qna_stream(payload, req))  # type: ignore[arg-type]
+            assert ei.value.status_code == 403
+            assert ei.value.detail["code"] == ApiErrorCode.UNAUTHORIZED
+            stream_mock.assert_not_called()

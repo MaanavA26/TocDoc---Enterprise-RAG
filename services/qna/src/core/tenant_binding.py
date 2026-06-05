@@ -74,8 +74,8 @@ def _load_tenant_bot_tag_map() -> dict[str, list[str]]:
     for a tid are normalised to an empty list (again, fail closed) rather
     than raising.
 
-    This is only ever called on the enforcement-ON path, so a malformed map
-    can never affect the default-OFF behaviour.
+    This is only ever called on the enforcement-ON path, so a malformed map can
+    never affect the explicitly opted-out (enforcement-OFF) behaviour.
     """
     raw = os.getenv("QNA_TENANT_BOT_TAG_MAP")
     if not raw or not raw.strip():

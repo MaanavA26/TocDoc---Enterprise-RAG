@@ -30,6 +30,7 @@ documented trade-off and the reason the feature ships default-OFF.
 
 from __future__ import annotations
 
+import copy
 import threading
 import time
 from collections import OrderedDict
@@ -112,8 +113,10 @@ class InMemoryTTLLRUCache:
             ``time.monotonic`` — monotonic (not wall-clock) so the TTL is immune
             to system clock adjustments.
 
-    On hit the stored payload is returned as a shallow copy so a caller mutating
-    the returned dict cannot corrupt the cached entry.
+    On hit the stored payload is returned as a deep copy (and stored as one on
+    ``set``) so a caller mutating the returned dict — including nested
+    ``citation``/``page_citations`` maps — cannot corrupt the cached entry or
+    contaminate other hits, honouring the :class:`CacheBackend` contract.
     """
 
     def __init__(
@@ -151,8 +154,9 @@ class InMemoryTTLLRUCache:
                 return None
             # Refresh recency on a live hit.
             self._store.move_to_end(key)
-            # Return a copy so the caller can't mutate the cached entry.
-            return dict(payload)
+            # Deep copy so the caller cannot mutate the cached entry through
+            # nested citation/page_citations maps (CacheBackend contract).
+            return copy.deepcopy(payload)
 
     def set(self, key: CacheKey, value: dict[str, Any]) -> None:
         """Store a copy of ``value`` under ``key`` with a fresh TTL.
@@ -162,13 +166,14 @@ class InMemoryTTLLRUCache:
         least-recently-used entry.
         """
         expiry = self._clock() + self._ttl
+        stored = copy.deepcopy(value)
         with self._lock:
             if key in self._store:
                 # Refresh payload + recency for an existing key.
-                self._store[key] = (expiry, dict(value))
+                self._store[key] = (expiry, stored)
                 self._store.move_to_end(key)
                 return
-            self._store[key] = (expiry, dict(value))
+            self._store[key] = (expiry, stored)
             # Evict LRU entries until within capacity (loop guards against a
             # capacity lowered between inserts; normally runs at most once).
             while len(self._store) > self._max:
