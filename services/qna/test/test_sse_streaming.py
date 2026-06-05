@@ -40,6 +40,7 @@ os.environ.setdefault("AUDIENCE_ID", "api://fake-audience-id")
 
 from app import app  # noqa: E402
 from src.config import config as cfg  # noqa: E402
+from src.utils.util import Payload  # noqa: E402
 
 # Minimal SSE parser used as the wire-compat oracle. This is a faithful,
 # self-contained reimplementation of the subset the SDK's `tocdoc_sdk._sse`
@@ -641,4 +642,83 @@ async def test_stream_consumer_cancel_stops_worker(monkeypatch):
         "worker kept producing after consumer cancelled — cooperative stop failed"
     )
     # And it stopped promptly: nowhere near the unbounded ceiling.
+    assert count_after_close < 1000
+
+
+# ===========================================================================
+# Re-audit HIGH — client disconnect on the OUTER SSE body must NOT raise
+# ``RuntimeError: async generator ignored GeneratorExit`` AND must stop the
+# inner worker promptly. The pre-fix `finally: yield _SSE_DONE` re-raises during
+# GeneratorExit teardown, killing the outer generator before the inner stream is
+# closed (the cooperative-stop finally then runs only at GC). The existing
+# `test_stream_consumer_cancel_stops_worker` only aclose()s the INNER
+# `stream_openai_response`, never the outer `event_source`/StreamingResponse
+# body — that blind spot is how the bug slipped through. This test drives the
+# OUTER body to a token then aclose()s it.
+# ===========================================================================
+def _bare_request(payload):
+    """Minimal Starlette Request that carries app+state for the stream handler.
+
+    Tenant binding is disabled by the autouse fixture, so the handler only reads
+    ``request.app.state.azure`` and ``request.state.request_id`` off this scope.
+    """
+    from starlette.requests import Request as StarletteRequest
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": url("/qna/stream"),
+        "headers": [],
+        "query_string": b"",
+        "app": app,
+        "state": {"request_id": "disconnect-test"},
+    }
+
+    async def _receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    return StarletteRequest(scope, _receive)
+
+
+@pytest.mark.asyncio
+async def test_stream_outer_body_disconnect_no_runtime_error_and_stops_worker(monkeypatch):
+    from app import custom_rag_qna_stream
+
+    # Small queue so the worker parks on put once the consumer stops reading,
+    # making the "production stopped" signal sharp.
+    from src.services import openai_service as oai
+
+    monkeypatch.setattr(oai, "_STREAM_QUEUE_MAXSIZE", 4, raising=True)
+
+    produced: list[str] = []
+    azure = FakeAzure(tokens=[])
+    azure.openai_client = _FakeOpenAIClient(_UnboundedStreamCompletions(produced))
+    app.state.azure = azure
+
+    payload = Payload(**_payload())
+    request = _bare_request(payload)
+
+    response = await custom_rag_qna_stream(payload, request)
+    body = response.body_iterator
+
+    # Drive the OUTER body to its first real SSE chunk (a token), then abandon
+    # it exactly as Starlette does on client disconnect: aclose() the body
+    # iterator, which throws GeneratorExit into the suspended `yield`.
+    first_chunk = await asyncio.wait_for(body.__anext__(), timeout=5.0)
+    assert "data:" in first_chunk
+
+    # Pre-fix: this raises RuntimeError("async generator ignored GeneratorExit")
+    # because the `finally: yield _SSE_DONE` yields during GeneratorExit teardown.
+    # Post-fix: aclose() propagates GeneratorExit cleanly down to the inner
+    # stream's cooperative-stop finally, with no yield-in-finally.
+    await asyncio.wait_for(body.aclose(), timeout=5.0)
+
+    # The inner worker must have stopped promptly (cooperative cancel ran as part
+    # of disconnect teardown, not deferred to GC).
+    await asyncio.sleep(0.2)
+    count_after_close = len(produced)
+    await asyncio.sleep(0.2)
+    assert len(produced) == count_after_close, (
+        "inner worker kept producing after outer body disconnect — cooperative stop did not run on aclose()"
+    )
     assert count_after_close < 1000
