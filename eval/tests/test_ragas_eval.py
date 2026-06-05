@@ -430,3 +430,215 @@ def test_score_count_mismatch_marks_unscored_record(tmp_path):
     assert recs[0]["scores"]  # first record got the single score row
     assert recs[1]["error"] == "score_count_mismatch"  # second not silently dropped
     assert recs[1]["scores"] == {}
+
+
+# ---------------------------------------------------------------------------
+# Baseline comparison (pure function — no mocks needed)
+# ---------------------------------------------------------------------------
+def test_compare_flags_regression_beyond_epsilon():
+    current = {"faithfulness": 0.70, "answer_relevancy": 0.90}
+    baseline = {"faithfulness": 0.80, "answer_relevancy": 0.85}
+    cmp = ragas_eval.compare_aggregates(current, baseline)
+
+    # faithfulness dropped 0.10 -> regression flagged, negative delta.
+    assert cmp["faithfulness"]["delta"] == pytest.approx(-0.10)
+    assert cmp["faithfulness"]["regressed"] is True
+    # answer_relevancy improved -> positive delta, not flagged.
+    assert cmp["answer_relevancy"]["delta"] == pytest.approx(0.05)
+    assert cmp["answer_relevancy"]["regressed"] is False
+
+
+def test_compare_ignores_subepsilon_noise():
+    current = {"faithfulness": 0.8000}
+    baseline = {"faithfulness": 0.80005}  # ~5e-5 drop, below epsilon
+    cmp = ragas_eval.compare_aggregates(current, baseline)
+    assert cmp["faithfulness"]["regressed"] is False
+
+
+def test_compare_metric_only_in_one_run_is_not_a_regression():
+    current = {"faithfulness": 0.5}
+    baseline = {"answer_relevancy": 0.9}
+    cmp = ragas_eval.compare_aggregates(current, baseline)
+    # Each metric exists in only one run: delta is None, never a regression.
+    assert cmp["faithfulness"]["delta"] is None
+    assert cmp["faithfulness"]["regressed"] is False
+    assert cmp["answer_relevancy"]["delta"] is None
+    assert cmp["answer_relevancy"]["regressed"] is False
+
+
+# ---------------------------------------------------------------------------
+# Threshold gate (pure function — no mocks needed)
+# ---------------------------------------------------------------------------
+def test_check_thresholds_pass_and_fail():
+    aggregate = {"faithfulness": 0.75, "answer_relevancy": 0.40}
+    gate = ragas_eval.check_thresholds(aggregate, {"faithfulness": 0.70, "answer_relevancy": 0.50})
+    assert gate["faithfulness"]["passed"] is True
+    assert gate["answer_relevancy"]["passed"] is False
+
+
+def test_check_thresholds_exact_floor_passes():
+    gate = ragas_eval.check_thresholds({"faithfulness": 0.70}, {"faithfulness": 0.70})
+    assert gate["faithfulness"]["passed"] is True  # >= is inclusive
+
+
+def test_check_thresholds_missing_metric_fails():
+    # A threshold on a metric with no aggregate value cannot pass.
+    gate = ragas_eval.check_thresholds({}, {"faithfulness": 0.50})
+    assert gate["faithfulness"]["value"] is None
+    assert gate["faithfulness"]["passed"] is False
+
+
+# ---------------------------------------------------------------------------
+# Summary stats (mean / min / max)
+# ---------------------------------------------------------------------------
+def test_summarize_reports_mean_min_max_count(tmp_path):
+    records = _records()
+    bench = _benchmark_file(tmp_path, records)
+    gen = AsyncMock(side_effect=[{"answer": "A1"}, {"answer": "A2"}])
+    emb = AsyncMock(return_value=[0.1])
+    search = AsyncMock(side_effect=[_fake_search_results("c1"), _fake_search_results("c2")])
+    fake_eval = _patch_evaluate(_fake_scores())
+
+    with (
+        patch.object(ragas_eval, "generate_answer", gen),
+        patch.object(ragas_eval, "get_embedding", emb),
+        patch.object(ragas_eval, "perform_search", search),
+        patch.object(ragas_eval, "evaluate", fake_eval),
+    ):
+        payload = _run(
+            ragas_eval.run_eval(
+                bench,
+                tmp_path / "out",
+                azure=MagicMock(),
+                ragas_llm=MagicMock(),
+                ragas_embeddings=MagicMock(),
+            )
+        )
+
+    s = payload["summary"]["faithfulness"]  # scores 1.0 and 0.0
+    assert s["mean"] == pytest.approx(0.5)
+    assert s["min"] == pytest.approx(0.0)
+    assert s["max"] == pytest.approx(1.0)
+    assert s["count"] == 2
+    md = (tmp_path / "out" / "ragas_report.md").read_text(encoding="utf-8")
+    assert "Summary (mean / min / max" in md
+
+
+# ---------------------------------------------------------------------------
+# run_eval integration with baseline / thresholds (mocked pipeline)
+# ---------------------------------------------------------------------------
+def _run_with(tmp_path, *, baseline_aggregate=None, thresholds=None):
+    bench = _benchmark_file(tmp_path, _records())
+    gen = AsyncMock(side_effect=[{"answer": "A1"}, {"answer": "A2"}])
+    emb = AsyncMock(return_value=[0.1])
+    search = AsyncMock(side_effect=[_fake_search_results("c1"), _fake_search_results("c2")])
+    fake_eval = _patch_evaluate(_fake_scores())  # faithfulness mean 0.5
+    with (
+        patch.object(ragas_eval, "generate_answer", gen),
+        patch.object(ragas_eval, "get_embedding", emb),
+        patch.object(ragas_eval, "perform_search", search),
+        patch.object(ragas_eval, "evaluate", fake_eval),
+    ):
+        return _run(
+            ragas_eval.run_eval(
+                bench,
+                tmp_path / "out",
+                azure=MagicMock(),
+                ragas_llm=MagicMock(),
+                ragas_embeddings=MagicMock(),
+                baseline_aggregate=baseline_aggregate,
+                thresholds=thresholds,
+            )
+        )
+
+
+def test_run_eval_default_shape_unchanged(tmp_path):
+    """No baseline / no thresholds: no comparison or gate keys appear."""
+    payload = _run_with(tmp_path)
+    assert "comparison" not in payload
+    assert "threshold_gate" not in payload
+    assert "regressed" not in payload
+    assert "threshold_passed" not in payload
+
+
+def test_run_eval_baseline_adds_comparison(tmp_path):
+    # Baseline faithfulness 0.9 vs current mean 0.5 -> regression.
+    payload = _run_with(tmp_path, baseline_aggregate={"faithfulness": 0.9})
+    assert payload["regressed"] is True
+    assert payload["comparison"]["faithfulness"]["regressed"] is True
+    md = (tmp_path / "out" / "ragas_report.md").read_text(encoding="utf-8")
+    assert "Baseline comparison" in md
+
+
+def test_run_eval_threshold_gate_pass_and_fail(tmp_path):
+    # Current faithfulness mean is 0.5.
+    passing = _run_with(tmp_path, thresholds={"faithfulness": 0.4})
+    assert passing["threshold_passed"] is True
+    assert passing["threshold_gate"]["faithfulness"]["passed"] is True
+
+    failing = _run_with(tmp_path, thresholds={"faithfulness": 0.6})
+    assert failing["threshold_passed"] is False
+    md = (tmp_path / "out" / "ragas_report.md").read_text(encoding="utf-8")
+    assert "Threshold gate" in md
+
+
+# ---------------------------------------------------------------------------
+# CLI: flag parsing, baseline loading, exit-code semantics
+# ---------------------------------------------------------------------------
+def test_cli_min_flags_generated_and_exit_nonzero_on_breach(tmp_path):
+    """--min-<metric> flags parse, and a breach makes main() exit non-zero."""
+    bench = _benchmark_file(tmp_path, _records())
+    gen = AsyncMock(side_effect=[{"answer": "A1"}, {"answer": "A2"}])
+    emb = AsyncMock(return_value=[0.1])
+    search = AsyncMock(side_effect=[_fake_search_results("c1"), _fake_search_results("c2")])
+    fake_eval = _patch_evaluate(_fake_scores())  # faithfulness mean 0.5
+
+    argv = [
+        "--benchmark",
+        str(bench),
+        "--out",
+        str(tmp_path / "out"),
+        "--min-faithfulness",
+        "0.6",  # 0.5 < 0.6 -> breach
+    ]
+    with (
+        patch.object(ragas_eval, "generate_answer", gen),
+        patch.object(ragas_eval, "get_embedding", emb),
+        patch.object(ragas_eval, "perform_search", search),
+        patch.object(ragas_eval, "evaluate", fake_eval),
+    ):
+        rc = ragas_eval.main(argv)
+    assert rc == 1
+
+
+def test_cli_default_exit_zero(tmp_path):
+    """No gating flags -> exit 0 even though scores are mediocre."""
+    bench = _benchmark_file(tmp_path, _records())
+    gen = AsyncMock(side_effect=[{"answer": "A1"}, {"answer": "A2"}])
+    emb = AsyncMock(return_value=[0.1])
+    search = AsyncMock(side_effect=[_fake_search_results("c1"), _fake_search_results("c2")])
+    fake_eval = _patch_evaluate(_fake_scores())
+
+    argv = ["--benchmark", str(bench), "--out", str(tmp_path / "out")]
+    with (
+        patch.object(ragas_eval, "generate_answer", gen),
+        patch.object(ragas_eval, "get_embedding", emb),
+        patch.object(ragas_eval, "perform_search", search),
+        patch.object(ragas_eval, "evaluate", fake_eval),
+    ):
+        rc = ragas_eval.main(argv)
+    assert rc == 0
+
+
+def test_load_baseline_aggregate_reads_flat_aggregate(tmp_path):
+    report = tmp_path / "prev.json"
+    report.write_text(json.dumps({"aggregate": {"faithfulness": 0.8, "bad": "x"}}), encoding="utf-8")
+    agg = ragas_eval.load_baseline_aggregate(report)
+    assert agg == {"faithfulness": 0.8}  # non-numeric entry dropped
+
+
+def test_load_baseline_aggregate_rejects_missing_aggregate(tmp_path):
+    report = tmp_path / "prev.json"
+    report.write_text(json.dumps({"records": []}), encoding="utf-8")
+    with pytest.raises(ValueError):
+        ragas_eval.load_baseline_aggregate(report)

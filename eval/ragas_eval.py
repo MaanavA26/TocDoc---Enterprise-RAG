@@ -280,23 +280,132 @@ def _aggregate(results: list[RecordResult]) -> dict[str, float]:
     return means
 
 
+def _summarize(results: list[RecordResult]) -> dict[str, dict[str, float]]:
+    """Per-metric mean / min / max / count over records that scored.
+
+    Returns ``{metric: {"mean", "min", "max", "count"}}`` for every metric that
+    has at least one numeric score. This is reported under a SEPARATE ``summary``
+    key so the flat ``aggregate`` ({metric: mean}) shape stays backward
+    compatible for downstream readers and for ``--baseline`` diffing.
+    """
+    summary: dict[str, dict[str, float]] = {}
+    for metric in METRIC_NAMES:
+        vals = [
+            r.scores[metric]
+            for r in results
+            if metric in r.scores and isinstance(r.scores[metric], (int, float))
+        ]
+        if vals:
+            summary[metric] = {
+                "mean": sum(vals) / len(vals),
+                "min": min(vals),
+                "max": max(vals),
+                "count": len(vals),
+            }
+    return summary
+
+
+# Regressions smaller than this (in absolute score units) are treated as float
+# noise and NOT flagged. RAGAS scores live in [0, 1]; 1e-4 is well below any
+# meaningful quality change but above typical float-summation jitter.
+REGRESSION_EPSILON = 1e-4
+
+
+def compare_aggregates(
+    current: dict[str, float],
+    baseline: dict[str, float],
+    epsilon: float = REGRESSION_EPSILON,
+) -> dict[str, dict[str, Any]]:
+    """Diff a current aggregate against a prior run's aggregate.
+
+    For each metric present in EITHER mapping, report the baseline value, the
+    current value, the delta (current - baseline) and whether it regressed. A
+    metric counts as regressed only when it exists in both runs and dropped by
+    more than ``epsilon`` (drops at or below epsilon are float noise). Metrics
+    present in only one run are reported with ``delta=None`` and never flagged
+    as a regression (there is nothing to compare against).
+
+    Pure function (dict in, dict out) — no I/O, no mocks needed to test it.
+    """
+    metrics = sorted(set(current) | set(baseline))
+    out: dict[str, dict[str, Any]] = {}
+    for metric in metrics:
+        cur = current.get(metric)
+        base = baseline.get(metric)
+        if cur is None or base is None:
+            out[metric] = {
+                "baseline": base,
+                "current": cur,
+                "delta": None,
+                "regressed": False,
+            }
+            continue
+        delta = cur - base
+        out[metric] = {
+            "baseline": base,
+            "current": cur,
+            "delta": delta,
+            "regressed": delta < -epsilon,
+        }
+    return out
+
+
+def check_thresholds(
+    aggregate: dict[str, float],
+    thresholds: dict[str, float],
+) -> dict[str, dict[str, Any]]:
+    """Check each metric's mean against a minimum threshold (absolute floor).
+
+    ``thresholds`` maps metric name -> minimum acceptable mean. For each entry
+    a metric passes when its aggregate mean is present and ``>= threshold``. A
+    metric that has a threshold but no aggregate value (e.g. nothing scored)
+    fails with ``value=None`` — a gate cannot be satisfied by missing data.
+
+    Pure function (dict in, dict out). Independent of ``--baseline``.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for metric, minimum in thresholds.items():
+        value = aggregate.get(metric)
+        passed = value is not None and value >= minimum
+        out[metric] = {"value": value, "min": minimum, "passed": passed}
+    return out
+
+
 def _write_reports(
-    results: list[RecordResult], aggregate: dict[str, float], out_dir: str | Path
+    results: list[RecordResult],
+    aggregate: dict[str, float],
+    out_dir: str | Path,
+    summary: dict[str, dict[str, float]] | None = None,
+    comparison: dict[str, dict[str, Any]] | None = None,
+    threshold_gate: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[Path, Path]:
-    """Write the JSON + markdown reports. Returns (json_path, md_path)."""
+    """Write the JSON + markdown reports. Returns (json_path, md_path).
+
+    ``summary`` (per-metric mean/min/max/count) is always written when present.
+    ``comparison`` (baseline diff) and ``threshold_gate`` (min-threshold check)
+    are optional: their JSON keys and markdown sections appear only when the
+    corresponding CLI options were supplied, so the default report shape is
+    unchanged.
+    """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
     json_path = out / "ragas_report.json"
     md_path = out / "ragas_report.md"
 
-    payload = {
+    summary = summary or {}
+    payload: dict[str, Any] = {
         "record_count": len(results),
         "scored_count": sum(1 for r in results if r.scores),
         "error_count": sum(1 for r in results if r.error),
         "aggregate": aggregate,
+        "summary": summary,
         "records": [r.to_dict() for r in results],
     }
+    if comparison is not None:
+        payload["comparison"] = comparison
+    if threshold_gate is not None:
+        payload["threshold_gate"] = threshold_gate
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     lines: list[str] = []
@@ -319,6 +428,47 @@ def _write_reports(
     else:
         lines.append("_No records scored successfully._")
     lines.append("")
+    lines.append("## Summary (mean / min / max over scored records)")
+    lines.append("")
+    if summary:
+        lines.append("| Metric | Mean | Min | Max | N |")
+        lines.append("| --- | --- | --- | --- | --- |")
+        for metric in METRIC_NAMES:
+            s = summary.get(metric)
+            if s:
+                lines.append(
+                    f"| {metric} | {s['mean']:.4f} | {s['min']:.4f} | {s['max']:.4f} | {int(s['count'])} |"
+                )
+    else:
+        lines.append("_No records scored successfully._")
+    lines.append("")
+    if comparison is not None:
+        lines.append("## Baseline comparison")
+        lines.append("")
+        lines.append("| Metric | Baseline | Current | Delta | Regressed |")
+        lines.append("| --- | --- | --- | --- | --- |")
+        for metric in METRIC_NAMES:
+            c = comparison.get(metric)
+            if not c:
+                continue
+            base = f"{c['baseline']:.4f}" if isinstance(c["baseline"], (int, float)) else "-"
+            cur = f"{c['current']:.4f}" if isinstance(c["current"], (int, float)) else "-"
+            delta = f"{c['delta']:+.4f}" if isinstance(c["delta"], (int, float)) else "-"
+            regressed = "yes" if c["regressed"] else "no"
+            lines.append(f"| {metric} | {base} | {cur} | {delta} | {regressed} |")
+        lines.append("")
+    if threshold_gate is not None:
+        lines.append("## Threshold gate")
+        lines.append("")
+        lines.append("| Metric | Value | Min | Pass |")
+        lines.append("| --- | --- | --- | --- |")
+        for metric in METRIC_NAMES:
+            g = threshold_gate.get(metric)
+            if not g:
+                continue
+            value = f"{g['value']:.4f}" if isinstance(g["value"], (int, float)) else "-"
+            lines.append(f"| {metric} | {value} | {g['min']:.4f} | {'yes' if g['passed'] else 'no'} |")
+        lines.append("")
     lines.append("## Per-record")
     lines.append("")
     lines.append("| # | bot_tag | fr_tag | " + " | ".join(METRIC_NAMES) + " | error |")
@@ -336,12 +486,30 @@ def _write_reports(
     return json_path, md_path
 
 
+def load_baseline_aggregate(path: str | Path) -> dict[str, float]:
+    """Load the flat ``aggregate`` ({metric: mean}) from a prior report JSON.
+
+    Accepts a path to a previous ``ragas_report.json``. Returns only the numeric
+    entries of its ``aggregate`` mapping so downstream comparison never trips on
+    a malformed value. Raises ``ValueError`` if the file has no usable
+    ``aggregate`` object.
+    """
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    agg = data.get("aggregate") if isinstance(data, dict) else None
+    if not isinstance(agg, dict):
+        raise ValueError(f"Baseline report {path} has no 'aggregate' object")
+    return {k: v for k, v in agg.items() if isinstance(v, (int, float))}
+
+
 async def run_eval(
     benchmark_path: str | Path,
     out_dir: str | Path,
     azure: Any | None = None,
     ragas_llm: Any | None = None,
     ragas_embeddings: Any | None = None,
+    baseline_aggregate: dict[str, float] | None = None,
+    thresholds: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """Run the full harness: assemble samples, score, aggregate, write reports.
 
@@ -355,6 +523,12 @@ async def run_eval(
         azure: QnA Azure client holder; built from env if omitted.
         ragas_llm / ragas_embeddings: RAGAS Azure wrappers; built from env if
             omitted.
+        baseline_aggregate: Prior run's flat aggregate to diff against. When
+            given, the payload gains a ``comparison`` key and a ``regressed``
+            flag; omitted -> no comparison is performed (default off).
+        thresholds: Map of metric -> minimum acceptable mean. When given, the
+            payload gains a ``threshold_gate`` key and a ``threshold_passed``
+            flag; omitted -> no gating (default off).
 
     Returns:
         The report payload dict (also written to disk).
@@ -418,17 +592,45 @@ async def run_eval(
                     results[idx].error = f"scoring_failed: {type(exc).__name__}"
 
     aggregate = _aggregate(results)
-    json_path, md_path = _write_reports(results, aggregate, out_dir)
+    summary = _summarize(results)
 
-    payload = {
+    comparison = None
+    regressed = None
+    if baseline_aggregate is not None:
+        comparison = compare_aggregates(aggregate, baseline_aggregate)
+        regressed = any(c["regressed"] for c in comparison.values())
+
+    threshold_gate = None
+    threshold_passed = None
+    if thresholds:
+        threshold_gate = check_thresholds(aggregate, thresholds)
+        threshold_passed = all(g["passed"] for g in threshold_gate.values())
+
+    json_path, md_path = _write_reports(
+        results,
+        aggregate,
+        out_dir,
+        summary=summary,
+        comparison=comparison,
+        threshold_gate=threshold_gate,
+    )
+
+    payload: dict[str, Any] = {
         "record_count": len(results),
         "scored_count": sum(1 for r in results if r.scores),
         "error_count": sum(1 for r in results if r.error),
         "aggregate": aggregate,
+        "summary": summary,
         "records": [r.to_dict() for r in results],
         "json_report": str(json_path),
         "md_report": str(md_path),
     }
+    if comparison is not None:
+        payload["comparison"] = comparison
+        payload["regressed"] = regressed
+    if threshold_gate is not None:
+        payload["threshold_gate"] = threshold_gate
+        payload["threshold_passed"] = threshold_passed
     return payload
 
 
@@ -447,25 +649,76 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=str(Path(__file__).resolve().parent / "out"),
         help="Directory to write the JSON + markdown reports into.",
     )
+    parser.add_argument(
+        "--baseline",
+        default=None,
+        help=(
+            "Path to a prior ragas_report.json to diff the current aggregate "
+            "against. Reports per-metric deltas and flags regressions. Off by "
+            "default; informational only (does not affect exit code)."
+        ),
+    )
+    # One --min-<metric> floor per metric, auto-generated from METRIC_NAMES so
+    # the gate stays in sync with the scored metrics. All default to None (off).
+    for metric in METRIC_NAMES:
+        parser.add_argument(
+            f"--min-{metric.replace('_', '-')}",
+            dest=f"min_{metric}",
+            type=float,
+            default=None,
+            metavar="FLOAT",
+            help=(
+                f"Minimum acceptable mean for '{metric}'. If the mean is below "
+                "this floor, the run exits non-zero (CI gate). Off by default."
+            ),
+        )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    payload = asyncio.run(run_eval(args.benchmark, args.out))
-    print(
-        json.dumps(
-            {
-                "record_count": payload["record_count"],
-                "scored_count": payload["scored_count"],
-                "error_count": payload["error_count"],
-                "aggregate": payload["aggregate"],
-                "json_report": payload["json_report"],
-                "md_report": payload["md_report"],
-            },
-            indent=2,
+
+    baseline_aggregate = None
+    if args.baseline:
+        baseline_aggregate = load_baseline_aggregate(args.baseline)
+
+    thresholds = {
+        metric: getattr(args, f"min_{metric}")
+        for metric in METRIC_NAMES
+        if getattr(args, f"min_{metric}") is not None
+    }
+
+    payload = asyncio.run(
+        run_eval(
+            args.benchmark,
+            args.out,
+            baseline_aggregate=baseline_aggregate,
+            thresholds=thresholds or None,
         )
     )
+
+    summary: dict[str, Any] = {
+        "record_count": payload["record_count"],
+        "scored_count": payload["scored_count"],
+        "error_count": payload["error_count"],
+        "aggregate": payload["aggregate"],
+        "summary": payload["summary"],
+        "json_report": payload["json_report"],
+        "md_report": payload["md_report"],
+    }
+    if "comparison" in payload:
+        summary["comparison"] = payload["comparison"]
+        summary["regressed"] = payload["regressed"]
+    if "threshold_gate" in payload:
+        summary["threshold_gate"] = payload["threshold_gate"]
+        summary["threshold_passed"] = payload["threshold_passed"]
+    print(json.dumps(summary, indent=2))
+
+    # Exit non-zero ONLY when an opt-in threshold gate was breached, so CI can
+    # gate on quality. A baseline regression is flagged in the report but stays
+    # informational (exit 0). Default invocation (no new flags) always returns 0.
+    if payload.get("threshold_passed") is False:
+        return 1
     return 0
 
 
