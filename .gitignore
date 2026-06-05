@@ -39,6 +39,9 @@ build/
 *.egg-info/
 *.egg
 
+# ── Documentation site (MkDocs build output) ──────────────────────────────────
+site/
+
 # ── macOS ─────────────────────────────────────────────────────────────────────
 .DS_Store
 *.DS_Store

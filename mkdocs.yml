@@ -1,0 +1,126 @@
+site_name: TocDoc Documentation
+site_description: >-
+  Design, reference, operations, and planning documentation for TocDoc — a
+  two-service enterprise Retrieval-Augmented Generation (RAG) platform for
+  document Q&A, deployed into a client's own Azure resource group.
+site_author: TocDoc maintainers
+
+# Rendered docs are built from the existing Markdown under docs/.
+docs_dir: docs
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - toc.follow
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+
+# Existing docs intentionally link to repo-root files (LICENSE, CHANGELOG, etc.)
+# that live outside docs_dir. Keep --strict useful for nav/structure while not
+# rewriting existing doc content for those root-relative links.
+validation:
+  omitted_files: warn
+  nav:
+    omitted_files: warn
+  links:
+    # Existing docs link to repo-root files outside docs_dir (e.g. ../CHANGELOG.md,
+    # ../../.github/workflows/release.yml). Don't fail --strict on those rather
+    # than rewriting existing doc content.
+    not_found: ignore
+    absolute_links: ignore
+    unrecognized_links: ignore
+
+nav:
+  - Home: README.md
+  - Architecture & product:
+      - Architecture overview: ARCHITECTURE.md
+      - Product tiers: PRODUCT_TIERS.md
+      - Project resume snapshot: RESUME.md
+  - Reference:
+      - API reference: API.md
+      - Configuration: CONFIGURATION.md
+  - Operations & deployment:
+      - Operations runbook: OPERATIONS.md
+      - Local development: LOCAL_DEV.md
+      - Installation guide: deployment/INSTALLATION.md
+      - Container images: deployment/CONTAINER_IMAGES.md
+  - Security:
+      - CodeQL triage: security/CODEQL_TRIAGE.md
+  - Planning & tracker:
+      - Master tracker: agent_plan/00_MASTER_TRACKER.md
+      - P0 hardening: agent_plan/01_P0_HARDENING.md
+      - P1 enterprise: agent_plan/02_P1_ENTERPRISE.md
+      - P2 differentiation: agent_plan/03_P2_DIFFERENTIATION.md
+      - Agentic roadmap: agent_plan/04_AGENTIC_ROADMAP.md
+      - Codebase context: agent_plan/05_CODEBASE_CONTEXT.md
+      - Tech lead operating model: agent_plan/06_TECH_LEAD_OPERATING_MODEL.md
+      - Refreshed P2–P4 plan: agent_plan/07_P2_P4_REFRESHED_PLAN.md
+  - Phase 2 specs & ADRs:
+      - Phase 2 execution plan: architect_phase_2/00_PHASE_2_EXECUTION_PLAN.md
+      - Admin API spec: architect_phase_2/01_ADMIN_API_SPEC.md
+      - Observability spec: architect_phase_2/02_OBSERVABILITY_SPEC.md
+      - Deployment validation spec: architect_phase_2/03_DEPLOYMENT_VALIDATION_SPEC.md
+      - Bot-tag decision record: architect_phase_2/04_BOT_TAG_DECISION_RECORD.md
+      - Product-neutral naming policy: architect_phase_2/05_PRODUCT_NEUTRAL_NAMING_POLICY.md
+      - Backlog hygiene: architect_phase_2/06_BACKLOG_HYGIENE_ARCHIVE_COMPLETED_ITEMS.md
+      - "ADR: LangGraph agentic layer": architect_phase_2/07_P3_LANGGRAPH_ADR.md
+      - "ADR: connector ingestion": architect_phase_2/08_P1_3_CONNECTORS_ADR.md
+      - "ADR: page-level citations": architect_phase_2/09_P2_1_PAGE_CITATIONS_ADR.md
+      - "ADR: Microsoft Teams bot": architect_phase_2/10_P4_1_TEAMS_BOT_ADR.md
+  - Productization backlog:
+      - Backlog index: productization_backlog/00_BACKLOG_INDEX.md
+      - Strict Azure AD JWT validation: productization_backlog/01_SECURITY_Enable_strict_Azure_AD_JWT_validation.md
+      - Bot-tag tenant scoping: productization_backlog/02_ISOLATION_Enforce_bot_tag_tenant_scoping_in_retrieval.md
+      - Remove global request state: productization_backlog/03_CONCURRENCY_Remove_global_request_state_from_qna_pipeline.md
+      - Deterministic chunk IDs: productization_backlog/04_INGESTION_Add_deterministic_chunk_ids_and_reindex_delete_lifecycle.md
+      - Token-aware chunking & eval: productization_backlog/05_RETRIEVAL_Implement_true_token_aware_chunking_and_eval.md
+      - Harden error contracts: productization_backlog/06_API_Harden_error_contracts_request_validation_and_response_schema.md
+      - Normalize env & secrets: productization_backlog/07_CONFIG_Normalize_env_secret_bootstrap_and_deployment_profiles.md
+      - Harden containers & CORS: productization_backlog/08_RUNTIME_Harden_containers_cors_logging_and_cloud_native_defaults.md
+      - Telemetry & audit logs: productization_backlog/09_OBSERVABILITY_Add_telemetry_audit_logs_and_operational_metrics.md
+      - Admin APIs: productization_backlog/10_PRODUCT_Add_admin_APIs_for_index_management_and_tenant_operations.md
+      - Connector-based ingestion: productization_backlog/11_CONNECTORS_Add_connector_based_ingestion_for_blob_sharepoint_upload.md
+      - IaC, CI/CD & installation: productization_backlog/12_PLATFORM_Add_IaC_CI_CD_and_repeatable_client_installation_assets.md
+      - Test strategy & release gates: productization_backlog/13_QUALITY_Expand_test_strategy_coverage_and_release_gates.md
+      - Retrieval quality roadmap: productization_backlog/14_ROADMAP_Retrieval_quality_upgrades_reranking_metadata_page_citations.md
+      - Packaging tiers & operating model: productization_backlog/15_PRODUCT_Define_packaging_tiers_and_deployment_operating_model.md
