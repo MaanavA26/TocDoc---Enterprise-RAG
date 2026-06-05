@@ -1,0 +1,26 @@
+{{- /* PodDisruptionBudget per enabled service when podDisruptionBudget.enabled. */ -}}
+{{- $root := . -}}
+{{- $fullname := include "tocdoc.fullname" . -}}
+{{- range $svcName, $svc := .Values.services }}
+{{- if and $svc.enabled $svc.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $fullname }}-{{ $svcName }}
+  labels:
+    {{- include "tocdoc.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $svcName }}
+spec:
+  {{- if $svc.podDisruptionBudget.minAvailable }}
+  minAvailable: {{ $svc.podDisruptionBudget.minAvailable }}
+  {{- else if $svc.podDisruptionBudget.maxUnavailable }}
+  maxUnavailable: {{ $svc.podDisruptionBudget.maxUnavailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "tocdoc.name" $root }}
+      app.kubernetes.io/instance: {{ $root.Release.Name }}
+      app.kubernetes.io/component: {{ $svcName }}
+{{- end }}
+{{- end }}

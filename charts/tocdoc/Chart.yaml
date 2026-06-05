@@ -1,0 +1,28 @@
+apiVersion: v2
+name: tocdoc
+description: |
+  Helm chart for the TocDoc Enterprise RAG platform (ingestion + QnA services)
+  on Azure Kubernetes Service (AKS). An alternative packaging/deployment path to
+  the Bicep + Azure Container Apps template under infra/.
+type: application
+
+# Chart version — bump on any change to chart templates/values.
+version: 0.1.0
+
+# Application version — the TocDoc service release this chart targets.
+# Override per-service image tags in values.yaml.
+appVersion: "0.1.0"
+
+keywords:
+  - rag
+  - aks
+  - azure
+  - ingestion
+  - qna
+
+home: https://github.com/MaanavA26/TocDoc---Enterprise-RAG
+sources:
+  - https://github.com/MaanavA26/TocDoc---Enterprise-RAG
+
+maintainers:
+  - name: TocDoc Platform Team

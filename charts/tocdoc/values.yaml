@@ -1,0 +1,230 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# TocDoc Helm chart — default values
+#
+# Mirrors the env-var contract and resource shape of infra/main.bicep (the
+# Bicep + Azure Container Apps path), adapted for AKS. All secret values are
+# referenced from a Kubernetes Secret (see `secret:` below) or an external
+# secret store — never inlined here.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Applied to every resource label set. Override `environment` per deployment.
+global:
+  environment: prod          # dev | staging | prod
+  # Container registry that hosts the service images. Leave empty to use fully
+  # qualified image.repository values per service.
+  imageRegistry: ""
+  # Default imagePullSecrets applied to every service Deployment.
+  imagePullSecrets: []
+  # Non-secret Azure config shared by both services. Mirrors the plain (non-
+  # secret) env vars wired by infra/main.bicep. Replace with deployment values.
+  config:
+    AZURE_OPENAI_ENDPOINT: "https://<your-openai-resource>.openai.azure.com/"
+    AZURE_OPENAI_VERSION: "2024-02-01"
+    AZURE_OPENAI_EMBEDDING_MODEL: "text-embedding-3-small"
+    AZURE_SEARCH_ENDPOINT: "https://<your-search-resource>.search.windows.net"
+    INDEX_NAME: "tocdoc-index"
+    LOG_LEVEL: "INFO"
+    # Optional. Empty default keeps current behavior (see .env.example notes).
+    EMBEDDING_DIMENSIONS: "1536"
+    AZURE_SEARCH_SEMANTIC_CONFIG: ""
+    # Comma-separated origins; empty = deny all (production default).
+    CORS_ALLOWED_ORIGINS: ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Secret wiring
+#
+# Env vars below are sourced from a Kubernetes Secret via `secretKeyRef`. Three
+# modes:
+#   create: true              -> chart renders a Secret (placeholders ONLY; do
+#                                NOT commit real secrets — supply via --set or a
+#                                separate values file kept out of git).
+#   create: false, externalSecretName -> reference a pre-existing Secret created
+#                                by the Key Vault CSI driver / External Secrets
+#                                Operator (recommended for production).
+# Secret KEYS are the canonical UPPER_SNAKE env-var names so a CSI SecretProvider
+# class can map Key Vault objects to identically named keys.
+# ─────────────────────────────────────────────────────────────────────────────
+secret:
+  # When true, render a placeholder Secret from `secret.data`. Keep false in
+  # production and point `externalSecretName` at a CSI/ESO-managed Secret.
+  create: false
+  # Name of the Secret to mount env vars from. Defaults to "<release>-tocdoc".
+  externalSecretName: ""
+  # Placeholder values used ONLY when create=true. Override at install time;
+  # never commit real secret material. Keys = canonical UPPER_SNAKE env names.
+  data:
+    AZURE_OPENAI_KEY: ""
+    AZURE_SEARCH_KEY: ""
+    # Ingestion only
+    DOC_INTELLIGENCE_KEY: ""
+    ADMIN_API_TOKEN: ""
+    # QnA only (service principal for Key Vault access)
+    AZURE_CLIENT_ID: ""
+    AZURE_CLIENT_SECRET: ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Azure Key Vault CSI driver (Secrets Store CSI)
+#
+# When enabled, the chart renders a SecretProviderClass that syncs the named
+# Key Vault objects into a Kubernetes Secret. Set secret.create=false and
+# secret.externalSecretName to the synced Secret name (commonly the same as the
+# SecretProviderClass `secretObjects[].secretName`).
+# ─────────────────────────────────────────────────────────────────────────────
+keyVaultCSI:
+  enabled: false
+  keyvaultName: "tocdoc-kv-prod"
+  tenantId: "<your-azure-tenant-id>"
+  # Workload-identity / user-assigned managed identity client ID used by the CSI
+  # driver to read Key Vault. Leave empty when using system-assigned identity.
+  userAssignedIdentityID: ""
+  # Name of the synced Kubernetes Secret the SecretProviderClass produces.
+  syncedSecretName: "tocdoc-secrets"
+  # Key Vault object name -> Secret key (canonical UPPER_SNAKE) mappings.
+  # Object names shown match infra/main.bicep secret naming.
+  objects:
+    - objectName: "azure-openai-key"
+      secretKey: "AZURE_OPENAI_KEY"
+    - objectName: "azure-search-key"
+      secretKey: "AZURE_SEARCH_KEY"
+    - objectName: "doc-intel-key"
+      secretKey: "DOC_INTELLIGENCE_KEY"
+    - objectName: "admin-api-token"
+      secretKey: "ADMIN_API_TOKEN"
+    - objectName: "azure-client-id"
+      secretKey: "AZURE_CLIENT_ID"
+    - objectName: "azure-client-secret"
+      secretKey: "AZURE_CLIENT_SECRET"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-service configuration
+#
+# Each service shares the global config above and adds its own plain env vars,
+# the secret keys it consumes, image, port, and scaling. The QnA env contract
+# mirrors infra/main.bicep's qnaApp; ingestion mirrors ingestionApp.
+# ─────────────────────────────────────────────────────────────────────────────
+services:
+
+  ingestion:
+    enabled: true
+    replicaCount: 1
+    image:
+      repository: tocdoc/ingestion
+      tag: ""            # defaults to .Chart.AppVersion when empty
+      pullPolicy: IfNotPresent
+    # Container port — matches services/ingestion/Dockerfile (EXPOSE 5501).
+    containerPort: 5501
+    # Service-specific plain (non-secret) env vars. Merged over global.config.
+    config:
+      DOC_INTELLIGENCE_ENDPOINT: "https://<your-doc-intelligence-resource>.cognitiveservices.azure.com/"
+    # Secret keys (from the referenced Secret) injected as env vars.
+    secretEnv:
+      - AZURE_OPENAI_KEY
+      - AZURE_SEARCH_KEY
+      - DOC_INTELLIGENCE_KEY
+      - ADMIN_API_TOKEN
+    service:
+      type: ClusterIP
+      port: 80
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "1Gi"
+      limits:
+        cpu: "1"
+        memory: "2Gi"
+    livenessProbe:
+      path: /health
+      initialDelaySeconds: 20
+      periodSeconds: 15
+      timeoutSeconds: 3
+      failureThreshold: 3
+    readinessProbe:
+      path: /health
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      timeoutSeconds: 3
+      failureThreshold: 3
+    autoscaling:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 3
+      targetCPUUtilizationPercentage: 70
+      targetMemoryUtilizationPercentage: 80
+    podDisruptionBudget:
+      enabled: true
+      minAvailable: 1
+    ingress:
+      enabled: false
+      className: ""
+      annotations: {}
+      host: ingestion.tocdoc.example.com
+      path: /
+      pathType: Prefix
+      tls: []
+    podAnnotations: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  qna:
+    enabled: true
+    replicaCount: 1
+    image:
+      repository: tocdoc/qna
+      tag: ""            # defaults to .Chart.AppVersion when empty
+      pullPolicy: IfNotPresent
+    # Container port — matches services/qna/Dockerfile (EXPOSE 5500).
+    containerPort: 5500
+    config:
+      AZURE_OPENAI_LLM_MODEL: "gpt-4o-mini"
+      AUDIENCE_ID: "<your-app-registration-client-id-or-audience>"
+      AZURE_KEY_VAULT: "tocdoc-kv-prod"
+      AZURE_TENANT_ID: "<your-azure-tenant-id>"
+    secretEnv:
+      - AZURE_OPENAI_KEY
+      - AZURE_SEARCH_KEY
+      - AZURE_CLIENT_ID
+      - AZURE_CLIENT_SECRET
+    service:
+      type: ClusterIP
+      port: 80
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "1Gi"
+      limits:
+        cpu: "1"
+        memory: "2Gi"
+    livenessProbe:
+      path: /health
+      initialDelaySeconds: 20
+      periodSeconds: 15
+      timeoutSeconds: 3
+      failureThreshold: 3
+    readinessProbe:
+      path: /health
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      timeoutSeconds: 3
+      failureThreshold: 3
+    autoscaling:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 3
+      targetCPUUtilizationPercentage: 70
+      targetMemoryUtilizationPercentage: 80
+    podDisruptionBudget:
+      enabled: true
+      minAvailable: 1
+    ingress:
+      enabled: false
+      className: ""
+      annotations: {}
+      host: qna.tocdoc.example.com
+      path: /
+      pathType: Prefix
+      tls: []
+    podAnnotations: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
