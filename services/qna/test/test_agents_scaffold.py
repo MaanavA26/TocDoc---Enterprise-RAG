@@ -97,6 +97,15 @@ async def _attach_fake_azure():
     app.state.azure = None
 
 
+@pytest.fixture(autouse=True)
+def _disable_tenant_binding(monkeypatch):
+    """Tenant binding now defaults ON (H1). These scaffold tests use tokens
+    without a `tid` claim and don't exercise binding, so opt out explicitly so
+    they keep testing the agentic-routing behaviour."""
+    monkeypatch.setenv("QNA_ENFORCE_TENANT_BINDING", "false")
+    yield
+
+
 _PAYLOAD = {
     "session_id": "s1",
     "fr_tag": "read",

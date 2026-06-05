@@ -125,6 +125,27 @@ def _generate_response_sync(
     return response.choices[0].message.content
 
 
+def _rephrase_sync(azure, rendered: str) -> str:
+    """Synchronous rephrasal chat call returning the raw model content.
+
+    Module-level (not nested) so ``rephrase_queries`` can offload it via
+    ``run_in_executor`` — keeping the blocking synchronous ``AzureOpenAI`` call
+    off the event loop (H5) — and so tests can monkeypatch it. Mirrors the
+    sync-client call style of the other helpers in this module. Returns the
+    model message content (``""`` if the model returns no content). Raises on
+    any transport error; the async caller owns the catch-and-default policy.
+    """
+    response = azure.openai_client.chat.completions.create(
+        messages=[{"role": "user", "content": rendered}],
+        model=localconfig.AZURE_LLM_MODEL,
+    )
+    if isawaitable(response):
+        logger.debug("rephrase create returned awaitable; running to completion in sync context")
+        response = asyncio.run(response)
+
+    return response.choices[0].message.content or ""
+
+
 async def rephrase_queries(
     azure,
     current_query: str,
@@ -183,14 +204,15 @@ async def rephrase_queries(
     response_content: str = ""
 
     try:
-        resp = azure.openai_client.chat.completions.create(
-            messages=[{"role": "user", "content": rendered}],
-            model=localconfig.AZURE_LLM_MODEL,
+        # The AzureOpenAI client is synchronous; calling it directly here would
+        # block the event-loop thread (this runs on the hot default path on
+        # every request). Offload the blocking chat call to the shared OpenAI
+        # executor like the other helpers in this module (H5).
+        loop = asyncio.get_running_loop()
+        response_content = await loop.run_in_executor(
+            openai_executor,
+            lambda: _rephrase_sync(azure, rendered),
         )
-        if isawaitable(resp):
-            resp = await resp
-
-        response_content = resp.choices[0].message.content or ""
         logger.info(f"Response from rephrasal LLM: {response_content}")
 
         pattern = r'\["([^"]+)"\](?:\[(greeting|followup)\])?'

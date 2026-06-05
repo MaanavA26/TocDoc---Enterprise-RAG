@@ -193,6 +193,11 @@ required_env_vars: list[str] = [
     "AZURE_SEARCH_ENDPOINT",
     "AZURE_SEARCH_KEY",
     "INDEX_NAME",
+    # AUDIENCE_ID is required so audience verification can be enforced (L-Q1).
+    # Azure AD tokens always carry an `aud` claim; an unset audience would fail
+    # every authenticated request closed at runtime — failing fast at startup
+    # turns that silent availability footgun into an explicit boot error.
+    "AUDIENCE_ID",
 ]
 
 for var in required_env_vars:
@@ -343,6 +348,9 @@ class Settings:
 # ---------------------------------------------------------------------------
 # Canonical UPPER_SNAKE per the P0-7 convention. No legacy alias (new in P3).
 _TRUTHY = {"1", "true", "yes", "on"}
+# Explicit falsy literals — used by the default-ON tenant-binding flag so that
+# only a deliberate opt-out disables enforcement (any other value stays ON).
+_FALSY = {"0", "false", "no", "off"}
 
 
 def is_map_reduce_enabled() -> bool:
@@ -361,22 +369,34 @@ def is_map_reduce_enabled() -> bool:
 
 
 def is_tenant_binding_enforced() -> bool:
-    """Whether within-tenant bot_tag<->tid binding is enforced (default OFF).
+    """Whether within-tenant bot_tag<->tid binding is enforced (default **ON**).
 
-    Addresses the threat-model **R1** gap: today a caller authenticated for
-    tenant ``T`` can pass any ``bot_tag`` in the request body, so they can
-    query another workspace's ``bot_tag`` that happens to live under the same
-    tenant. When this flag is OFF (default), behaviour is byte-for-byte
-    identical to today — the guard is fully inert and the map below is never
-    even parsed. When ON, the request-path guard validates the requested
-    ``bot_tag`` against an allowlist keyed by the token's ``tid`` and fails
-    closed on any mismatch / unmapped tid (see ``src/core/tenant_binding.py``).
+    Addresses the threat-model **R1** gap: without this guard a caller
+    authenticated for tenant ``T`` could pass any ``bot_tag`` in the request
+    body and read another workspace's ``bot_tag`` that happens to live under the
+    same tenant. The guard now **fails closed by default** — if
+    ``QNA_ENFORCE_TENANT_BINDING`` is unset, enforcement is ON, so a
+    multi-workspace deployment is isolated out of the box.
+
+    When ON, the request-path guard validates the requested ``bot_tag`` against
+    an allowlist keyed by the token's ``tid`` (``QNA_TENANT_BOT_TAG_MAP``) and
+    fails closed on a missing/unparseable map, a missing/unmapped ``tid``, or a
+    ``bot_tag`` not in the tenant's allowlist (see
+    ``src/core/tenant_binding.py``).
+
+    A single-workspace deployment MUST either configure
+    ``QNA_TENANT_BOT_TAG_MAP`` for its tenant, or explicitly opt out by setting
+    ``QNA_ENFORCE_TENANT_BINDING`` to a falsy value (``false``/``0``/``no``/``off``).
 
     Read live from the environment on every call so it is a no-redeploy
     kill-switch and tests can toggle it with ``monkeypatch.setenv``. Parsed
-    explicitly so the literal string ``"false"`` is correctly falsy.
+    explicitly: unset/empty defaults to ON; only the explicit falsy literals
+    turn it off (so a stray non-empty value can never silently disable it).
     """
-    return (os.getenv("QNA_ENFORCE_TENANT_BINDING") or "").strip().lower() in _TRUTHY
+    raw = (os.getenv("QNA_ENFORCE_TENANT_BINDING") or "").strip().lower()
+    if not raw:
+        return True  # default-ON: fail closed unless explicitly opted out.
+    return raw not in _FALSY
 
 
 def is_agent_enabled() -> bool:

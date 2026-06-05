@@ -79,10 +79,21 @@ class AuthUtils:
         path = request.url.path or "/"
         request_id = getattr(request.state, "request_id", None)
 
+        # The app is mounted under a non-empty ``root_path`` (e.g. "/qna"), so
+        # ``request.url.path`` carries that prefix (it is "/qna/health", not
+        # "/health"). Match the health bypass against the prefixed form so the
+        # comparison is EXACT (not a fragile suffix match) regardless of mount.
+        root_path = getattr(request, "scope", {}).get("root_path", "") or ""
+
         # ---- Public routes / methods ----------------------------------------
+        # Exact match for the health endpoint (L-Q2): a future authenticated
+        # route that merely ENDS in "/health" (e.g. "/admin/health") must not
+        # inherit the bypass. The swagger-asset check is left byte-identical to
+        # the prior behaviour — this change is scoped to the health probe only.
         if (
             request.method == "OPTIONS"  # CORS preflight
-            or path.endswith("/health")  # health endpoint
+            or path == f"{root_path}/health"  # health endpoint (prefixed)
+            or path == "/health"  # health endpoint (no root_path / tests)
             or path in {"/docs", "/redoc", "/openapi.json"}  # swagger assets
         ):
             return await call_next(request)

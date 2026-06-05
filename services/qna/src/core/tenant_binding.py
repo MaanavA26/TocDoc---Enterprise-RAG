@@ -13,25 +13,34 @@ threat-model **R1** within-tenant isolation gap.
 
 ## What this guard does (and does not do)
 
-This is an **opt-in, default-OFF** server-side binding check, mirroring the
+This is a **fail-closed, default-ON** server-side binding check, mirroring the
 Teams-bot server-side binding pattern: the trusted ``tid`` comes from the
 validated token (never the request body), and the requested ``bot_tag`` is
 checked against a config-driven allowlist for that ``tid``.
 
-- ``QNA_ENFORCE_TENANT_BINDING`` (default **false**) — master switch. When OFF
-  the guard is completely inert: it returns immediately, never parses the map,
-  and behaviour is byte-for-byte identical to today.
+- ``QNA_ENFORCE_TENANT_BINDING`` (default **true**) — master switch. When unset
+  the guard is **ON**, so a multi-workspace deployment is isolated out of the
+  box. Set it to ``false``/``0``/``no``/``off`` to explicitly opt out (only a
+  genuinely single-workspace deployment that derives ``bot_tag`` elsewhere
+  should do so).
 - ``QNA_TENANT_BOT_TAG_MAP`` — JSON object mapping each ``tid`` to the list of
   ``bot_tag`` values that tenant is allowed to query, e.g.::
 
       {"11111111-1111-1111-1111-111111111111": ["workspace-a", "workspace-b"],
        "22222222-2222-2222-2222-222222222222": ["workspace-c"]}
 
+  When enforcement is ON this map is **required**: a missing or unparseable
+  map means no tenant has an allowlist, so every request fails closed. A
+  single-workspace deployment must therefore either configure this map (one
+  ``tid`` → its one ``bot_tag``) or explicitly opt out via the flag above.
+
 When enforcement is ON the guard **fails closed**: a malformed/missing map, a
 missing ``tid``, an unmapped ``tid``, or a ``bot_tag`` not in the tenant's
 allowlist all reject the request via the structured error envelope (403) and
 **no QnA / search call is made**. The rejection message is generic and never
-echoes the map contents or the offending values.
+echoes the map contents or the offending values; a distinct operator-facing
+log fires when the failure is a misconfiguration (missing/empty map) so the
+"refuse to serve" cause is diagnosable without leaking tenant data.
 
 ## v1 seam
 
@@ -99,13 +108,17 @@ def enforce_tenant_bot_tag_binding(request: Request, bot_tag: str) -> None:
     covers both the legacy and agentic routes and rejects before retrieval.
 
     Behaviour:
-        - Enforcement OFF (default): returns immediately. Fully inert — the map
-          is never parsed; zero behaviour change.
-        - Enforcement ON: the token's ``tid`` (set on ``request.state`` by the
-          auth middleware from the validated JWT) must be present, mapped, and
-          its allowlist must contain ``bot_tag``. Any failure rejects via the
+        - Enforcement ON (default): the token's ``tid`` (set on
+          ``request.state`` by the auth middleware from the validated JWT) must
+          be present, mapped, and its allowlist must contain ``bot_tag``. A
+          missing/unparseable ``QNA_TENANT_BOT_TAG_MAP`` means no allowlist
+          exists, so the request fails closed (and an operator-facing log fires
+          so the misconfiguration is diagnosable). Any failure rejects via the
           structured error envelope (403 / ``UNAUTHORIZED``) with a generic
           message — fail closed, no search.
+        - Enforcement explicitly OFF: returns immediately. Fully inert — the map
+          is never parsed; the caller is responsible for scoping ``bot_tag``
+          some other way (single-workspace deployments only).
 
     Args:
         request: Incoming request; ``request.state.tid`` carries the validated
@@ -130,8 +143,21 @@ def enforce_tenant_bot_tag_binding(request: Request, bot_tag: str) -> None:
         _reject()
 
     tenant_map = _load_tenant_bot_tag_map()
+    # An empty map while enforcement is ON is a deployment misconfiguration
+    # ("refuse to serve / clear error if missing"): the map is REQUIRED. Surface
+    # it as a distinct operator-facing error (no tenant data echoed) so the
+    # fail-closed cause is diagnosable, then reject like any other failure.
+    if not tenant_map:
+        logger.error(
+            "[%s] tenant-binding: enforcement is ON but QNA_TENANT_BOT_TAG_MAP is "
+            "missing/empty/unparseable — refusing to serve. Configure the map or "
+            "set QNA_ENFORCE_TENANT_BINDING=false for a single-workspace deployment.",
+            request_id,
+        )
+        _reject()
+
     allowed = tenant_map.get(str(tid))
-    # Unmapped tid (or map unparseable/empty) → fail closed.
+    # Unmapped tid, or bot_tag not in this tenant's allowlist → fail closed.
     if not allowed or bot_tag not in allowed:
         logger.warning("[%s] tenant-binding: bot_tag not permitted for tenant", request_id)
         _reject()

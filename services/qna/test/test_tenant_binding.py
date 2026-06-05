@@ -145,12 +145,34 @@ class TestAuthAttachesTid:
 # Part 2 — guard unit tests (fake request)
 # ===========================================================================
 class TestGuardUnit:
-    def test_off_is_inert_even_with_no_tid_and_no_map(self, monkeypatch):
-        """Default OFF: guard returns immediately; missing tid / map irrelevant."""
-        monkeypatch.delenv("QNA_ENFORCE_TENANT_BINDING", raising=False)
+    def test_explicit_off_is_inert_even_with_no_tid_and_no_map(self, monkeypatch):
+        """Explicit opt-out (=false): guard returns immediately; missing tid / map
+        irrelevant. (Default is now ON — see test_default_unset_fails_closed.)"""
+        monkeypatch.setenv("QNA_ENFORCE_TENANT_BINDING", "false")
         monkeypatch.delenv("QNA_TENANT_BOT_TAG_MAP", raising=False)
         # No raise == pass.
         enforce_tenant_bot_tag_binding(_FakeRequest(tid=None), "anything-goes")
+
+    def test_default_unset_fails_closed(self, monkeypatch):
+        """H1: with the flag UNSET, enforcement defaults ON. A request that would
+        have been allowed under the old default-OFF now fails closed (403) when
+        the map is absent."""
+        monkeypatch.delenv("QNA_ENFORCE_TENANT_BINDING", raising=False)
+        monkeypatch.delenv("QNA_TENANT_BOT_TAG_MAP", raising=False)
+        with pytest.raises(HTTPException) as ei:
+            enforce_tenant_bot_tag_binding(_FakeRequest(tid=TID_A), "workspace-a")
+        assert ei.value.status_code == 403
+
+    def test_default_unset_with_map_enforces(self, monkeypatch):
+        """With the flag UNSET (default ON) but a valid map configured, an allowed
+        bot_tag passes and a mismatched one is rejected — proving default-ON
+        enforces rather than merely refusing all traffic."""
+        monkeypatch.delenv("QNA_ENFORCE_TENANT_BINDING", raising=False)
+        monkeypatch.setenv("QNA_TENANT_BOT_TAG_MAP", MAP_JSON)
+        enforce_tenant_bot_tag_binding(_FakeRequest(tid=TID_A), "workspace-a")
+        with pytest.raises(HTTPException) as ei:
+            enforce_tenant_bot_tag_binding(_FakeRequest(tid=TID_A), "workspace-b")
+        assert ei.value.status_code == 403
 
     def test_off_does_not_parse_malformed_map(self, monkeypatch):
         """A malformed map must never affect the OFF path."""
@@ -254,12 +276,22 @@ def _post(mini, bot_tag):
 
 
 class TestGuardInRequestPath:
-    def test_off_behaviour_unchanged_qna_runs(self, monkeypatch):
-        monkeypatch.delenv("QNA_ENFORCE_TENANT_BINDING", raising=False)
+    def test_explicit_off_behaviour_unchanged_qna_runs(self, monkeypatch):
+        """Explicit opt-out (=false) keeps the legacy pass-through behaviour."""
+        monkeypatch.setenv("QNA_ENFORCE_TENANT_BINDING", "false")
         mini = _MiniApp(tid=TID_A)
         r = _post(mini, "any-bot-tag")
         assert r.status_code == 200
         mini.legacy.assert_awaited_once()
+
+    def test_default_unset_fails_closed_no_qna_call(self, monkeypatch):
+        """H1 end-to-end: flag unset (default ON) + no map → 403 and NO QnA call."""
+        monkeypatch.delenv("QNA_ENFORCE_TENANT_BINDING", raising=False)
+        monkeypatch.delenv("QNA_TENANT_BOT_TAG_MAP", raising=False)
+        mini = _MiniApp(tid=TID_A)
+        r = _post(mini, "any-bot-tag")
+        assert r.status_code == 403
+        mini.legacy.assert_not_called()
 
     def test_on_allowed_qna_runs(self, monkeypatch):
         monkeypatch.setenv("QNA_ENFORCE_TENANT_BINDING", "true")
