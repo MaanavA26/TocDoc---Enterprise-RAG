@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import threading
@@ -22,7 +23,7 @@ from src.core.observability import RequestIDMiddleware, log_event
 from src.core.responses import QnASuccessResponse
 from src.core.tenant_binding import enforce_tenant_bot_tag_binding
 from src.utils.util import Payload, _as_turn
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, StreamingResponse
 
 # Allowed retrieval modes accepted at the request boundary. Enforced once here
 # (audit L-Q3) so BOTH the legacy pipeline and the agentic map-reduce path
@@ -482,6 +483,170 @@ async def custom_rag_qna(payload: Payload, request: Request):
     logger.info(f"[{request_id}] QnA processing completed in {elapsed:.4f}s")
     logger.info(f"[{request_id}] Response generated successfully")
     return ans
+
+
+# ---------------------------------------------------------------------------
+# SSE streaming QnA endpoint (/qna/stream)
+# ---------------------------------------------------------------------------
+# Wire format (matches the SDK's tocdoc_sdk._sse parser):
+#   - Each answer token is one event: `data: <token>\n\n`.
+#   - The final citation map is one event tagged `event: citation`:
+#       `event: citation\ndata: <json>\n\n`
+#   - The stream ends with the OpenAI-style sentinel: `data: [DONE]\n\n`.
+#   - A mid-stream failure (after the first token, when no error envelope can be
+#     sent) emits a terminal `event: error\ndata: <json>\n\n` then `[DONE]`.
+# The SDK parser ignores the `event:` field and yields each `data:` payload, so a
+# consumer sees: token, token, ..., <citation-json>, then stops at [DONE].
+
+# Heartbeat suffix per SSE spec — a blank line terminates each event.
+_SSE_DONE = "data: [DONE]\n\n"
+
+
+def _sse_event(data: str, event: str | None = None) -> str:
+    """Frame one SSE event. Multi-line ``data`` is split into ``data:`` lines."""
+    lines = []
+    if event is not None:
+        lines.append(f"event: {event}")
+    for chunk in data.split("\n"):
+        lines.append(f"data: {chunk}")
+    return "\n".join(lines) + "\n\n"
+
+
+@app.post(
+    "/qna/stream",
+    responses=default_error_responses,
+    # SAME throttling as /qna: per-key sliding-window rate limit + global
+    # in-flight concurrency cap. The concurrency gate is a yield-dependency whose
+    # `finally` releases the slot when the request scope is torn down — i.e.
+    # after the StreamingResponse body has been fully sent, so the slot is not
+    # leaked across a stream (covered by
+    # test_stream_concurrency_slot_released_after_stream).
+    dependencies=[Depends(rate_limit_dependency), Depends(concurrency_gate_dependency)],
+)
+async def custom_rag_qna_stream(payload: Payload, request: Request):
+    """Server-Sent-Events streaming variant of ``/qna``.
+
+    Reuses the SAME auth (RS256 JWT middleware), tenant-binding enforcement,
+    bot_tag/fr_tag validation, rate limiting, and retrieval as ``/qna`` — only
+    the answer-generation step streams token-by-token.
+
+    Error contract:
+        - Any failure BEFORE the first token (validation, tenant-binding,
+          rephrasal, embedding, search) is raised here and returned as the
+          normal structured error envelope — no stream is opened.
+        - A failure AFTER streaming has begun (headers already sent) cannot use
+          the envelope, so it emits a terminal ``event: error`` SSE event
+          followed by ``[DONE]``.
+
+    The agentic dark seam is intentionally NOT consulted here: streaming applies
+    to the standard route only.
+    """
+    request_id = getattr(request.state, "request_id", None) or f"qna_{int(time.time() * 1000)}"
+    azure = request.app.state.azure
+
+    if payload is None:
+        raise_api_error(ApiErrorCode.INVALID_REQUEST, "Missing request body", 400)
+
+    bot_tag = (payload.bot_tag or "").strip()
+    fr_tag = (payload.fr_tag or "").strip()
+
+    raw_history = payload.bot or []
+    history = [_as_turn(t) for t in raw_history if t is not None]
+    if not history:
+        raise_api_error(ApiErrorCode.INVALID_REQUEST, "Bot list cannot be empty", 400)
+
+    query = history[-1]["user_query"]
+
+    _query_preview = None
+    if os.getenv("QNA_DEBUG_LOG_PREVIEW", "").lower() in ("1", "true", "yes"):
+        _query_preview = (query or "")[:200]
+    log_event(
+        logger,
+        "qna_stream_request_received",
+        request_id=request_id,
+        query_length=len(query or ""),
+        bot_tag=bot_tag,
+        fr_tag=fr_tag,
+        query_preview=_query_preview,
+    )
+
+    # Identical request-boundary validations to /qna (kept explicit for 400s).
+    if not query:
+        raise_api_error(ApiErrorCode.INVALID_REQUEST, "Query cannot be empty", 400)
+    if not bot_tag:
+        raise_api_error(ApiErrorCode.INVALID_REQUEST, "Bot tag cannot be empty", 400)
+    if not fr_tag:
+        raise_api_error(ApiErrorCode.INVALID_REQUEST, "FR tag cannot be empty", 400)
+    if fr_tag not in _ALLOWED_FR_TAGS:
+        raise_api_error(
+            ApiErrorCode.INVALID_REQUEST,
+            f"Invalid fr_tag. Must be one of: {', '.join(_ALLOWED_FR_TAGS)}.",
+            400,
+        )
+
+    # Within-tenant bot_tag<->tid binding guard — same call-site position as
+    # /qna (before any retrieval). Fails closed via the 403 envelope when ON.
+    enforce_tenant_bot_tag_binding(request, bot_tag)
+
+    # Prime the pipeline generator BEFORE returning the StreamingResponse so the
+    # "errors before the first token" half of the contract holds: rephrasal,
+    # embedding, search, AND the first streamed token all run on this first
+    # `__anext__`. Any failure here is raised synchronously (relative to the
+    # handler) and returned as the normal structured error envelope — no stream
+    # is opened, no partial response is sent. Only failures AFTER this first
+    # item become mid-stream terminal error events.
+    stream = src.pipeline.qna_pipeline.generate_answer_stream(
+        query=query,
+        fr_mode=fr_tag,
+        bot_tag=bot_tag,
+        history=history,
+        azure=azure,
+        request_id=request_id,
+    )
+    try:
+        first_item = await stream.__anext__()
+    except StopAsyncIteration:
+        first_item = None
+    # Note: any other exception propagates to the global handler -> envelope.
+
+    async def event_source():
+        try:
+            if first_item is not None:
+                kind, payload_value = first_item
+                if kind == "token":
+                    yield _sse_event(payload_value)
+                elif kind == "citation":
+                    yield _sse_event(json.dumps(payload_value), event="citation")
+            async for kind, payload_value in stream:
+                if kind == "token":
+                    yield _sse_event(payload_value)
+                elif kind == "citation":
+                    yield _sse_event(json.dumps(payload_value), event="citation")
+        except Exception as e:
+            # Mid-stream failure: headers are already sent, so we cannot emit the
+            # structured envelope. Surface a terminal error event (no raw
+            # exception text — same hygiene as the envelope path) then [DONE].
+            logger.error(f"[{request_id}] Mid-stream failure: {type(e).__name__}")
+            error_payload = {
+                "error": {
+                    "code": ApiErrorCode.INTERNAL_ERROR,
+                    "message": "Streaming failed",
+                    "request_id": request_id,
+                }
+            }
+            yield _sse_event(json.dumps(error_payload), event="error")
+        finally:
+            yield _SSE_DONE
+
+    return StreamingResponse(
+        event_source(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "X-Request-ID": request_id,
+        },
+    )
 
 
 # ---------------------------------------------------------------------------

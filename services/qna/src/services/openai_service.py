@@ -3,6 +3,7 @@ import json
 import re
 import time
 import traceback
+from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from inspect import isawaitable
 
@@ -123,6 +124,130 @@ def _generate_response_sync(
         response = asyncio.run(response)
 
     return response.choices[0].message.content
+
+
+# ---------------------------------------------------------------------------
+# Token-streaming answer generation (SSE /qna/stream)
+# ---------------------------------------------------------------------------
+# Mirrors `generate_openai_response` (same grounded prompt) but yields the
+# answer token-by-token instead of returning the whole string. The Azure
+# OpenAI client is SYNCHRONOUS, and its `stream=True` iterator blocks on each
+# network read. Iterating it directly on the event loop would stall every other
+# coroutine, so the blocking iteration runs in the shared `openai_executor`
+# thread and each token is handed back to the loop via an `asyncio.Queue`. The
+# queue is NOT thread-safe, so the worker thread enqueues with
+# `loop.call_soon_threadsafe` — the only safe cross-thread hop.
+
+# Sentinels pushed by the worker thread onto the queue. Tuples so they can never
+# collide with a real token string.
+_STREAM_DONE = ("__stream_done__",)
+_STREAM_ERROR = ("__stream_error__",)
+
+
+async def stream_openai_response(
+    query: str,
+    knowledge_source: list[str],
+    is_greeting: bool,
+    is_follow_up: bool,
+    azure,
+) -> AsyncIterator[str]:
+    """Stream a grounded OpenAI answer token-by-token.
+
+    Composes the SAME grounded prompt as `generate_openai_response` and calls
+    the chat API with `stream=True`. The synchronous Azure OpenAI streaming
+    iterator is drained on a worker thread (the shared `openai_executor`) so the
+    blocking per-chunk network reads never run on the event loop; each
+    `delta.content` token is forwarded to the loop through an `asyncio.Queue`.
+
+    Args:
+        query: The user's query (possibly rephrased upstream).
+        knowledge_source: List of source lines (filename-prefixed) to ground the
+            prompt.
+        is_greeting: Whether the turn was detected as a greeting.
+        is_follow_up: Whether the turn was detected as a follow-up.
+        azure: Holder with `openai_client` (AzureOpenAI).
+
+    Yields:
+        Each non-empty content token in order, as a string.
+
+    Raises:
+        Exception: Any error raised by the worker thread while opening or
+            draining the stream is re-raised on the consuming side so the
+            caller can emit a terminal error event. The error may surface
+            after some tokens have already been yielded (a mid-stream failure).
+    """
+    deployment_name = localconfig.AZURE_LLM_MODEL
+    logger.info("Streaming OpenAI response for query: '%s'", query)
+    logger.debug(f"Knowledge source contains {len(knowledge_source)} items")
+
+    prompt = generate_bot.format(
+        query=query,
+        sources="\n".join(knowledge_source),
+        is_greeting=is_greeting,
+        is_follow_up=is_follow_up,
+    )
+
+    loop = asyncio.get_running_loop()
+    # Bounded queue so a fast producer cannot grow memory without bound if the
+    # consumer (the HTTP client) stalls; the worker blocks on put when full.
+    queue: asyncio.Queue = asyncio.Queue(maxsize=256)
+    # Holder for the worker's exception so the consumer can re-raise it.
+    error_box: dict[str, BaseException] = {}
+
+    def _put(item) -> None:
+        # The queue is NOT thread-safe; the only safe way to enqueue from the
+        # worker thread is to schedule the put on the event loop thread.
+        loop.call_soon_threadsafe(queue.put_nowait, item)
+
+    def _drain_stream_sync() -> None:
+        """Open the streaming completion and pump tokens onto the queue.
+
+        Runs entirely on a worker thread. Any exception is captured and signalled
+        via `_STREAM_ERROR` so the consumer re-raises it; a clean end signals
+        `_STREAM_DONE`. Exactly one terminal sentinel is always pushed.
+        """
+        try:
+            stream = azure.openai_client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model=deployment_name,
+                stream=True,
+            )
+            for chunk in stream:
+                # Defensive: some chunks (role-only first chunk, usage chunk)
+                # carry no choices or no content delta.
+                choices = getattr(chunk, "choices", None)
+                if not choices:
+                    continue
+                delta = getattr(choices[0], "delta", None)
+                content = getattr(delta, "content", None) if delta is not None else None
+                if content:
+                    _put(content)
+        except BaseException as e:  # noqa: BLE001 - surfaced to the consumer
+            error_box["error"] = e
+            _put(_STREAM_ERROR)
+        else:
+            _put(_STREAM_DONE)
+
+    # Submit the blocking work to the shared executor; do NOT await the future
+    # here — that would block until the whole stream completes. We drain the
+    # queue instead and consult the future only for sentinel/error handling.
+    future = loop.run_in_executor(openai_executor, _drain_stream_sync)
+
+    try:
+        while True:
+            item = await queue.get()
+            if item is _STREAM_DONE:
+                return
+            if item is _STREAM_ERROR:
+                err = error_box.get("error") or RuntimeError("OpenAI stream failed")
+                logger.error(f"Error streaming OpenAI response: {err}")
+                raise err
+            yield item
+    finally:
+        # Ensure the worker future is observed so its exception (if any) is not
+        # swallowed silently by the loop, and the executor slot is released.
+        if not future.done():
+            future.cancel()
 
 
 def _rephrase_sync(azure, rendered: str) -> str:

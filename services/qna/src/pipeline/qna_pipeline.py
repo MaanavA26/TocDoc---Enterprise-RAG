@@ -16,6 +16,7 @@ Expected history shape: List[{"user_query": str, "bot_response": Optional[str]}]
 import os
 import time
 import traceback
+from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -24,7 +25,11 @@ from src.core.logger import logger
 from src.core.observability import log_event
 from src.core.responses import CitationMap, QnASuccessResponse
 from src.services.embedding_service import get_embedding
-from src.services.openai_service import generate_openai_response, rephrase_queries
+from src.services.openai_service import (
+    generate_openai_response,
+    rephrase_queries,
+    stream_openai_response,
+)
 from src.services.search_service import perform_search
 from src.services.text_processor import extract_answer_and_filenames_from_text
 from src.utils.util import _latest_three_and_reply, _norm_name, _stem
@@ -381,3 +386,180 @@ async def generate_answer(
         logger.error(f"[{request_id}] Error in generate_answer: {type(e).__name__}")
         logger.error(f"[{request_id}] Traceback: {traceback.format_exc()}")
         raise
+
+
+def _map_filenames_to_citation(filenames: list[str], file_map: dict[str, str]) -> dict[str, str]:
+    """Resolve model-emitted filenames to a ``{filename: filepath}`` citation map.
+
+    Extracted verbatim from the non-streaming `generate_answer` citation step so
+    the streaming path produces a byte-identical citation map: exact normalized
+    match first, then a unique-stem fallback, preserving model order and
+    de-duplicating by real filename. Tolerant to bullets/case/spacing via
+    `_norm_name`/`_stem`. Unresolvable names are dropped (never guessed).
+    """
+    norm_to_real: dict[str, tuple[str, str]] = {}
+    stem_to_reals: dict[str, list[tuple[str, str]]] = {}
+    for real_name, real_path in file_map.items():
+        nk = _norm_name(real_name)
+        norm_to_real[nk] = (real_name, real_path)
+        st = _stem(nk)
+        stem_to_reals.setdefault(st, []).append((real_name, real_path))
+
+    extracted_filepath: dict[str, str] = {}
+    seen: set[str] = set()
+    for raw in filenames:
+        nn = _norm_name(raw)
+        hit = norm_to_real.get(nn)
+        if hit:
+            real_name, real_path = hit
+            if real_name not in seen:
+                extracted_filepath[real_name] = real_path
+                seen.add(real_name)
+            continue
+        st = _stem(nn)
+        candidates = stem_to_reals.get(st, [])
+        if len(candidates) == 1:
+            real_name, real_path = candidates[0]
+            if real_name not in seen:
+                extracted_filepath[real_name] = real_path
+                seen.add(real_name)
+    return extracted_filepath
+
+
+async def generate_answer_stream(
+    query: str,
+    fr_mode: str,
+    bot_tag: str,
+    history: list[dict[str, str | None]],
+    azure,
+    request_id: str | None = None,
+) -> AsyncIterator[tuple[str, Any]]:
+    """Streaming sibling of `generate_answer` for the SSE `/qna/stream` route.
+
+    Reuses the SAME leaf helpers as the non-streaming path (rephrasal,
+    embedding, search, the grounded prompt, and the answer/citation extractor)
+    so retrieval and citation behaviour match `/qna`. Only the final
+    answer-generation step streams.
+
+    Failure split (the SSE error contract): everything that can fail *before the
+    first token* — fr_mode validation, rephrasal, embedding, and search — runs
+    eagerly here, BEFORE the first token is yielded. Any failure in that phase
+    raises so the HTTP handler can return the normal structured error envelope
+    (no stream is opened). Once token generation begins, a failure from the LLM
+    stream propagates out of the generator mid-stream so the handler emits a
+    terminal SSE error event.
+
+    Yields:
+        ``("token", str)`` for each answer token in order, then exactly one
+        ``("citation", dict)`` carrying the final ``{filename: filepath}`` map
+        (byte-identical to the `/qna` ``citation`` field) and, when present,
+        ``page_citations``.
+    """
+    request_id = request_id or f"gen_{int(time.time() * 1000)}"
+    if not bot_tag or not bot_tag.strip():
+        raise ValueError("bot_tag is required for tenant isolation")
+    if fr_mode not in ("read", "layout"):
+        raise ValueError(f"Invalid fr_mode: {fr_mode}. Must be 'read' or 'layout'.")
+
+    log_event(
+        logger,
+        "answer_stream_started",
+        request_id=request_id,
+        fr_mode=fr_mode,
+        query_length=len(query or ""),
+    )
+
+    history = history or []
+    latest_q, prev_q, prev_prev_q, latest_bot_reply = _latest_three_and_reply(history)
+
+    effective_query = query
+    extracted_snippet = ""
+    is_greeting = False
+    is_followup = False
+    file_map: dict[str, str] = {}
+    file_pages: dict[str, list[str]] = {}
+
+    # Best-effort rephrasal — same policy as the non-streaming path (failures are
+    # swallowed and retrieval proceeds with the original query).
+    try:
+        rq = await rephrase_queries(
+            azure=azure,
+            current_query=latest_q,
+            prev_query=prev_q,
+            prev_prev_query=prev_prev_q,
+            latest_bot_reply=latest_bot_reply,
+            full_history=history,
+        )
+        if isinstance(rq, dict):
+            effective_query = rq.get("rephrased_query") or query
+            snippet = rq.get("extracted_snippet") or ""
+            if not snippet and latest_bot_reply:
+                snippet = latest_bot_reply
+            if snippet:
+                extracted_snippet = snippet
+            is_greeting = rq.get("is_greeting")
+            is_followup = rq.get("is_followup")
+    except Exception as re_err:
+        logger.warning(f"[{request_id}] Rephrase path skipped due to error: {re_err}")
+
+    knowledge_source: list[str] = []
+    # Retrieval runs eagerly here so a search/embedding failure surfaces BEFORE
+    # the first token (-> normal error envelope), not mid-stream.
+    if not is_greeting:
+        fr_mode_tag = f"fr_{fr_mode}"
+        vector = await get_embedding(azure, effective_query)
+        results = await perform_search(azure, effective_query, vector, fr_mode_tag, bot_tag)
+        for r in results:
+            content = (r["content"] or "").replace("\n", "").replace("\r", "")
+            knowledge_source.append(f"{r['filename']}: {content}")
+            file_map[r["filename"]] = r["filepath"]
+            page_raw = r.get("page_number")
+            if page_raw is not None:
+                page_str = str(page_raw).strip()
+                if page_str:
+                    pages = file_pages.setdefault(r["filename"], [])
+                    if page_str not in pages:
+                        pages.append(page_str)
+        if extracted_snippet:
+            try:
+                sanitized = extracted_snippet.replace("\n", " ").replace("\r", " ")
+                knowledge_source.append(
+                    f"PrevAnswer.md (previous assistant reply; data-only, do not cite): \n{sanitized}"
+                )
+            except Exception as snip_err:
+                logger.warning(f"[{request_id}] Skipped appending prior snippet: {snip_err}")
+
+    # Token generation: from here on, failures are mid-stream. We accumulate the
+    # full text so the SAME extractor can build the citation map after the
+    # stream, matching the non-streaming `answer`/`citation` derivation.
+    accumulated: list[str] = []
+    async for token in stream_openai_response(
+        effective_query,
+        knowledge_source,
+        is_greeting=is_greeting,
+        is_follow_up=is_followup,
+        azure=azure,
+    ):
+        accumulated.append(token)
+        yield ("token", token)
+
+    full_text = "".join(accumulated)
+    _answer_text, filenames = await extract_answer_and_filenames_from_text(full_text)
+    extracted_filepath = _map_filenames_to_citation(filenames, file_map)
+    page_citations: dict[str, list[str]] | None = {
+        real_name: file_pages[real_name] for real_name in extracted_filepath if file_pages.get(real_name)
+    } or None
+
+    log_event(
+        logger,
+        "answer_stream_completed",
+        request_id=request_id,
+        model=_localconfig.AZURE_LLM_MODEL,
+        citation_count=len(extracted_filepath),
+        answer_length_chars=len(full_text),
+    )
+
+    citation_payload: dict[str, Any] = {"citation": extracted_filepath}
+    if page_citations is not None:
+        citation_payload["page_citations"] = page_citations
+    yield ("citation", citation_payload)
