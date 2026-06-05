@@ -30,7 +30,8 @@ targetScope = 'resourceGroup'
 
 // ── Non-secret parameters ─────────────────────────────────────────────────────
 
-@description('Short name prefix for all resource names. Keep under 8 chars.')
+@description('Short name prefix for all resource names. Max 8 characters.')
+@maxLength(8)
 param prefix string = 'tocdoc'
 
 @description('Azure region for all resources.')
@@ -300,6 +301,14 @@ resource ingestionApp 'Microsoft.App/containerApps@2023-11-02-preview' = {
             { name: 'DOC_INTELLIGENCE_KEY', secretRef: 'doc-intel-key'  }
             { name: 'ADMIN_API_TOKEN',    secretRef: 'admin-api-token' }
           ], appInsightsEnv)
+          // Health-check parity with the Terraform module (main.tf). The
+          // ingestion service exposes GET /health (services/ingestion/app.py):
+          // Liveness restarts a hung-but-running process; Readiness gates an
+          // unhealthy app (e.g. cannot reach Key Vault/OpenAI) out of ingress.
+          probes: [
+            { type: 'Liveness',  httpGet: { path: '/health', port: 5501 } }
+            { type: 'Readiness', httpGet: { path: '/health', port: 5501 } }
+          ]
         }
       ]
       scale: { minReplicas: 0, maxReplicas: 3 }
@@ -364,6 +373,14 @@ resource qnaApp 'Microsoft.App/containerApps@2023-11-02-preview' = {
             { name: 'AZURE_CLIENT_ID',      secretRef: 'azure-client-id'     }
             { name: 'AZURE_CLIENT_SECRET',  secretRef: 'azure-client-secret' }
           ], appInsightsEnv)
+          // Health-check parity with the Terraform module (main.tf). The QnA
+          // service exposes GET /health (treated as public in
+          // services/qna/src/core/auth.py): Liveness restarts a hung process;
+          // Readiness gates an unhealthy app out of the ingress rotation.
+          probes: [
+            { type: 'Liveness',  httpGet: { path: '/health', port: 5500 } }
+            { type: 'Readiness', httpGet: { path: '/health', port: 5500 } }
+          ]
         }
       ]
       scale: { minReplicas: 0, maxReplicas: 3 }
