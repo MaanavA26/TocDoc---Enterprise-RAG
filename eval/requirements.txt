@@ -1,11 +1,98 @@
-# RAGAS offline evaluation harness dependencies (P4-2).
-# SEPARATE from services/qna/requirements.txt so ragas does NOT bloat the QnA
-# runtime image. The harness imports the QnA pipeline read-only, so it pulls the
-# service runtime deps via the -r include. Run from a venv created with:
+# RAGAS offline evaluation harness — STANDALONE dependency set (P4-2).
+#
+# This file is pinned INDEPENDENTLY of the services and is NOT a subset of
+# any service's runtime image. The eval harness is a dev/CI tool only.
+#
+# WHY DECOUPLED (do not re-add `-r ../services/qna/requirements.txt`):
+# The services now run the langchain 1.x cascade (langchain 1.3.2 family,
+# langchain-core 1.4.0, langchain-community 0.4.2). ragas cannot yet run on
+# langchain 1.x: ragas imports
+#   langchain_community.chat_models.vertexai.ChatVertexAI
+# at module load, and that symbol was removed in langchain-community 0.4.x.
+# The langchain-community versions that still export it cap langchain-core<1,
+# which is incompatible with the services. So the harness is pinned to the
+# last langchain 0.3.x stack that ragas supports, fully self-contained here.
+#
+# The harness imports the QnA service source READ-ONLY (via sys.path, as
+# `src.*`). QnA's only langchain imports are `langchain_openai`.AzureOpenAIEmbeddings
+# and `langgraph.graph` (START/END/StateGraph) — both present in 0.3.x and 1.x —
+# so the on-disk 1.x QnA source imports cleanly under this 0.3.x stack.
+#
+# Build a dedicated venv (python3.12) for this harness; do NOT install it into
+# the QnA service venv:
+#     python3.12 -m venv .venv-eval && . .venv-eval/bin/activate
 #     pip install -r eval/requirements.txt
-# Verified to resolve clean alongside the QnA pins (langchain-core stays 0.3.x).
--r ../services/qna/requirements.txt
 
-# --- RAGAS eval-only deps (kept out of the runtime image) ---
+# --- web / async / http (QnA import-time closure) ---
+fastapi==0.136.3
+starlette==1.2.0
+uvicorn==0.48.0
+python-multipart==0.0.29
+aiohttp==3.14.0
+aiohappyeyeballs==2.6.2
+aiosignal==1.4.0
+frozenlist==1.8.0
+multidict==6.7.1
+propcache==0.5.2
+yarl==1.24.2
+anyio==4.9.0
+httpx==0.28.1
+httpcore==1.0.9
+httpx-sse==0.4.0
+h11==0.16.0
+sniffio==1.3.1
+requests==2.34.2
+requests-toolbelt==1.0.0
+
+# --- Azure / auth (QnA import-time closure) ---
+azure-ai-documentintelligence==1.0.2
+azure-common==1.1.28
+azure-core==1.41.0
+azure-identity==1.25.3
+azure-keyvault-secrets==4.11.0
+azure-search-documents==12.0.0
+msal==1.37.0
+msal-extensions==1.3.1
+python-jose==3.5.0
+cryptography==48.0.0
+
+# --- langchain 0.3.x stack (ragas-compatible; langchain-core stays <1) ---
+langchain==0.3.25
+langchain-community==0.3.24
+langchain-core==0.3.60
+langchain-openai==0.3.17
+langchain-text-splitters==0.3.8
+langgraph==0.2.76
+langsmith==0.3.42
+openai==1.79.0
+tiktoken==0.9.0
+
+# --- data / numeric (ragas-compatible: pandas 2.x, numpy 2.2.x) ---
+pandas==2.2.3
+numpy==2.2.6
+scipy==1.15.3
+openpyxl==3.1.5
+
+# --- document / model utilities (QnA import-time closure) ---
+PyMuPDF==1.26.0
+pypdf==6.12.2
+pytesseract==0.3.13
+pillow==12.2.0
+pydantic==2.13.4
+pydantic-settings==2.14.1
+pydantic_core==2.46.4
+marshmallow==3.26.2
+dataclasses-json==0.6.7
+SQLAlchemy==2.0.41
+sqlmodel==0.0.24
+greenlet==3.2.2
+python-dotenv==1.2.2
+PyYAML==6.0.2
+
+# --- RAGAS eval-only deps (the reason this harness is decoupled) ---
 ragas==0.4.3
 datasets==4.4.1
+
+# --- test runner (CI gate: `pytest eval -q`) ---
+pytest
+pytest-asyncio
