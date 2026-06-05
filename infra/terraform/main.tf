@@ -307,6 +307,17 @@ resource "azurerm_container_app" "ingestion" {
         secret_name = "admin-api-token"
       }
 
+      # ── App Insights tracing (opt-in; mirrors the Bicep enableAppInsightsTracing) ──
+      # When enabled, inject the connection string the service code reads to turn
+      # on the Azure Monitor trace exporter. Off by default.
+      dynamic "env" {
+        for_each = var.enable_app_insights_tracing ? [1] : []
+        content {
+          name  = "APPLICATIONINSIGHTS_CONNECTION_STRING"
+          value = azurerm_application_insights.main.connection_string
+        }
+      }
+
       # Probes (not present in the Bicep; added per spec). The ingestion service
       # exposes GET /health (services/ingestion/app.py).
       liveness_probe {
@@ -445,6 +456,17 @@ resource "azurerm_container_app" "qna" {
       env {
         name        = "AZURE_CLIENT_SECRET"
         secret_name = "azure-client-secret"
+      }
+
+      # ── App Insights tracing (opt-in; mirrors the Bicep enableAppInsightsTracing) ──
+      # When enabled, inject the connection string the service code reads to turn
+      # on the Azure Monitor trace exporter. Off by default.
+      dynamic "env" {
+        for_each = var.enable_app_insights_tracing ? [1] : []
+        content {
+          name  = "APPLICATIONINSIGHTS_CONNECTION_STRING"
+          value = azurerm_application_insights.main.connection_string
+        }
       }
 
       # Probes (not present in the Bicep; added per spec). The QnA service

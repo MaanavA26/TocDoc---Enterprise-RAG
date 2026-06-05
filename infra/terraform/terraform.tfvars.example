@@ -23,9 +23,10 @@ openai_sku             = "S0"
 search_sku             = "standard" # azurerm naming; portal/Bicep call this "S1"
 
 # ── Network / auth hardening (defaults match the current working posture) ──
-ingestion_ingress_external = false
-disable_local_auth         = false
-allowed_ip_ranges          = [] # e.g. ["203.0.113.0/24", "198.51.100.10/32"]
+ingestion_ingress_external  = false
+disable_local_auth          = false
+enable_app_insights_tracing = false # wire APPLICATIONINSIGHTS_CONNECTION_STRING into both apps
+allowed_ip_ranges           = []    # e.g. ["203.0.113.0/24", "198.51.100.10/32"]
 
 # ── Secrets (PLACEHOLDERS — replace, and prefer TF_VAR_* env vars) ──
 openai_api_key    = "REPLACE_WITH_AZURE_OPENAI_KEY"
