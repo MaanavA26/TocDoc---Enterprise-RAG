@@ -15,6 +15,9 @@ from tocdoc_sdk import (
     AdminClient,
     ApiError,
     AsyncTocDocClient,
+    ConnectorRunListResponse,
+    ConnectorRunStatusResponse,
+    ConnectorSyncResponse,
     DocumentDetailResponse,
     DocumentListResponse,
     IndexStatsResponse,
@@ -299,3 +302,154 @@ def test_admin_requires_admin_token():
     """Constructing an AdminClient without a token is a ValueError."""
     with pytest.raises(ValueError):
         AdminClient(ADMIN_URL, admin_token="")
+
+
+# ---------------------------------------------------------------------------
+# Admin connector control-plane
+# ---------------------------------------------------------------------------
+
+
+def test_admin_trigger_connector_sync_happy_path():
+    """trigger_connector_sync POSTs (no body) and returns a typed run-handle."""
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["method"] = request.method
+        seen["admin_token"] = request.headers.get("x-admin-token", "")
+        seen["body"] = request.content
+        # The server accepts the trigger with 202 Accepted.
+        return httpx.Response(
+            202,
+            json={"run_id": "abc123", "source_type": "blob", "status": "started"},
+        )
+
+    with _make_admin_client(handler) as admin:
+        run = admin.trigger_connector_sync("blob")
+
+    assert seen["path"] == "/admin/connectors/blob/sync"
+    assert seen["method"] == "POST"
+    assert seen["admin_token"] == "admin-secret"
+    # No request body is sent — source_type is the only input (path param).
+    assert seen["body"] == b""
+    assert isinstance(run, ConnectorSyncResponse)
+    assert run.run_id == "abc123"
+    assert run.source_type == "blob"
+    assert run.status == "started"
+
+
+def test_admin_trigger_connector_sync_bad_source_type_raises_api_error():
+    """An unsupported source_type is rejected server-side as a 400 envelope."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/admin/connectors/nope/sync"
+        return httpx.Response(
+            400,
+            json={
+                "error": {
+                    "code": "INVALID_REQUEST",
+                    "message": "Unsupported source_type; expected one of ['blob', 'sharepoint'].",
+                    "request_id": "req-bad",
+                }
+            },
+        )
+
+    with _make_admin_client(handler, max_retries=0) as admin, pytest.raises(ApiError) as excinfo:
+        admin.trigger_connector_sync("nope")
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.code == "INVALID_REQUEST"
+    assert excinfo.value.request_id == "req-bad"
+
+
+def test_admin_list_connector_runs_passes_limit_and_returns_typed():
+    """list_connector_runs forwards limit and returns typed run records."""
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["method"] = request.method
+        seen["limit"] = request.url.params.get("limit", "")
+        return httpx.Response(
+            200,
+            json={
+                "count": 1,
+                "runs": [
+                    {
+                        "run_id": "r-1",
+                        "status": "completed",
+                        "source_type": "blob",
+                        "bot_tag": "acme",
+                        "started_at": "2026-01-01T00:00:00Z",
+                        "finished_at": "2026-01-01T00:01:00Z",
+                        "processed_count": 7,
+                        "failed_count": 0,
+                        "error": None,
+                    }
+                ],
+            },
+        )
+
+    with _make_admin_client(handler) as admin:
+        result = admin.list_connector_runs(limit=20)
+
+    assert seen["path"] == "/admin/connectors/runs"
+    assert seen["method"] == "GET"
+    assert seen["limit"] == "20"
+    assert isinstance(result, ConnectorRunListResponse)
+    assert result.count == 1
+    assert result.runs[0].run_id == "r-1"
+    assert result.runs[0].processed_count == 7
+
+
+def test_admin_get_connector_run_happy_path():
+    """get_connector_run hits the per-run path and parses a failed-run error."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/admin/connectors/runs/r-9"
+        assert request.method == "GET"
+        return httpx.Response(
+            200,
+            json={
+                "run_id": "r-9",
+                "status": "failed",
+                "source_type": "sharepoint",
+                "bot_tag": "acme",
+                "started_at": "2026-01-01T00:00:00Z",
+                "finished_at": "2026-01-01T00:00:30Z",
+                "processed_count": 0,
+                "failed_count": 0,
+                "error": {"error_class": "ConnectorError", "safe_message": "Connector sync run failed"},
+            },
+        )
+
+    with _make_admin_client(handler) as admin:
+        run = admin.get_connector_run("r-9")
+
+    assert isinstance(run, ConnectorRunStatusResponse)
+    assert run.status == "failed"
+    assert run.source_type == "sharepoint"
+    assert run.error is not None
+    assert run.error.error_class == "ConnectorError"
+
+
+def test_admin_get_connector_run_unknown_id_raises_api_error():
+    """An unknown/evicted run_id yields a 404 envelope -> ApiError."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            404,
+            json={
+                "error": {
+                    "code": "NOT_FOUND",
+                    "message": "No connector run found for this run_id.",
+                    "request_id": "req-404",
+                }
+            },
+        )
+
+    with _make_admin_client(handler, max_retries=0) as admin, pytest.raises(ApiError) as excinfo:
+        admin.get_connector_run("ghost")
+
+    assert excinfo.value.status_code == 404
+    assert excinfo.value.code == "NOT_FOUND"

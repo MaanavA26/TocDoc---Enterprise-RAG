@@ -1,4 +1,4 @@
-"""Synchronous client for the TocDoc read-only admin API.
+"""Synchronous client for the TocDoc admin API.
 
 The admin endpoints live on the **ingestion** service and authenticate with a
 static ``X-Admin-Token`` header (NOT the QnA bearer token), so this is a
@@ -7,12 +7,18 @@ method bolted onto :class:`TocDocClient`. If a deployment fronts both services
 behind one proxy, pass the same URL to both clients; if they are separate
 hosts, pass different ones — either way is correct.
 
-All three wrapped endpoints are read-only GETs scoped by ``bot_tag`` (tenant
-isolation is enforced server-side):
+Read-only GETs scoped by ``bot_tag`` (tenant isolation is enforced server-side):
 
 - ``GET /admin/documents?bot_tag=...``            -> :class:`DocumentListResponse`
 - ``GET /admin/documents/{id}?bot_tag=...``       -> :class:`DocumentDetailResponse`
 - ``GET /admin/index/stats?bot_tag=...``          -> :class:`IndexStatsResponse`
+
+Connector control-plane (admin-wide; bot_tag is bound server-side from env, so
+these take NO ``bot_tag`` argument):
+
+- ``POST /admin/connectors/{source_type}/sync``   -> :class:`ConnectorSyncResponse`
+- ``GET /admin/connectors/runs?limit=...``         -> :class:`ConnectorRunListResponse`
+- ``GET /admin/connectors/runs/{run_id}``          -> :class:`ConnectorRunStatusResponse`
 
 Transport, retry policy, and :class:`ApiError` semantics are shared with the
 QnA clients. The admin token is sent as a header and is NEVER logged.
@@ -35,7 +41,14 @@ from ._retry import (
     safe_json,
 )
 from .errors import ApiError
-from .models import DocumentDetailResponse, DocumentListResponse, IndexStatsResponse
+from .models import (
+    ConnectorRunListResponse,
+    ConnectorRunStatusResponse,
+    ConnectorSyncResponse,
+    DocumentDetailResponse,
+    DocumentListResponse,
+    IndexStatsResponse,
+)
 
 
 class AdminClient:
@@ -136,6 +149,61 @@ class AdminClient:
         body = self._get("/admin/index/stats", params={"bot_tag": bot_tag})
         return IndexStatsResponse.model_validate(body)
 
+    # ------------------------------------------------------------------
+    # Connector control-plane
+    # ------------------------------------------------------------------
+
+    def trigger_connector_sync(self, source_type: str) -> ConnectorSyncResponse:
+        """Trigger a connector sync for ``source_type`` (e.g. ``"blob"``).
+
+        Wraps ``POST /admin/connectors/{source_type}/sync``. The sync runs as an
+        in-process background task server-side, so this returns promptly (HTTP
+        202 Accepted) with a :class:`ConnectorSyncResponse` run-handle; poll
+        :meth:`get_connector_run` with ``result.run_id`` for the terminal status.
+
+        No request body is sent: the connector's ``bot_tag`` and per-source
+        location are bound server-side from env (immutable source -> bot_tag
+        binding), so ``source_type`` is the only input.
+
+        The set of supported source types is validated server-side; an
+        unsupported value raises :class:`ApiError` (400) rather than being
+        rejected client-side, so the SDK never drifts from the server allowlist.
+
+        Raises:
+            ApiError: On any non-2xx response (e.g. 400 for an unsupported
+                source_type or missing server-side connector config).
+        """
+        body = self._post(f"/admin/connectors/{source_type}/sync")
+        return ConnectorSyncResponse.model_validate(body)
+
+    def list_connector_runs(self, *, limit: int = 50) -> ConnectorRunListResponse:
+        """List recent connector sync runs, newest first.
+
+        Wraps ``GET /admin/connectors/runs``. Admin-wide (NOT ``bot_tag``-scoped)
+        view backed by the server's in-process store; state is lost on server
+        restart. ``limit`` caps the number of records returned (server bounds:
+        1..200).
+
+        Raises:
+            ApiError: On any non-2xx response (e.g. 422 for an out-of-range
+                ``limit``), carrying the envelope fields.
+        """
+        body = self._get("/admin/connectors/runs", params={"limit": limit})
+        return ConnectorRunListResponse.model_validate(body)
+
+    def get_connector_run(self, run_id: str) -> ConnectorRunStatusResponse:
+        """Get one connector sync run's status by ``run_id``.
+
+        Wraps ``GET /admin/connectors/runs/{run_id}``.
+
+        Raises:
+            ApiError: On any non-2xx response. A 404 means the ``run_id`` is
+                unknown, has been evicted from the bounded store, or was lost on
+                a server restart.
+        """
+        body = self._get(f"/admin/connectors/runs/{run_id}", params={})
+        return ConnectorRunStatusResponse.model_validate(body)
+
     def _get(self, path: str, *, params: dict[str, Any]) -> Any:
         """GET ``path`` with the shared retry policy; return the parsed body or raise.
 
@@ -144,6 +212,18 @@ class AdminClient:
         ``{"detail": ...}`` 503/404, to a synthesized ``HTTP_<status>``).
         """
         response = self._request_with_retries("GET", path, params=params)
+        if 200 <= response.status_code < 300:
+            return response.json()
+        raise ApiError.from_response(response.status_code, safe_json(response))
+
+    def _post(self, path: str) -> Any:
+        """POST ``path`` (no body) with the shared retry policy; parse or raise.
+
+        Mirrors :meth:`_get` on the response side: any 2xx (the sync trigger
+        returns 202 Accepted) yields the parsed JSON; any non-2xx raises
+        :class:`ApiError`, degrading non-envelope bodies to ``HTTP_<status>``.
+        """
+        response = self._request_with_retries("POST", path)
         if 200 <= response.status_code < 300:
             return response.json()
         raise ApiError.from_response(response.status_code, safe_json(response))

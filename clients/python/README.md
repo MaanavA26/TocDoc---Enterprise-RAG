@@ -9,8 +9,8 @@ and `pydantic`. It provides:
 
 - **`TocDocClient`** — synchronous QnA client (`POST /qna`).
 - **`AsyncTocDocClient`** — `asyncio` mirror of the QnA client.
-- **`AdminClient`** — read-only admin API client (ingestion service,
-  `X-Admin-Token` auth).
+- **`AdminClient`** — admin API client (ingestion service, `X-Admin-Token`
+  auth): read-only document/index reads plus the connector sync control-plane.
 
 ## Install
 
@@ -94,7 +94,7 @@ async def main():
 asyncio.run(main())
 ```
 
-## Admin API (read-only)
+## Admin API
 
 The admin endpoints live on the **ingestion** service and authenticate with a
 static `X-Admin-Token` header (not the QnA bearer token), so `AdminClient` is a
@@ -103,7 +103,8 @@ fronts both services behind one proxy, pass it the same URL as the QnA client;
 if they are separate hosts, pass the ingestion host. The admin token is sent as
 a header and is **never logged**.
 
-All reads are scoped by `bot_tag` (tenant isolation is enforced server-side):
+The reads below are scoped by `bot_tag` (tenant isolation is enforced
+server-side):
 
 ```python
 from tocdoc_sdk import AdminClient
@@ -130,6 +131,34 @@ with AdminClient(
 The same `ApiError` and retry behavior apply (a 404 when a document is not in
 scope raises `ApiError`; non-envelope error bodies degrade to a synthesized
 `HTTP_<status>` code).
+
+### Connector sync control-plane
+
+The same `AdminClient` can trigger connector syncs and read their run status.
+These are **admin-wide** (not `bot_tag`-scoped): the connector's `bot_tag` and
+per-source location are bound server-side from environment config, so the source
+-> `bot_tag` binding is immutable and the trigger takes only a `source_type`.
+
+```python
+# POST /admin/connectors/blob/sync  ->  202 Accepted (runs in the background)
+run = admin.trigger_connector_sync("blob")
+print(run.run_id, run.status)  # e.g. "<hex>" "started"
+
+# GET /admin/connectors/runs/{run_id}  (poll for the terminal status)
+status = admin.get_connector_run(run.run_id)
+print(status.status, status.processed_count, status.failed_count)
+if status.error is not None:
+    print(status.error.error_class, status.error.safe_message)
+
+# GET /admin/connectors/runs?limit=20  (recent runs, newest first)
+recent = admin.list_connector_runs(limit=20)
+print(recent.count, [r.run_id for r in recent.runs])
+```
+
+An unsupported `source_type` or missing server-side connector config raises
+`ApiError` (400); a `run_id` that is unknown, evicted, or lost on a server
+restart raises `ApiError` (404). Run state is in-process server-side and is not
+durable across restarts.
 
 ## Error handling
 
@@ -167,8 +196,11 @@ The models mirror the live server contracts:
 - **Success** (`QnAAnswer`): `{answer, citation: {filename: filepath}}`
 - **Error** (`ApiError`): `{error: {code, message, request_id, errors?}}`
 
-**Admin (read-only)** — mirrors `services/ingestion/admin`:
+**Admin** — mirrors `services/ingestion/admin`:
 
 - `GET /admin/documents` -> `DocumentListResponse` (`{bot_tag, count, documents: [DocumentSummary]}`)
 - `GET /admin/documents/{id}` -> `DocumentDetailResponse`
 - `GET /admin/index/stats` -> `IndexStatsResponse` (`{bot_tag, document_count, chunk_count, source_types, fr_modes}`)
+- `POST /admin/connectors/{source_type}/sync` -> `ConnectorSyncResponse` (`{run_id, source_type, status}`)
+- `GET /admin/connectors/runs` -> `ConnectorRunListResponse` (`{count, runs: [ConnectorRunStatusResponse]}`)
+- `GET /admin/connectors/runs/{run_id}` -> `ConnectorRunStatusResponse` (`{run_id, status, source_type, bot_tag, started_at, finished_at, processed_count, failed_count, error?}`)

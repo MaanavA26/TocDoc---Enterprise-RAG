@@ -12,6 +12,8 @@ Contract sources mirrored here (kept byte-compatible with the server):
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import BaseModel, ConfigDict, Field, RootModel
 
 
@@ -159,3 +161,77 @@ class IndexStatsResponse(BaseModel):
     chunk_count: int = Field(ge=0)
     source_types: dict[str, int] = Field(default_factory=dict)
     fr_modes: dict[str, int] = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Admin API (connector control-plane) — mirrors services/ingestion/admin/models.py
+# ---------------------------------------------------------------------------
+#
+# Standalone copies of the connector sync/run-status shapes. As above, these use
+# ``extra="ignore"`` so the SDK tolerates and drops forward-compatible keys the
+# server may add (e.g. new run fields) instead of failing validation.
+
+
+class ConnectorSyncResponse(BaseModel):
+    """Typed run-handle for ``POST /admin/connectors/{source_type}/sync``.
+
+    Returned with HTTP 202 Accepted — the sync runs as an in-process background
+    task server-side, so the request does NOT block on the full
+    enumerate -> fetch -> upload loop. ``run_id`` correlates the background run and
+    is the key for the run-status getters below.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    run_id: str
+    source_type: str
+    status: str = "started"
+
+
+class ConnectorRunError(BaseModel):
+    """Safe error summary attached to a failed connector run.
+
+    Carries only the exception CLASS name and a generic category message — the
+    server never emits raw exception text, secrets, or document content here.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    error_class: str
+    safe_message: str
+
+
+class ConnectorRunStatusResponse(BaseModel):
+    """Typed body for ``GET /admin/connectors/runs/{run_id}``.
+
+    Reflects the server's in-process run-status store. ``status`` is one of
+    ``started`` | ``completed`` | ``failed``; counts are populated on completion
+    and ``error`` is present only on failure. Run state is in-process server-side
+    and LOST on restart, so an unknown/evicted ``run_id`` raises ``ApiError``
+    (404) rather than returning a record.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    run_id: str
+    status: str
+    source_type: str
+    bot_tag: str
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    processed_count: int = Field(default=0, ge=0)
+    failed_count: int = Field(default=0, ge=0)
+    error: ConnectorRunError | None = None
+
+
+class ConnectorRunListResponse(BaseModel):
+    """Typed body for ``GET /admin/connectors/runs``.
+
+    Admin-wide view across ``bot_tag``s (the operator triggering a sync is a
+    privileged, bot_tag-agnostic role), newest first.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    count: int = Field(ge=0)
+    runs: list[ConnectorRunStatusResponse] = Field(default_factory=list)
