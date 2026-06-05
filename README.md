@@ -9,7 +9,7 @@ for intelligent document Q&A over enterprise PDF corpora.**
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![Azure OpenAI](https://img.shields.io/badge/Azure%20OpenAI-GPT--4o--mini-0078D4?logo=microsoft-azure&logoColor=white)](https://azure.microsoft.com/en-us/products/ai-services/openai-service)
 [![Azure AI Search](https://img.shields.io/badge/Azure%20AI%20Search-Hybrid%20Vector-0078D4?logo=microsoft-azure&logoColor=white)](https://azure.microsoft.com/en-us/products/ai-services/cognitive-search)
-[![License](https://img.shields.io/badge/License-Apache%202.0-green)](LICENSE)
+[![License: BSL 1.1](https://img.shields.io/badge/License-BSL%201.1-blue)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)](CONTRIBUTING.md)
 
 </div>
@@ -168,7 +168,7 @@ TocDoc-Enterprise-RAG/
 ├── docker-compose.yml              # Local dev: spin up both services
 ├── .env.example                    # Combined env variable reference
 ├── .gitignore
-├── LICENSE                         # Apache 2.0
+├── LICENSE                         # Business Source License 1.1 (source-available)
 └── README.md
 ```
 
@@ -456,24 +456,30 @@ TocDoc is designed for production deployment on **Azure Kubernetes Service (AKS)
 
 ## Known Limitations & Roadmap
 
+> Most of the original P0/P1 limitations are now **resolved** — RS256 JWT signature verification, `bot_tag` tenant isolation, the structured error contract, the admin API, connector ingestion, and the CI quality gate have all shipped. See the [master tracker](docs/agent_plan/00_MASTER_TRACKER.md) and [ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
 ### Current Limitations
 
-| # | Limitation | Impact |
+| # | Limitation | Notes |
 |---|---|---|
-| 1 | **JWT signature is not verified** — `verify_signature=False` in `src/core/auth.py` | Any well-formed token is accepted regardless of signing key. **Enable full signature validation before going to production.** |
-| 2 | **`bot_tag` not used as a search filter in QnA** — it is stored at ingestion time but not applied as a filter expression during retrieval | Documents from different tenants can bleed across queries when using a shared index |
-| 3 | **Synchronous Azure SDK calls wrapped in `ThreadPoolExecutor`** — works correctly but introduces thread-pool overhead | Consider fully async Azure SDK clients (`azure-search-documents[async]`) for higher concurrency |
+| 1 | **Synchronous Azure SDK calls wrapped in bounded `ThreadPoolExecutor`s** | Correct and concurrency-safe; fully-async Azure clients are a possible future optimization for higher throughput. |
+| 2 | **`pip-audit` is report-only; coverage is computed but not gated** | Dependency CVEs are surfaced (and now auto-raised by Dependabot) but don't yet fail the build; a coverage threshold lands once a baseline is set. |
+| 3 | **Validated against mocks + CI, not yet a live Azure deployment** | All tests are hermetic; an end-to-end smoke test against a real Azure resource group is the recommended pre-production step. |
+| 4 | **Page-level citations not yet shipped** | Citations resolve to source files today; page-level provenance is designed (ADR) and pending a reindex decision. |
 
 ### Roadmap
 
-- [ ] Enable RS256 JWT signature verification against Azure AD JWKS endpoint
-- [ ] Add `bot_tag` as a mandatory filter in `search_service.py` for full multi-tenant isolation
-- [ ] Streaming responses via Server-Sent Events (SSE) for the QnA endpoint
-- [ ] Re-ranking layer (Azure Semantic Ranker or cross-encoder) for improved retrieval precision
-- [ ] Kubernetes manifests and Helm chart
-- [ ] CI/CD pipeline (GitHub Actions) with automated test and image build
-- [ ] Support for additional document formats (DOCX, PPTX, XLSX)
-- [ ] Admin API for index management (delete by `bot_tag`, re-index, stats)
+- [x] RS256 JWT signature verification against the Azure AD JWKS endpoint — *shipped*
+- [x] `bot_tag` as a mandatory tenant filter in retrieval — *shipped*
+- [x] Config-gated semantic reranking (Azure Semantic Ranker) — *shipped*
+- [x] GitHub Actions CI/CD with lint, security, and test gates — *shipped*
+- [x] Admin API for index management (delete by `bot_tag`, reindex stub, stats) — *shipped*
+- [x] Blob Storage + SharePoint connector ingestion — *shipped*
+- [ ] Page-level citations (pending a reindex decision — see ADR)
+- [ ] Agentic layer (LangGraph: router / map-reduce / ReAct / self-critique / memory / SSE streaming)
+- [ ] Microsoft Teams bot front end
+- [ ] RAGAS evaluation gating in CI; coverage threshold
+- [ ] Kubernetes / Helm packaging; published Python SDK
 
 ---
 
@@ -493,12 +499,13 @@ For significant changes, please open an issue first to discuss the approach.
 
 ## License
 
-This project is licensed under the **Apache License 2.0** — see the [LICENSE](LICENSE) file for details.
+TocDoc is **source-available** under the [Business Source License 1.1](LICENSE) (BSL 1.1):
 
-The Apache 2.0 license provides:
-- Freedom to use, modify, and distribute commercially
-- Patent grant — contributors grant you a royalty-free patent license
-- Attribution requirement — modified files must carry prominent notices
+- ✅ **Free for non-production use** — development, testing, evaluation, internal experimentation, and research.
+- ⛔ **Competing production/commercial use** (offering TocDoc or a derivative as a hosted, managed, or embedded service to third parties) requires a **commercial license** — contact the maintainers.
+- 🔄 On the **Change Date** (see [LICENSE](LICENSE)) each version automatically converts to the **Apache License 2.0**.
+
+This keeps the code open for inspection and contribution while protecting the commercial product. Vulnerability reports: see [SECURITY.md](SECURITY.md).
 
 ---
 
