@@ -76,8 +76,9 @@ class TestHealthCheckNoStackTrace:
         return TestClient(qna_app.app, raise_server_exceptions=False)
 
     def test_health_failure_leaks_no_exception_text(self, client: TestClient):
-        """When the readiness probe raises, the 200 status report must carry a
-        generic message — never `str(e)` (CodeQL py/stack-trace-exposure)."""
+        """When the readiness probe raises, the response must carry a generic
+        message — never `str(e)` (CodeQL py/stack-trace-exposure) — AND return
+        HTTP 503 so probes pull the instance from rotation (audit L-Q5)."""
         secret = "sensitive internal detail zzz999"
 
         class _Boom:
@@ -89,8 +90,9 @@ class TestHealthCheckNoStackTrace:
         with patch("app.datetime", _Boom()):
             r = client.get("/health")
 
-        # Shape preserved for external monitors (still a 200 status report).
-        assert r.status_code == 200
+        # Unhealthy branch now returns 503 (L-Q5) while preserving the body
+        # shape for external monitors.
+        assert r.status_code == 503
         body = r.json()
         assert body["status"] == "error"
         # No exception text / class anywhere in the response.

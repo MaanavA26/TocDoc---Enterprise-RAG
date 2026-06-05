@@ -28,7 +28,10 @@ async def extract_answer_and_filenames_from_text(text: str) -> tuple[str, list[s
             - `answer_text` is the portion before the "**Sources:" marker.
             - `filenames` is a list of filenames parsed from the sources section.
     """
-    logger.debug(f"Extracting answer and filenames from text: {text[:100]}...")
+    # NEVER log the raw answer text — even at DEBUG it bypasses the log_event
+    # truncation/hygiene net and violates the observability policy (audit L-Q7).
+    # Log metadata only; length is enough to debug extraction issues.
+    logger.debug("Extracting answer and filenames from text (length=%d)", len(text or ""))
     try:
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(text_executor, _extract_sync, text)

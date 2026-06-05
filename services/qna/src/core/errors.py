@@ -61,6 +61,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import JSONResponse
 
 from src.core.observability import log_event
@@ -96,6 +97,7 @@ _STATUS_TO_CODE = {
     401: ApiErrorCode.UNAUTHORIZED,
     403: ApiErrorCode.UNAUTHORIZED,
     404: ApiErrorCode.NOT_FOUND,
+    405: ApiErrorCode.INVALID_REQUEST,
     409: ApiErrorCode.INVALID_REQUEST,
     422: ApiErrorCode.VALIDATION_ERROR,
     503: ApiErrorCode.UPSTREAM_UNAVAILABLE,
@@ -228,8 +230,15 @@ def build_error_response(
     )
 
 
-async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
     """Convert any `HTTPException` (string-detail or dict-detail) into the envelope.
+
+    Registered on `starlette.exceptions.HTTPException`, which `fastapi.HTTPException`
+    subclasses — so this catches BOTH explicit callsites (dict/string detail) AND
+    framework routing errors (404 no-such-route, 405 method-not-allowed), which
+    Starlette raises as the parent class. Without the parent registration those
+    framework errors would bypass the envelope and emit FastAPI's bare
+    `{"detail": "..."}` body (audit M2).
 
     Back-compat: if `detail` is a dict containing `code` / `message`, those
     are used directly. Otherwise the existing string detail becomes the
@@ -341,8 +350,12 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     Call once at app startup. Order does not matter — FastAPI dispatches
     to the handler registered for the matching exception type.
+
+    The HTTPException handler is registered on `starlette.exceptions.HTTPException`
+    (the parent of `fastapi.HTTPException`) so framework-raised 404/405 routing
+    errors are enveloped too, not just explicit callsites (audit M2).
     """
-    app.add_exception_handler(HTTPException, http_exception_handler)
+    app.add_exception_handler(StarletteHTTPException, http_exception_handler)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
     app.add_exception_handler(Exception, unhandled_exception_handler)
 
@@ -353,6 +366,7 @@ def register_exception_handlers(app: FastAPI) -> None:
 default_error_responses: dict[int | str, dict[str, Any]] = {
     400: {"model": ErrorEnvelope, "description": "Invalid request"},
     401: {"model": ErrorEnvelope, "description": "Unauthorized"},
+    403: {"model": ErrorEnvelope, "description": "Forbidden"},
     404: {"model": ErrorEnvelope, "description": "Not found"},
     422: {"model": ErrorEnvelope, "description": "Request validation failed"},
     500: {"model": ErrorEnvelope, "description": "Internal server error"},

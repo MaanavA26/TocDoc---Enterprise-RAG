@@ -82,8 +82,15 @@ async def generate_answer(
     request_id = request_id or f"gen_{int(time.time() * 1000)}"
     if not bot_tag or not bot_tag.strip():
         raise ValueError("bot_tag is required for tenant isolation")
-    logger.info(f"[{request_id}] Starting answer generation")
-    logger.info(f"[{request_id}] Query: {query!r}, fr_mode: {fr_mode!r}")
+    # Metadata-only start event — NEVER log the raw query (PII/confidential).
+    # fr_mode is a bounded enum ("read"/"layout"), safe to log.
+    log_event(
+        logger,
+        "answer_generation_started",
+        request_id=request_id,
+        fr_mode=fr_mode,
+        query_length=len(query or ""),
+    )
     start_time = time.time()
 
     # Defensive normalisation: treat None as an empty list.
@@ -99,13 +106,19 @@ async def generate_answer(
         # the latest bot response.
         latest_q, prev_q, prev_prev_q, latest_bot_reply = _latest_three_and_reply(history)
 
-        logger.info(f"[{request_id}] history types -> {[type(x).__name__ for x in history]}")
-        logger.info(f"[{request_id}] prev turn sample -> {history[-2] if len(history) >= 2 else 'n/a'}")
-        logger.info(
-            f"[{request_id}] Latest Query: {latest_q},\n"
-            f" Previous Query: {prev_q},\n"
-            f" Previous Previous Query: {prev_prev_q},\n"
-            f" Latest Bot Reply: {latest_bot_reply}"
+        # Metadata-only history event. NEVER log raw queries, the prior-turn
+        # dict, or the latest bot reply — these routinely carry customer PII and
+        # confidential document content, and interpolating them as bare strings
+        # is also a log-injection vector (audit H6 + M4). Log only counts and
+        # booleans; the observability policy forbids the raw values.
+        log_event(
+            logger,
+            "history_normalized",
+            request_id=request_id,
+            history_turns=len(history),
+            has_prev_query=bool(prev_q),
+            has_prev_prev_query=bool(prev_prev_q),
+            has_prev_reply=bool(latest_bot_reply),
         )
 
         # Use the caller's `query` as source of truth for the current turn.
