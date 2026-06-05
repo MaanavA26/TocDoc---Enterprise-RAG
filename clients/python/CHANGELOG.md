@@ -19,7 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   turns in addition to a single `query`.
 - **Streaming** (`stream_ask`) — consumes a Server-Sent-Events response and
   yields answer tokens; available on both the sync and async clients with no
-  extra dependency. Streaming requests are not retried.
+  extra dependency. Streaming requests are not retried. The SSE parser is
+  event-type aware: it yields **only** answer tokens (so `"".join(stream_ask(...))`
+  is the clean answer), surfaces the server's `event: citation` payload
+  out-of-band via the optional `on_citation` callback, and raises `ApiError` on
+  a mid-stream `event: error` instead of swallowing it.
 - **Admin client** (`AdminClient`) — read-only document and index reads
   (`list_documents`, `get_document`, `index_stats`) plus the connector sync
   control-plane (`trigger_connector_sync`, `get_connector_run`,

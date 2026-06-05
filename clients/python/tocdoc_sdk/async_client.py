@@ -30,7 +30,7 @@ from ._retry import (
     should_retry_status,
 )
 from ._sse import SSEDecoder
-from .client import _build_request
+from .client import CitationCallback, _build_request, _handle_stream_event
 from .errors import ApiError
 from .models import BotTurn, QnAAnswer
 
@@ -150,22 +150,33 @@ class AsyncTocDocClient:
         fr_tag: str,
         query: str | None = None,
         bot: Iterable[BotTurn | dict[str, Any]] | None = None,
+        on_citation: CitationCallback | None = None,
     ) -> AsyncIterator[str]:
         """Async mirror of :meth:`tocdoc_sdk.TocDocClient.stream_ask`.
 
-        Streams a QnA answer token-by-token from a future ``POST /qna/stream``
-        over ``httpx.AsyncClient``. Same request contract as :meth:`ask`; provide
+        Streams a QnA answer token-by-token from ``POST /qna/stream`` over
+        ``httpx.AsyncClient``. Same request contract as :meth:`ask`; provide
         exactly one of ``query`` or ``bot``. As with the sync helper, a streaming
         request is **not** retried, and a non-2xx status raises :class:`ApiError`
         before any token is yielded.
 
+        Like the sync helper, this yields **only** answer tokens, delivers the
+        ``event: citation`` payload out-of-band via ``on_citation``, and
+        **raises** :class:`ApiError` on a mid-stream ``event: error``.
+
+        Args:
+            on_citation: Optional callback invoked once with the parsed citation
+                payload when the ``event: citation`` event arrives. If ``None``,
+                the citation is not surfaced (never mixed into the token stream).
+
         Yields:
-            Each SSE ``data`` payload in order. The ``[DONE]`` sentinel
-            terminates the stream and is never yielded.
+            Each answer token in order. Citation/error events and the ``[DONE]``
+            sentinel are never yielded as tokens.
 
         Raises:
             ValueError: If neither or both of ``query`` / ``bot`` are given.
-            ApiError: On any non-2xx response (carries the envelope fields).
+            ApiError: On a non-2xx response (before any token) OR on a
+                mid-stream ``event: error`` (after tokens have begun).
         """
         request = _build_request(session_id=session_id, bot_tag=bot_tag, fr_tag=fr_tag, query=query, bot=bot)
 
@@ -180,14 +191,18 @@ class AsyncTocDocClient:
                 await response.aread()
                 raise ApiError.from_response(response.status_code, safe_json(response))
             async for raw in response.aiter_lines():
-                payload = decoder.feed(raw)
-                if payload is not None:
-                    yield payload
+                event = decoder.feed(raw)
+                if event is not None:
+                    token = _handle_stream_event(event[0], event[1], on_citation)
+                    if token is not None:
+                        yield token
                 if decoder.done:
                     return
-            payload = decoder.flush()
-            if payload is not None:
-                yield payload
+            event = decoder.flush()
+            if event is not None:
+                token = _handle_stream_event(event[0], event[1], on_citation)
+                if token is not None:
+                    yield token
 
     async def _request_with_retries(
         self, method: str, path: str, *, idempotent: bool, **kwargs: Any
