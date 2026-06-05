@@ -64,6 +64,46 @@ answer = client.ask(
 )
 ```
 
+## Command-line interface
+
+Installing the package also installs a `tocdoc` console command — a thin wrapper
+over the same clients, handy for demos and ops. It adds no new dependencies
+(stdlib `argparse` only).
+
+Credentials and the base URL resolve from a flag **or** an environment variable
+(the flag wins). The token is sent as a request header and is **never printed**:
+
+| Setting     | Flag            | Environment variable  |
+| ----------- | --------------- | --------------------- |
+| Base URL    | `--base-url`    | `TOCDOC_BASE_URL`     |
+| QnA token   | `--token`       | `TOCDOC_TOKEN`        |
+| Admin token | `--admin-token` | `TOCDOC_ADMIN_TOKEN`  |
+
+On an API error (or a missing base URL/token) the command prints a clean,
+one-line message to stderr and exits non-zero — never a traceback.
+
+```bash
+export TOCDOC_BASE_URL="https://your-tocdoc-host"
+export TOCDOC_TOKEN="YOUR_BEARER_TOKEN"
+
+# Ask a question (--session-id defaults to a generated UUID, --fr-tag to "read")
+tocdoc ask --bot-tag acme "What is the refund policy?"
+
+# Admin reads (use the ingestion host + admin token)
+export TOCDOC_ADMIN_TOKEN="YOUR_ADMIN_TOKEN"
+tocdoc admin docs --bot-tag acme                 # list documents
+tocdoc admin doc doc-1 --bot-tag acme            # one document's detail
+tocdoc admin index-stats --bot-tag acme          # aggregate index stats
+
+# Connector control-plane (admin-wide; bot_tag is bound server-side)
+tocdoc admin sync blob                           # trigger a sync -> run_id
+tocdoc admin runs --limit 20                     # recent runs, newest first
+tocdoc admin run <run_id>                        # one run's status
+```
+
+Run `tocdoc --help` (or `tocdoc ask --help`, `tocdoc admin --help`) for the full
+option list.
+
 ## Async client
 
 `AsyncTocDocClient` is a drop-in `asyncio` mirror of `TocDocClient`: same
