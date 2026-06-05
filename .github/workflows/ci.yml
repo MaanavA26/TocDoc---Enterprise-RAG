@@ -13,13 +13,14 @@ name: ci
 #   test (teams-bot)
 #              → install services/teams-bot deps (pulls the editable SDK
 #                transitively via requirements.txt) + pytest; fully mocked
-#   test (eval)→ install eval/ RAGAS harness (heavy: ragas + qna deps) + pytest
-#                kept as its own parallel job so the slow install never sits on
-#                the {qna, ingestion} critical path
+#   test (eval)→ install eval/ RAGAS harness (heavy: ragas + datasets + its own
+#                standalone dep pin set) + pytest; kept as its own parallel job
+#                so the slow install never sits on the {qna, ingestion} path
 #
-# Coverage is computed but NOT gated this round. The architect can set a
-# threshold in a follow-up PR after the baseline is observable. Concurrency
-# cancels superseded runs on the same ref.
+# Coverage is gated with a conservative floor (--cov-fail-under, see the test
+# job) intended to PREVENT regressions and be ratcheted upward over time, not
+# to red the build at its current baseline. Concurrency cancels superseded
+# runs on the same ref.
 
 on:
   pull_request:
@@ -97,26 +98,43 @@ jobs:
       - name: bandit (Python AST security scan)
         run: bandit -r services/qna services/ingestion -x '*/test/*'
 
-      # pip-audit checks INSTALLED packages against the GitHub Advisory
-      # Database, per service so a CVE in one dep set doesn't mask the other.
+      # pip-audit resolves the requirements file against the advisory DB
+      # (PyPI/OSV), per service so a CVE in one dep set doesn't mask the other.
       #
-      # REPORT-ONLY this round (continue-on-error: true). The baseline carries
-      # a backlog of known CVEs in pinned deps (starlette, aiohttp,
-      # python-multipart, ...) whose fixes need major version bumps that must
-      # be validated against FastAPI/Starlette compatibility in a dedicated PR
-      # — not bundled into the gate-introduction change. Mirrors the coverage
-      # "computed, not gated this round" stance above. The report still prints
-      # in the job log; flip back to a hard gate once the bumps land.
+      # HARD GATE (no continue-on-error). Most of the previously-tracked backlog
+      # (starlette, python-multipart, cryptography, ...) was cleared by the
+      # recent dependency upgrade — both services now run cryptography 48,
+      # langchain 1.3.2, fastapi 0.136.3 / starlette 1.2.0, python-multipart
+      # 0.0.29, past the previously-vulnerable ranges.
+      #
+      # pip-audit has no severity selector; it fails on ANY advisory minus an
+      # explicit allowlist (--ignore-vuln <ID>, repeatable). The allowlist below
+      # is NOT empty — it carries exactly the two advisories the gate currently
+      # surfaces, both in aiohttp 3.13.5, both fixed in aiohttp 3.14.0:
+      #   GHSA-jg22-mg44-37j8, GHSA-hg6j-4rv6-33pg
+      # These are FIXABLE (bump aiohttp to 3.14.0), but that bump lives in the
+      # service requirements.txt files, which are OUT OF SCOPE for this
+      # ci.yml-only hardening PR. Tracked as a follow-up; the allowlist is the
+      # documented bridge so the gate goes green now without swallowing
+      # everything. Remove these two entries the moment aiohttp is bumped.
+      #
+      # Any OTHER advisory — including a new one in aiohttp — still fails the
+      # job (the PR's own security check reds; it cannot red main, since a PR
+      # must pass this job to merge). New criticals are NOT silently swallowed.
       - name: pip-audit (QnA dependencies)
-        run: pip-audit --requirement services/qna/requirements.txt
-        continue-on-error: true
+        run: >-
+          pip-audit --requirement services/qna/requirements.txt
+          --ignore-vuln GHSA-jg22-mg44-37j8
+          --ignore-vuln GHSA-hg6j-4rv6-33pg
 
       - name: pip-audit (ingestion dependencies)
         # libgl1 / libglib2.0-0 not needed here — pip-audit only inspects the
         # requirements file, doesn't import the packages.
-        # Report-only this round — see the QnA step above for rationale.
-        run: pip-audit --requirement services/ingestion/requirements.txt
-        continue-on-error: true
+        # Same allowlist as the QnA step — ingestion also pins aiohttp 3.13.5.
+        run: >-
+          pip-audit --requirement services/ingestion/requirements.txt
+          --ignore-vuln GHSA-jg22-mg44-37j8
+          --ignore-vuln GHSA-hg6j-4rv6-33pg
 
   # ---------------------------------------------------------------------------
   # Bicep — validate IaC template compiles
@@ -235,9 +253,12 @@ jobs:
           python -m pip install pytest pytest-asyncio "pytest-cov==${{ env.PYTEST_COV_VERSION }}"
 
       # Coverage report emitted to coverage.xml (Cobertura format — broadly
-      # supported by GitHub annotations and external tools). No
-      # `--cov-fail-under` gate this PR; threshold lands in a follow-up
-      # after the baseline is observable from the artifact.
+      # supported by GitHub annotations and external tools).
+      #
+      # --cov-fail-under=60 is a conservative regression FLOOR, not a target:
+      # it is set below the expected current coverage of both legs so it does
+      # not red the build today, and is meant to be ratcheted upward as the
+      # suites grow. It applies to both matrix legs (qna, ingestion).
       - name: Run pytest with coverage
         working-directory: services/${{ matrix.service }}
         run: |
@@ -245,7 +266,8 @@ jobs:
             --cov=. \
             --cov-report=term-missing \
             --cov-report=xml:coverage.xml \
-            --cov-report=html:htmlcov
+            --cov-report=html:htmlcov \
+            --cov-fail-under=60
 
       - name: Upload coverage report
         if: always()
@@ -340,18 +362,21 @@ jobs:
   # ---------------------------------------------------------------------------
   #
   # SEPARATE job, deliberately NOT in the {qna, ingestion} matrix and NOT a
-  # `needs:` of any other job, so its heavy install (eval/requirements.txt pulls
-  # ragas + datasets + the full QnA runtime via `-r ../services/qna/...`, several
-  # minutes) runs in PARALLEL and never sits on the fast critical path.
+  # `needs:` of any other job, so its heavy install runs in PARALLEL and never
+  # sits on the fast critical path. eval/requirements.txt is a STANDALONE,
+  # self-contained pin set (decoupled in #120 — it no longer includes
+  # `-r ../services/qna/requirements.txt`): it carries ragas + datasets plus
+  # its own copy of the QnA import-time closure on the last langchain 0.3.x
+  # stack ragas supports, several minutes to install.
   #
   # Runs on every push AND every PR (the workflow's two triggers): per-PR
   # coverage is preferred and this job blocks nothing, so the extra parallel
   # minutes are cheap insurance against the SDK/eval hole this PR is closing.
-  # It is a REAL gate — a failing eval test fails the run (no continue-on-error;
-  # that is reserved for the report-only pip-audit steps).
+  # It is a REAL gate — a failing eval test fails the run (no continue-on-error
+  # anywhere in this workflow).
   #
-  # eval pulls only the QnA dep set, which (like the qna test leg) needs no
-  # libgl/libglib system packages — so no apt step here.
+  # eval's standalone closure carries no PyMuPDF/image path, so (like the qna
+  # test leg) it needs no libgl/libglib system packages — no apt step here.
   test-eval:
     name: test (eval)
     runs-on: ubuntu-latest
