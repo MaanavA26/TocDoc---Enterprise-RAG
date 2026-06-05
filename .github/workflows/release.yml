@@ -1,0 +1,152 @@
+name: release
+
+# Build and publish versioned, prebuilt container images for self-hosters.
+#
+# Trigger:
+#   - push of a git tag matching `v*` (e.g. v1.2.3) — the release path.
+#   - workflow_dispatch — manual run for testing the build wiring without a tag
+#     (no semver tags are produced and no GitHub Release is created in that case;
+#     see the per-job notes below).
+#
+# What it does:
+#   build   → matrix over {qna, ingestion}; builds each service image with
+#             docker/build-push-action and pushes to GitHub Container Registry
+#             (ghcr.io) using the built-in GITHUB_TOKEN — no extra secret needed.
+#             Images are tagged with the semver from the git tag PLUS `latest`.
+#   release → creates a GitHub Release for the tag with auto-generated notes.
+#
+# Images published (owner is lowercased by ghcr; see the owner note below):
+#   ghcr.io/<owner>/tocdoc-qna
+#   ghcr.io/<owner>/tocdoc-ingestion
+#
+# Platforms: linux/amd64 only. arm64 is deliberately omitted: the QnA image
+# installs the Microsoft ODBC driver (msodbcsql18) from the MS apt repo, which
+# is very slow to build under QEMU emulation on amd64 runners and would blow up
+# build time. To add arm64 later, append it to the matrix `platforms` value
+# below (one line) once a native arm64 runner or an acceptable QEMU budget is
+# available.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+# Default to least privilege; jobs widen as needed (see per-job permissions).
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build — build + push both service images to GHCR (matrix per service)
+  # ---------------------------------------------------------------------------
+  build:
+    name: build (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write   # required to push to ghcr.io with GITHUB_TOKEN
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: qna
+            image: tocdoc-qna
+          - service: ingestion
+            image: tocdoc-ingestion
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Log in to GHCR with the built-in token. github.actor is the user/app
+      # that triggered the run; GITHUB_TOKEN carries `packages: write` from the
+      # job permissions above. No PAT or extra secret is required.
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Derive tags + OCI labels. On a `v*` tag push, type=semver emits the
+      # version (e.g. 1.2.3); type=raw adds the floating `latest`. On a
+      # workflow_dispatch run (no tag) the semver tag yields nothing, so the
+      # branch/sha fallbacks below provide a usable tag for the test build.
+      #
+      # NOTE on the image name: ghcr.io requires a LOWERCASE owner. This uses
+      # github.repository_owner verbatim per spec; it assumes the owner is
+      # already lowercase. If a repo's owner contains uppercase letters, add a
+      # downcase step (e.g. `tr '[:upper:]' '[:lower:]'`) before this step.
+      - name: Extract image metadata (tags + labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=ref,event=branch
+            type=sha
+
+      # Build context is the service directory: the Dockerfiles COPY
+      # requirements.txt and `.` relative to the service dir, so the context
+      # must be services/<service>, not the repo root.
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: services/${{ matrix.service }}
+          file: services/${{ matrix.service }}/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ---------------------------------------------------------------------------
+  # Release — create a GitHub Release for the tag with auto-generated notes
+  # ---------------------------------------------------------------------------
+  #
+  # Gated to tag pushes only: a workflow_dispatch run has no tag to release.
+  # Runs after both images publish so the release only appears once the
+  # artifacts it references actually exist in GHCR.
+  release:
+    name: github release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write   # required to create a GitHub Release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # gh is preinstalled on ubuntu-latest. --generate-notes produces release
+      # notes from merged PRs/commits since the previous tag. --verify-tag
+      # ensures the tag actually exists. Skips cleanly if a release already
+      # exists for the tag (idempotent re-run).
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; nothing to do."
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --generate-notes \
+              --verify-tag
+          fi
