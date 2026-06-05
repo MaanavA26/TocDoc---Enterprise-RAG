@@ -50,7 +50,7 @@ All CI-gated on green `main`. Revert any one with `git revert <sha>` (squash com
 | #173 | P3 agentic-layer enablement cutover guide (docs) | `git revert 5029cda` |
 
 **Re-audit of the new strides → 20 confirmed bugs (4 HIGH) → all fixed above.** The 4 HIGH were:
-SSE no-backpressure (token-drop/deadlock/slot-leak DoS) + non-cooperative cancel (executor-pool exhaustion/denial-of-wallet) in qna #171; SDK SSE parser corrupting answers + swallowing errors #170; OTel server span leaking the `/upload` query (filepath + bot_tag) #172. A **confirmatory re-audit on the fixed code is running** to prove resolution + catch any fix-introduced regression.
+SSE no-backpressure (token-drop/deadlock/slot-leak DoS) + non-cooperative cancel (executor-pool exhaustion/denial-of-wallet) in qna #171; SDK SSE parser corrupting answers + swallowing errors #170; OTel server span leaking the `/upload` query (filepath + bot_tag) #172. A **confirmatory re-audit then found 9 more (1 HIGH + 2 MED + 6 LOW)** — including a HIGH the wave-1 SSE fix had left (a `yield` inside `finally` that breaks on client disconnect + defers worker cleanup to GC) — all fixed in wave 2 (#175–177). A 3rd focused SSE review then confirmed the path CLEAN, and #178 added the missing gate-release-on-disconnect regression test.
 
 **Dependabot declined this run (re-raised, eval-only):** #150–155 — eval's langchain stack is pinned ragas-compatible (langchain 0.3.x); 1.x breaks ragas. Same call as #121–126. No revert needed (closed, not merged).
 
@@ -64,7 +64,26 @@ SSE no-backpressure (token-drop/deadlock/slot-leak DoS) + non-cooperative cancel
 | **#140 web** | HOLD | medium | npm registry unreachable here; can't build the first admin surface (destructive Danger Zone) before merge. |
 | **BSL Licensor + Change Date** | HOLD | high | Owner-only legal facts; guessing = a defective public legal instrument. Placeholders left intact. |
 
-**Live item flagged for verification (NOT acted on):** the council observed `SECURITY.md` may overclaim "bot_tag isolation at the search layer" vs `search_service.py` (escapes but doesn't bind `bot_tag`→`tid` *in the search layer*). The default-ON `tenant_binding` guard (#134/#115) binds it *before* search — the re-audit's tenant-binding-coherence lens is verifying whether enforcement holds on **every** path (incl. `/qna/stream`, cache, agentic). Real gap → fix; otherwise → clarify the `SECURITY.md` wording.
+**SECURITY.md item — RESOLVED:** the re-audit found NO real tenant-binding gap (only stale code comments, fixed in #171). The default-ON `tenant_binding` guard enforces `bot_tag`→`tid` *before* search on every path, so `SECURITY.md`'s isolation claim holds. The council's overclaim worry is closed.
 
 ---
-_Last updated: start of run. This file is maintained throughout the autonomous session._
+
+## Wave 2 (confirmatory-re-audit fixes) + loop closure
+
+| PR | What | Revert (sha) |
+|---|---|---|
+| #175 | **re-audit** — Bicep health probes + `@maxLength(8)` prefix parity + coherent single-replica PDB | `git revert b47e1bc` |
+| #176 | **re-audit** — ingestion OTel exports redacted spans only (no raw logs) + `url.query` scrub | `git revert 88035d5` |
+| #177 | **re-audit (HIGH)** — qna SSE disconnect cleanup (no yield-in-finally) + dedicated stream executor + verifier/react robustness | `git revert 81c154f` |
+| #178 | test — end-to-end SSE concurrency-gate release on client disconnect (mutation-verified) | `git revert 0c81446` |
+
+**Audit loop CLOSED.** Cycle 0 (audit → 20) → wave 1 (#169–172) → confirmatory re-audit (9, incl. a wave-1-missed HIGH) → wave 2 (#175–177) → focused SSE review = CLEAN + regression test (#178). `main` green throughout. The SSE streaming path (the recurring hotspot) took 3 passes and is now sound + tested.
+
+## Wake-up summary
+
+- **Done autonomously:** deep re-audit of the never-audited new strides → **29 findings (5 HIGH) across two waves, all fixed** on green `main`, every one reversible (tables above); a live-Azure **smoke runbook** (#167); a **P3 enablement cutover guide** (#173); the **decisions council** (all 5 gated items staged/held, recorded above); Dependabot kept clean.
+- **The 5 HIGH were all in the brand-new strides** (SSE streaming, OTel log/span leaks, SDK SSE parser) — the code per-PR CI couldn't vet. `main` is green and materially hardened.
+- **Held for you (unchanged, by design):** #90 threat-model exposure; #140 web (needs `npm` build); #142 docker (needs `docker build`); BSL Licensor/Change-Date; and **P3 enable** (live-Azure smoke first — see `docs/deployment/P3_ENABLEMENT.md`).
+- **Recommended first move on waking:** run `docs/deployment/SMOKE_TEST.md` against a real Azure deployment — that's the one thing this environment couldn't do and the gate to "validated product."
+
+_Last updated: audit/fix loop closed. Run continues in maintenance (heartbeat + Dependabot triage) until you're back._
