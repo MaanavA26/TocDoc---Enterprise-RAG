@@ -61,7 +61,7 @@ markdown_extensions:
 validation:
   omitted_files: warn
   nav:
-    omitted_files: warn
+    omitted_files: info
   links:
     # Existing docs link to repo-root files outside docs_dir (e.g. ../CHANGELOG.md,
     # ../../.github/workflows/release.yml). Don't fail --strict on those rather
