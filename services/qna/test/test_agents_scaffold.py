@@ -5,7 +5,9 @@ Covers:
   emits the byte-identical {answer, citation} shape — the existing contract.
 - Flag ON (pipeline mocked): /qna routes through the graph and returns the
   same shape; the legacy generate_answer is NOT called directly by the handler.
-- The classifier stub always yields route="standard".
+- The real classifier sets route from a (mocked) structured-output call,
+  defaults to "standard" on any exception, and logs route_decision without
+  the raw query.
 - The verifier node is a pass-through (writes no keys).
 - agentic_generate_answer returns the same dict shape as generate_answer
   (with generate_answer mocked), mapping internal state keys back onto the
@@ -207,11 +209,104 @@ async def test_qna_flag_on_routes_through_graph(monkeypatch):
 # Node-level unit tests
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_classifier_stub_always_standard():
+async def test_classifier_sets_route_from_structured_output(monkeypatch):
+    """Real classifier writes the route returned by the structured-output call."""
+    from src.agents import router
+
+    async def fake_classify_route(azure, query):
+        return "map_reduce"
+
+    monkeypatch.setattr(router, "classify_route", fake_classify_route, raising=True)
+
+    out = await router.classifier({"request_id": "r1", "query": "summarize everything", "azure": object()})
+    assert out == {"route": "map_reduce"}
+
+
+@pytest.mark.asyncio
+async def test_classifier_defaults_to_standard_on_exception(monkeypatch):
+    """Any classifier exception → best-effort default route='standard', never raises.
+
+    Returns exactly {"route": "standard"} (no extra keys leak into state).
+    """
+    from src.agents import router
+
+    async def boom(azure, query):
+        raise RuntimeError("classifier LLM unavailable")
+
+    monkeypatch.setattr(router, "classify_route", boom, raising=True)
+
+    out = await router.classifier({"request_id": "r1", "query": "anything", "azure": object()})
+    assert out == {"route": "standard"}
+
+
+@pytest.mark.asyncio
+async def test_classifier_defaults_to_standard_on_missing_azure():
+    """A state with no/invalid azure client must not fail the request — the
+    best-effort catch is broad enough to swallow the AttributeError/KeyError
+    and default to 'standard'.
+    """
     from src.agents.router import classifier
 
+    # No "azure" key at all (KeyError on state["azure"]).
     out = await classifier({"request_id": "r1", "query": "anything"})
     assert out == {"route": "standard"}
+
+
+@pytest.mark.asyncio
+async def test_route_decision_logged_without_raw_query(monkeypatch):
+    """The route_decision log event carries route + request_id but NEVER the
+    raw query text.
+    """
+    from src.agents import router
+
+    async def fake_classify_route(azure, query):
+        return "react"
+
+    monkeypatch.setattr(router, "classify_route", fake_classify_route, raising=True)
+
+    captured = {}
+
+    def fake_log_event(logger, event, *, request_id=None, **fields):
+        if event == "agent_route_decision":
+            captured["request_id"] = request_id
+            captured["fields"] = fields
+
+    monkeypatch.setattr(router, "log_event", fake_log_event, raising=True)
+
+    secret_query = "my-very-secret-private-query-text"
+    await router.classifier({"request_id": "r1", "query": secret_query, "azure": object()})
+
+    assert captured["request_id"] == "r1"
+    assert captured["fields"].get("route") == "react"
+    # The raw query must not appear in any logged field value.
+    assert all(secret_query not in str(v) for v in captured["fields"].values())
+
+
+@pytest.mark.asyncio
+async def test_classify_route_validates_against_label_set(monkeypatch):
+    """classify_route collapses an off-schema route value to 'standard'."""
+    from src.services import openai_service
+
+    def fake_structured(azure, **kwargs):
+        return {"route": "totally-bogus"}
+
+    monkeypatch.setattr(openai_service, "_structured_completion_sync", fake_structured, raising=True)
+
+    route = await openai_service.classify_route(object(), "q")
+    assert route == "standard"
+
+
+@pytest.mark.asyncio
+async def test_classify_route_passes_through_valid_label(monkeypatch):
+    from src.services import openai_service
+
+    def fake_structured(azure, **kwargs):
+        return {"route": "map_reduce"}
+
+    monkeypatch.setattr(openai_service, "_structured_completion_sync", fake_structured, raising=True)
+
+    route = await openai_service.classify_route(object(), "q")
+    assert route == "map_reduce"
 
 
 @pytest.mark.asyncio
@@ -267,6 +362,45 @@ async def test_agentic_generate_answer_returns_contract_shape(monkeypatch):
     )
     assert set(result.keys()) == {"answer", "citation"}
     assert result == {"answer": "wrapped", "citation": {"f.md": "/f.md"}}
+
+
+@pytest.mark.asyncio
+async def test_nonstandard_route_collapses_to_standard_route(monkeypatch):
+    """A non-standard classified route (e.g. map_reduce) is traversed by the
+    conditional edge and — since the map_reduce/react nodes don't exist yet —
+    lands at standard_route, still returning the {answer, citation} shape.
+
+    This is the assertion that proves the add_conditional_edges wiring, not
+    just that compile() succeeded.
+    """
+    import src.pipeline.qna_pipeline as pipe
+    from src.agents import router
+
+    async def fake_classify_route(azure, query):
+        return "map_reduce"
+
+    monkeypatch.setattr(router, "classify_route", fake_classify_route, raising=True)
+
+    reached = {"n": 0}
+
+    async def fake_generate_answer(**kwargs):
+        reached["n"] += 1
+        return {"answer": "via standard_route", "citation": {"f.md": "/f.md"}}
+
+    monkeypatch.setattr(pipe, "generate_answer", fake_generate_answer, raising=True)
+
+    result = await router.agentic_generate_answer(
+        "summarize everything",
+        "read",
+        bot_tag="toc",
+        history=[],
+        azure=object(),
+        request_id="r1",
+    )
+
+    # The map_reduce edge resolved to standard_route, which ran the pipeline.
+    assert reached["n"] == 1
+    assert result == {"answer": "via standard_route", "citation": {"f.md": "/f.md"}}
 
 
 @pytest.mark.asyncio
