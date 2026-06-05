@@ -1,0 +1,7 @@
+# Code owners for TocDoc.
+#
+# This routes every pull request to the maintainer for human review. It
+# complements — does not replace — the automated CodeRabbit review and the
+# architect review pass that every change is expected to go through.
+
+* @MaanavA26
