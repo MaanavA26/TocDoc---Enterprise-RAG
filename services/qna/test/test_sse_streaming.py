@@ -38,6 +38,7 @@ os.environ.setdefault("AZURE_KEY_VAULT", "fakevault")
 os.environ.setdefault("AZURE_TENANT_ID", "11111111-1111-1111-1111-111111111111")
 os.environ.setdefault("AUDIENCE_ID", "api://fake-audience-id")
 
+import app as appmod  # noqa: E402
 from app import app  # noqa: E402
 from src.config import config as cfg  # noqa: E402
 from src.utils.util import Payload  # noqa: E402
@@ -722,3 +723,147 @@ async def test_stream_outer_body_disconnect_no_runtime_error_and_stops_worker(mo
         "inner worker kept producing after outer body disconnect — cooperative stop did not run on aclose()"
     )
     assert count_after_close < 1000
+
+
+# ===========================================================================
+# Re-audit HIGH — END-TO-END concurrency-gate slot release on a MID-STREAM
+# client disconnect, through the REAL ASGI / Depends(concurrency_gate_dependency)
+# stack. The existing disconnect tests call ``custom_rag_qna_stream`` directly,
+# bypassing the route's ``Depends`` — so the gate's acquire-on-admit /
+# release-on-teardown is never exercised when a client disconnects mid-stream.
+# And ``test_stream_concurrency_slot_released_after_stream`` drains the stream to
+# completion first, which cannot distinguish "released on disconnect" from
+# "released on normal completion".
+#
+# Why this needs raw ASGI for the in-flight request: httpx ``ASGITransport``
+# buffers the entire response body before the first ``aiter_bytes`` chunk is
+# yielded, so a stream opened through it always RUNS TO COMPLETION before the
+# caller regains control — there is no real "mid-stream" moment to disconnect at,
+# and a release-after-completion test would be vacuous. So request 1 is driven
+# via ``app(scope, receive, send)`` directly with a ``receive`` that emits
+# ``http.disconnect`` on demand, giving a deterministic mid-stream disconnect
+# through the full dependency stack. Requests 2 and 3 use the normal client.
+#
+# Non-vacuity is built in: with the cap at 1, while request 1 holds the slot a
+# concurrent request 2 MUST be rejected 429 (proving both that the cap is
+# effective and that an in-flight stream genuinely holds the slot). The 429 is
+# asserted to be the CONCURRENCY gate specifically (its distinct message), with
+# the rate limiter disabled so the two 429-producers cannot be confused. Only
+# after request 1 is torn down by the disconnect does request 3 get admitted.
+# ===========================================================================
+@pytest.fixture(autouse=True)
+def _reset_throttle_state():
+    # ``_concurrency_gate`` / ``_rate_limiter`` are module globals shared across
+    # the whole suite; reset around this test so a leaked slot elsewhere cannot
+    # make the assertions spurious (and we leave them clean for later tests).
+    appmod._concurrency_gate.reset()
+    appmod._rate_limiter.reset()
+    yield
+    appmod._concurrency_gate.reset()
+    appmod._rate_limiter.reset()
+
+
+def _stream_scope(token, body: bytes):
+    """Raw ASGI HTTP scope mirroring what httpx puts on the wire for the route
+    (the doubled ``/qna/qna/stream`` path is real — ``root_path`` is ``/qna`` and
+    the route is ``/qna/stream``)."""
+    path = url("/qna/stream")
+    return {
+        "type": "http",
+        "method": "POST",
+        "path": path,
+        "raw_path": path.encode(),
+        "root_path": "",
+        "query_string": b"",
+        "scheme": "http",
+        "server": ("test", 80),
+        "client": ("testclient", 50000),
+        "headers": [
+            (b"host", b"test"),
+            (b"authorization", f"Bearer {token}".encode()),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+            (b"accept", b"text/event-stream"),
+        ],
+    }
+
+
+def _attach_unbounded_azure():
+    """Attach an azure whose answer stream never ends on its own, so request 1
+    genuinely holds the concurrency slot until we disconnect it (rather than
+    completing instantly the way the bounded ANSWER_TOKENS fake would)."""
+    produced: list[str] = []
+    azure = FakeAzure(tokens=[])
+    azure.openai_client = _FakeOpenAIClient(_UnboundedStreamCompletions(produced))
+    app.state.azure = azure
+    return produced
+
+
+@pytest.mark.asyncio
+async def test_stream_gate_slot_released_on_midstream_disconnect_end_to_end(monkeypatch):
+    monkeypatch.setenv("QNA_MAX_CONCURRENCY", "1")
+    # Disable the sliding-window rate limiter so the ONLY thing that can produce
+    # a 429 below is the concurrency gate (both raise INVALID_REQUEST/429).
+    monkeypatch.setenv("QNA_RATE_LIMIT_PER_MIN", "0")
+    # Small bridge queue: the worker parks once the consumer stops reading.
+    from src.services import openai_service as oai
+
+    monkeypatch.setattr(oai, "_STREAM_QUEUE_MAXSIZE", 4, raising=True)
+
+    token = make_token()
+    body = json.dumps(_payload()).encode()
+
+    # --- Request 1: admit a streaming request and hold it mid-stream. ---
+    _attach_unbounded_azure()
+
+    slot_held = asyncio.Event()  # set once the body has started streaming
+    trigger_disconnect = asyncio.Event()  # set to fire http.disconnect
+    status_box: dict[str, int] = {}
+    recv_calls = {"n": 0}
+
+    async def receive():
+        recv_calls["n"] += 1
+        # Call 1: FastAPI parses the request body. Call 2 (Starlette's disconnect
+        # listener) parks until we choose to disconnect mid-stream.
+        if recv_calls["n"] == 1:
+            return {"type": "http.request", "body": body, "more_body": False}
+        await trigger_disconnect.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            status_box["status"] = message["status"]
+        elif message["type"] == "http.response.body" and message.get("body"):
+            slot_held.set()  # first real body chunk -> stream is in flight
+
+    req1_task = asyncio.create_task(app(_stream_scope(token, body), receive, send))
+    # Once the first chunk is out, request 1 has acquired and is HOLDING the slot.
+    await asyncio.wait_for(slot_held.wait(), timeout=5.0)
+    assert status_box.get("status") == 200
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test", timeout=10.0) as ac:
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # --- Request 2 (NON-VACUITY GUARD): while the slot is held, a second
+        # request is rejected with the CONCURRENCY gate's 429. If this did NOT
+        # 429, the cap would be ineffective / the slot not actually held, and the
+        # disconnect assertion below would prove nothing. ---
+        r2 = await ac.post(url("/qna/stream"), headers=headers, json=_payload())
+        assert r2.status_code == 429
+        assert r2.json()["error"]["message"] == "Server is at capacity. Retry shortly."
+
+        # --- Disconnect request 1 mid-stream and wait for full teardown. The
+        # gate's `finally` (slot release) runs on the dependency unwind whether
+        # Starlette returns or raises on disconnect, so gather() guarantees the
+        # release has happened before we proceed — no sleeps needed. ---
+        trigger_disconnect.set()
+        await asyncio.wait_for(asyncio.gather(req1_task, return_exceptions=True), timeout=5.0)
+
+        # --- Request 3: a fresh request is now ADMITTED (200), proving the slot
+        # was released on the mid-stream disconnect. Use the bounded fake so the
+        # normal (non-streaming) read terminates. ---
+        _attach_azure()
+        r3 = await ac.post(url("/qna/stream"), headers=headers, json=_payload())
+    assert r3.status_code == 200
+    assert "data: [DONE]" in r3.text
