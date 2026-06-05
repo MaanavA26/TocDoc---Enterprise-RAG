@@ -6,18 +6,20 @@
 ``{answer, citation}`` dict shape so the ``/qna`` wire contract (the #28
 CitationMap contract) is preserved.
 
-P3-PR1 graph: ``START → classifier → {route} → standard_route → verifier → END``.
-The classifier is now a **real** structured-output node (PR0's always-"standard"
-stub is gone): it calls ``services.openai_service.classify_route`` to set
-``state["route"] ∈ {standard, map_reduce, react}`` and the graph branches on it
-via ``add_conditional_edges``. Because the ``map_reduce``/``react`` answer nodes
-ship in later PRs, all three route labels are mapped to ``standard_route`` for
-now (the *classified* route is still logged truthfully — see ``_route_selector``).
-So the flag-ON path routes for real but, downstream, behaves identically to the
-legacy pipeline. The verifier is still a pass-through no-op.
+Graph: ``START → classifier → {route} → {answer node} → verifier → END``.
+The classifier is a **real** structured-output node: it calls
+``services.openai_service.classify_route`` to set
+``state["route"] ∈ {standard, map_reduce, react}`` and the graph branches via
+``add_conditional_edges``. As of P3-PR2 the ``map_reduce`` answer node is wired
+live (``agents/map_reduce.py``); ``react`` still has no node, so the selector
+collapses it to ``standard``. The verifier remains a pass-through no-op.
 
-Everything stays behind the existing default-OFF ``QNA_AGENT_ENABLED`` flag
-(checked in ``app.py``); no new flag is introduced.
+Two-flag gate (both default OFF): the master ``QNA_AGENT_ENABLED`` (checked in
+``app.py``) decides whether the graph runs at all, and the ``QNA_AGENT_MAP_REDUCE``
+sub-flag — read **live in ``_route_selector``** — decides whether a
+``map_reduce`` classification actually reaches the map-reduce node or collapses
+to ``standard_route``. With either flag off, ``/qna`` is byte-for-byte identical
+to the legacy pipeline.
 
 The only module-level objects are the compiled, stateless graph and (later)
 the bounded executor — both immutable. State is never held at module level;
@@ -30,9 +32,11 @@ from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 
+from src.agents.map_reduce import map_reduce
 from src.agents.standard_route import standard_route
 from src.agents.state import AgentState
 from src.agents.verifier import verifier
+from src.config.config import is_map_reduce_enabled
 from src.core.logger import logger
 from src.core.observability import log_event
 from src.services.openai_service import classify_route
@@ -86,16 +90,21 @@ async def classifier(state: AgentState) -> dict:
 
 
 def _route_selector(state: AgentState) -> str:
-    """Conditional-edge selector — returns the classified route label.
+    """Conditional-edge selector — returns the node key to traverse to.
 
-    Returns the value the classifier wrote (defaulting to ``"standard"`` if,
-    defensively, the key is missing). The returned label is mapped to a node
-    by the ``path_map`` in ``_build_graph``; in PR1 every label maps to
-    ``standard_route`` because the other answer nodes do not exist yet — but
-    the *classified* route is preserved in state and logs, so wiring the real
-    nodes later needs no classifier change.
+    Sub-flag gating lives HERE (read live), not in the static ``path_map``
+    (which is fixed at compile time): the ``map_reduce`` answer node runs only
+    when the classifier picked ``"map_reduce"`` AND the ``QNA_AGENT_MAP_REDUCE``
+    sub-flag is on. With the sub-flag off, a ``map_reduce`` classification
+    collapses to ``standard_route`` — byte-for-byte identical to today.
+
+    ``react`` has no live node yet, so it also collapses to ``standard``.
+    Defensive default ``"standard"`` if the route key is somehow missing.
     """
-    return state.get("route", "standard")
+    route = state.get("route", "standard")
+    if route == "map_reduce" and is_map_reduce_enabled():
+        return "map_reduce"
+    return "standard"
 
 
 def _build_graph():
@@ -107,22 +116,24 @@ def _build_graph():
     graph = StateGraph(AgentState)
     graph.add_node("classifier", classifier)
     graph.add_node("standard_route", standard_route)
+    graph.add_node("map_reduce", map_reduce)
     graph.add_node("verifier", verifier)
 
     graph.add_edge(START, "classifier")
-    # Branch on the classified route. map_reduce/react nodes ship in later PRs,
-    # so for now all three labels resolve to standard_route — an edge to a
-    # not-yet-added node would fail compile(). Documented collapse, not a bug.
+    # Branch on the selector's node key. The selector (not this static path_map)
+    # applies the QNA_AGENT_MAP_REDUCE sub-flag gate, so it only ever returns a
+    # key present here. The map_reduce node is now wired live; ``react`` still
+    # has no node, so the selector collapses it to ``standard``.
     graph.add_conditional_edges(
         "classifier",
         _route_selector,
         {
             "standard": "standard_route",
-            "map_reduce": "standard_route",
-            "react": "standard_route",
+            "map_reduce": "map_reduce",
         },
     )
     graph.add_edge("standard_route", "verifier")
+    graph.add_edge("map_reduce", "verifier")
     graph.add_edge("verifier", END)
 
     return graph.compile()
