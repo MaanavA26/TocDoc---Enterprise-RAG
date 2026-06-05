@@ -1,11 +1,16 @@
 # tocdoc-sdk
 
-A typed, dependency-light Python client for the TocDoc **QnA** HTTP API.
+A typed, dependency-light Python client for the TocDoc HTTP APIs.
 
-It mirrors the service's request/response/error contracts with Pydantic v2
-models and wraps `POST /qna` behind a small, retrying `httpx` client. The
+It mirrors the services' request/response/error contracts with Pydantic v2
+models and wraps the endpoints behind small, retrying `httpx` clients. The
 package is **standalone** — it does not import any service code, only `httpx`
-and `pydantic`.
+and `pydantic`. It provides:
+
+- **`TocDocClient`** — synchronous QnA client (`POST /qna`).
+- **`AsyncTocDocClient`** — `asyncio` mirror of the QnA client.
+- **`AdminClient`** — read-only admin API client (ingestion service,
+  `X-Admin-Token` auth).
 
 ## Install
 
@@ -59,6 +64,73 @@ answer = client.ask(
 )
 ```
 
+## Async client
+
+`AsyncTocDocClient` is a drop-in `asyncio` mirror of `TocDocClient`: same
+models, same retry policy, same `ApiError` semantics. `ask` is a coroutine and
+the client is an async context manager (`async with` / `await client.aclose()`).
+The backoff sleep is awaited (defaults to `asyncio.sleep`) so it yields the
+event loop instead of blocking it.
+
+```python
+import asyncio
+from tocdoc_sdk import AsyncTocDocClient
+
+async def main():
+    async with AsyncTocDocClient(
+        base_url="https://your-tocdoc-host",
+        token="YOUR_BEARER_TOKEN",   # never logged
+        timeout=30.0,
+        max_retries=2,
+    ) as client:
+        answer = await client.ask(
+            session_id="session-123",
+            bot_tag="acme",
+            fr_tag="read",
+            query="What is the refund policy?",
+        )
+        print(answer.answer)
+
+asyncio.run(main())
+```
+
+## Admin API (read-only)
+
+The admin endpoints live on the **ingestion** service and authenticate with a
+static `X-Admin-Token` header (not the QnA bearer token), so `AdminClient` is a
+separate client with its own `base_url` and `admin_token`. If your deployment
+fronts both services behind one proxy, pass it the same URL as the QnA client;
+if they are separate hosts, pass the ingestion host. The admin token is sent as
+a header and is **never logged**.
+
+All reads are scoped by `bot_tag` (tenant isolation is enforced server-side):
+
+```python
+from tocdoc_sdk import AdminClient
+
+with AdminClient(
+    base_url="https://your-ingestion-host",
+    admin_token="YOUR_ADMIN_TOKEN",  # sent as `X-Admin-Token`, never logged
+    timeout=30.0,
+    max_retries=2,
+) as admin:
+    # GET /admin/documents?bot_tag=acme
+    docs = admin.list_documents(bot_tag="acme")
+    print(docs.count, [d.document_id for d in docs.documents])
+
+    # GET /admin/documents/{document_id}?bot_tag=acme
+    detail = admin.get_document(bot_tag="acme", document_id="doc-1")
+    print(detail.chunk_count, detail.sample_chunks)
+
+    # GET /admin/index/stats?bot_tag=acme
+    stats = admin.index_stats(bot_tag="acme")
+    print(stats.document_count, stats.chunk_count, stats.source_types)
+```
+
+The same `ApiError` and retry behavior apply (a 404 when a document is not in
+scope raises `ApiError`; non-envelope error bodies degrade to a synthesized
+`HTTP_<status>` code).
+
 ## Error handling
 
 Every non-2xx response is raised as `ApiError`, carrying the fields from the
@@ -87,8 +159,16 @@ page from a proxy), `ApiError` is still raised with a synthesized
 
 ## Contract
 
-The models mirror the live server contract:
+The models mirror the live server contracts:
+
+**QnA**
 
 - **Request** (`QnARequest`): `{session_id, bot: [{user_query, bot_response?, answer?}], fr_tag, bot_tag}`
 - **Success** (`QnAAnswer`): `{answer, citation: {filename: filepath}}`
 - **Error** (`ApiError`): `{error: {code, message, request_id, errors?}}`
+
+**Admin (read-only)** — mirrors `services/ingestion/admin`:
+
+- `GET /admin/documents` -> `DocumentListResponse` (`{bot_tag, count, documents: [DocumentSummary]}`)
+- `GET /admin/documents/{id}` -> `DocumentDetailResponse`
+- `GET /admin/index/stats` -> `IndexStatsResponse` (`{bot_tag, document_count, chunk_count, source_types, fr_modes}`)

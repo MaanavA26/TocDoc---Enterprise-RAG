@@ -17,23 +17,16 @@ from typing import Any
 
 import httpx
 
+from ._retry import (
+    DEFAULT_BACKOFF_BASE,
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_TIMEOUT,
+    RETRYABLE_EXC,
+    RETRYABLE_STATUS,
+    safe_json,
+)
 from .errors import ApiError
 from .models import BotTurn, QnAAnswer, QnARequest
-
-# Status codes treated as transient and therefore retryable.
-_RETRYABLE_STATUS: frozenset[int] = frozenset({500, 502, 503, 504})
-# httpx exceptions treated as transient connect/read failures.
-_RETRYABLE_EXC: tuple[type[Exception], ...] = (
-    httpx.ConnectError,
-    httpx.ConnectTimeout,
-    httpx.ReadTimeout,
-    httpx.WriteTimeout,
-    httpx.PoolTimeout,
-)
-
-DEFAULT_TIMEOUT = 30.0
-DEFAULT_MAX_RETRIES = 2
-DEFAULT_BACKOFF_BASE = 0.5
 
 
 class TocDocClient:
@@ -154,16 +147,21 @@ class TocDocClient:
             bot_tag=bot_tag,
         )
 
-        response = self._post_with_retries("/qna", request.model_dump())
+        response = self._request_with_retries("POST", "/qna", json=request.model_dump())
 
         if 200 <= response.status_code < 300:
             return QnAAnswer.model_validate(response.json())
 
         # Non-2xx: parse the P0-6 envelope (defensively) and raise.
-        raise ApiError.from_response(response.status_code, self._safe_json(response))
+        raise ApiError.from_response(response.status_code, safe_json(response))
 
-    def _post_with_retries(self, path: str, json_body: dict[str, Any]) -> httpx.Response:
-        """POST ``json_body`` to ``path``, retrying transient failures only.
+    def _request_with_retries(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        """Send ``method`` to ``path``, retrying transient failures only.
+
+        Method-agnostic (POST for ``/qna``, GET for admin reads) so the same
+        transient-retry policy applies everywhere without duplication.
+        ``**kwargs`` are forwarded to ``httpx.Client.request`` (e.g. ``json=``,
+        ``params=``).
 
         Retries on 5xx responses and connect/timeout errors, up to
         ``max_retries`` times with exponential backoff. A 4xx response is
@@ -174,15 +172,15 @@ class TocDocClient:
 
         for attempt in range(self._max_retries + 1):
             try:
-                response = self._client.post(path, json=json_body)
-            except _RETRYABLE_EXC as exc:
+                response = self._client.request(method, path, **kwargs)
+            except RETRYABLE_EXC as exc:
                 last_exc = exc
                 if attempt < self._max_retries:
                     self._sleep(self._backoff_base * (2**attempt))
                     continue
                 raise
             else:
-                if response.status_code in _RETRYABLE_STATUS and attempt < self._max_retries:
+                if response.status_code in RETRYABLE_STATUS and attempt < self._max_retries:
                     self._sleep(self._backoff_base * (2**attempt))
                     continue
                 return response
@@ -190,11 +188,3 @@ class TocDocClient:
         # Unreachable: the loop either returns a response or raises. Present
         # only to satisfy static analysis of the function's return type.
         raise last_exc  # pragma: no cover
-
-    @staticmethod
-    def _safe_json(response: httpx.Response) -> Any:
-        """Parse a response body as JSON, returning ``None`` if it isn't JSON."""
-        try:
-            return response.json()
-        except ValueError:
-            return None
