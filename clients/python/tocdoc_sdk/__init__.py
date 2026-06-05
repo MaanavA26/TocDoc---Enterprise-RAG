@@ -4,7 +4,8 @@ Standalone client: it mirrors the server's request/response/error contracts but
 does NOT import any ``services/`` code. Provides:
 
 - :class:`TocDocClient` / :class:`AsyncTocDocClient` — sync/async QnA clients.
-- :class:`AdminClient` — read-only admin API client (``X-Admin-Token`` auth).
+- :class:`AdminClient` — admin API client (``X-Admin-Token`` auth): read-only
+  document/index reads plus the connector sync control-plane.
 """
 
 from __future__ import annotations
@@ -17,6 +18,10 @@ from .models import (
     BotTurn,
     ChunkSample,
     CitationMap,
+    ConnectorRunError,
+    ConnectorRunListResponse,
+    ConnectorRunStatusResponse,
+    ConnectorSyncResponse,
     DocumentDetailResponse,
     DocumentListResponse,
     DocumentSummary,
@@ -32,6 +37,10 @@ __all__ = [
     "BotTurn",
     "ChunkSample",
     "CitationMap",
+    "ConnectorRunError",
+    "ConnectorRunListResponse",
+    "ConnectorRunStatusResponse",
+    "ConnectorSyncResponse",
     "DocumentDetailResponse",
     "DocumentListResponse",
     "DocumentSummary",
