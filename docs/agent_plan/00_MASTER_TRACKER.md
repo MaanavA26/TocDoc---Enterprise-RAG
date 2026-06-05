@@ -22,11 +22,11 @@ All 8 original P0 blockers have shipped, and **all of P1 (5/5) is shipped.** The
 
 **P2 is underway:** config-gated semantic reranking (PR #25), the typed `CitationMap` success contract (PR #28), the backward-compatible `page_citations` contract + retrieval groundwork (PR #76, byte-identical until `page_number` is populated), and the packaging-tiers doc (PR #27, `docs/PRODUCT_TIERS.md`). Page-level **ingestion** is still pending a reindex window + read-mode content-format spike (ADR `09_P2_1_PAGE_CITATIONS_ADR.md`, PR #36).
 
-**P3 (LangGraph) is scaffolded but inert:** the PR0 scaffold (PR #74) and PR1 structured-output router (PR #79) are merged **behind the default-OFF `QNA_AGENT_ENABLED` flag** — not enabled. Enabling needs explicit architect sign-off on `07_P3_LANGGRAPH_ADR.md`; PR2+ (map-reduce, ReAct, self-critique, memory, SSE) are not built.
+**P3 (LangGraph) is built but dark:** the PR0 scaffold (#74), PR1 structured-output router (#79), and PR2 map-reduce node (#86) are merged behind the default-OFF `QNA_AGENT_ENABLED` flag (plus per-node `QNA_AGENT_MAP_REDUCE` / `QNA_AGENT_REACT` / `QNA_AGENT_VERIFY`, all default-OFF). ReAct multi-hop + self-critique verifier nodes were added on top. Enabling any of it needs architect sign-off on `07_P3_LANGGRAPH_ADR.md`.
 
-**P4 is partial:** the Python SDK shipped in-repo unpublished (PR #31, `clients/python`) and the RAGAS eval harness shipped (PR #33, `eval/`). The Teams bot (ADR `10_P4_1_TEAMS_BOT_ADR.md`, PR #73) and connectors (ADR `08`) are designed; Helm is not built.
+**P4 is largely shipped:** Python SDK (#31, `clients/python`) + async/admin/connector methods + a `tocdoc` CLI + an optional LangChain retriever; RAGAS eval harness (#33, `eval/`) + baseline-compare/threshold gating + continuous-eval; **Teams bot shipped** (#82, `services/teams-bot/`, with inbound Bot Framework JWT auth); **Helm chart shipped** (#92, `charts/tocdoc/`); a Terraform module + an admin web UI were the most recent additions.
 
-**Supply chain:** Dependabot is live (PR #35), CI covers the SDK + eval harness (PR #34), and the repo is now BSL 1.1 source-available (PR #72, pending confirmation of Licensor entity + Change Date). The LangChain-1.x / FastAPI-Starlette-1.x / pandas-3 / openai-2 / etc. major bumps remain a **deferred coordinated cascade** (see `docs/RESUME.md`); pip-audit stays report-only until it lands.
+**Runtime + supply chain:** the runtime is now **Python 3.12** (#116) and both services run **langchain 1.x** — the old deferred cascade (langchain/fastapi/pandas-3/openai-2/cryptography-48) is resolved (#119 ingestion, #120 qna + eval decoupled). CI hard-gates **pip-audit** and enforces a **coverage floor (60)** (#128). Dependabot is reconciled (0 open). The repo is BSL 1.1 source-available (#72, pending Licensor entity + Change Date). **A full security audit was run; all 36 findings (1 critical, 6 high, 8 medium, 21 low) are fixed and on green `main`** (PRs #114/#127–#134) — incl. the critical `/upload` OData-injection (C1), fail-closed tenant binding (H1), and admin-token auth on `/upload`.
 
 ---
 
@@ -38,8 +38,9 @@ All 8 original P0 blockers have shipped, and **all of P1 (5/5) is shipped.** The
 | **P1** | Enterprise feature completeness | 5 | `5/5 SHIPPED` ✅ |
 | **Phase 2** | Operability (Admin API, Observability, Deployment Validation, bot_tag scope) | 4 | `A + B + C SHIPPED · D DECIDED` ✅ |
 | **P2** | Product differentiation and commercial packaging | 2 | `IN PROGRESS` — P2-1 semantic rerank + `page_citations` contract + P2-2 tiers shipped; page-level ingestion pending |
-| **P3** | Agentic AI layer (LangGraph) | 6 | `SCAFFOLDED, INERT` — PR0+PR1 merged behind default-OFF `QNA_AGENT_ENABLED`; needs ADR sign-off to enable |
-| **P4** | Platform completeness (connectors, SDK, Teams bot) | 4 | `PARTIAL` — SDK + RAGAS shipped in-repo; Teams bot designed; Helm not built |
+| **P3** | Agentic AI layer (LangGraph) | 6 | `BUILT, DARK` — PR0+PR1+PR2 (map-reduce) merged + ReAct/verifier nodes, all behind default-OFF flags; needs ADR sign-off to enable |
+| **P4** | Platform completeness (connectors, SDK, Teams bot, Helm) | 4 | `SHIPPED` — SDK (+CLI/LangChain), RAGAS (+continuous-eval), Teams bot, Helm all merged; Terraform + admin web UI added |
+| **Hardening** | Security audit remediation + runtime modernization | 36 | `36/36 FIXED` ✅ — Python 3.12 + langchain 1.x; all audit findings (1C/6H/8M/21L) on green `main` |
 
 Phase 2 workstream specs live under `docs/architect_phase_2/`; entries appear in this tracker only after the corresponding PR merges to `main`.
 
@@ -72,7 +73,7 @@ See `01_P0_HARDENING.md` for the original planning detail.
 | P1-2 | `10_PRODUCT` | Admin APIs for index and tenant management | `services/ingestion/admin/` package | `SHIPPED` — read-only endpoints (PR #7), destructive delete + reindex stub, bot_tag-scoped & paginated (PR #21) |
 | P1-3 | `11_CONNECTORS` | Blob Storage + SharePoint connector ingestion | `services/ingestion/connectors/` | `SHIPPED` — connector core + Blob (PR #24), SharePoint + operator sync trigger (PR #26), persisted run status + `run_id` correlation (PR #32). |
 | P1-4 | `12_PLATFORM` | Azure Bicep IaC, GitHub Actions CI/CD, ACA deployment | `infra/main.bicep`, `infra/parameters/`, `docs/deployment/INSTALLATION.md`, `.github/workflows/ci.yml` | `SHIPPED` — Bicep + install runbook (PR #5), GitHub Actions CI gate (PR #13) |
-| P1-5 | `13_QUALITY` | Expanded test suite, CI quality gates, release checks | `services/qna/test/`, `services/ingestion/test/`, `.github/workflows/ci.yml`, `pyproject.toml` | `SHIPPED (PR #13)` — ruff/bandit/bicep/shellcheck/pytest+coverage gate. pip-audit report-only; coverage threshold not gated yet (both tracked follow-ups). |
+| P1-5 | `13_QUALITY` | Expanded test suite, CI quality gates, release checks | `services/qna/test/`, `services/ingestion/test/`, `.github/workflows/ci.yml`, `pyproject.toml` | `SHIPPED (PR #13)` — ruff/bandit/bicep/shellcheck/pytest+coverage gate, plus `helm lint`, `test (teams-bot)`, and CodeQL `analyze (python)`. pip-audit is now a **hard gate** and coverage is **floor-gated (60)** (PR #128) — both earlier follow-ups closed. |
 
 See `02_P1_ENTERPRISE.md` for original implementation guides and `docs/architect_phase_2/` for the active Phase 2 specs covering P1-1 and P1-2.
 
