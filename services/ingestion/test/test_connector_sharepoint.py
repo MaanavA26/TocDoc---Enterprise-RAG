@@ -2,7 +2,7 @@
 
 Covers:
 - enumerate() follows @odata.nextLink across >1 page (asserts ALL items).
-- PDF allowlist (non-PDF and folder entries filtered out at enumerate).
+- Multi-format allowlist (PDF/TXT/DOCX yielded; unsupported + folders filtered).
 - 100 MB skip (oversized items never yielded).
 - source_path format: sharepoint://{site_id}/{drive_id}/{item_id} (opaque ids only).
 - fetch() PDF magic-byte rejection of a non-PDF download (raises NotAPdfError).
@@ -94,7 +94,9 @@ def test_enumerate_follows_nextlink_across_pages():
 # ---------------------------------------------------------------------------
 
 
-def test_enumerate_filters_non_pdf_and_folders():
+def test_enumerate_filters_unsupported_and_folders():
+    # Multi-format: PDF + TXT/DOCX are now supported and yielded; a genuinely
+    # unsupported type (.png) and folder entries are still filtered out.
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -102,6 +104,8 @@ def test_enumerate_filters_non_pdf_and_folders():
                 "value": [
                     _file_entry("1", "doc.pdf", 100),
                     _file_entry("2", "notes.txt", 100),
+                    _file_entry("4", "deck.docx", 100),
+                    _file_entry("5", "image.png", 100),
                     # A folder entry: no `file` facet, has `folder` instead.
                     {"id": "3", "name": "subfolder", "folder": {"childCount": 2}},
                 ]
@@ -110,7 +114,7 @@ def test_enumerate_filters_non_pdf_and_folders():
 
     conn, _ = _connector_with_handler(handler)
     items = list(conn.enumerate())
-    assert [i.filename for i in items] == ["doc.pdf"]
+    assert [i.filename for i in items] == ["doc.pdf", "notes.txt", "deck.docx"]
 
 
 def test_enumerate_skips_oversized_item():

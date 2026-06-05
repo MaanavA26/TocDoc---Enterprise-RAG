@@ -29,8 +29,8 @@ from .core import (
     ConnectorError,
     ConnectorFile,
     SourceItem,
-    is_pdf_name,
-    validate_pdf_magic,
+    is_supported_name,
+    validate_content_magic,
 )
 
 logger = logging.getLogger(__name__)
@@ -124,16 +124,16 @@ class BlobConnector:
         Blob listing can time out on 100k+ blob containers, so we walk pages
         explicitly via `.by_page()` (continuation tokens) rather than draining
         the whole listing into memory. Each blob's size + ETag are read WITHOUT
-        downloading bytes. Non-PDF blobs and blobs over 100 MB are SKIPPED (logged,
-        not yielded, never raised) so they never buffer in memory or reach the
-        PDF-only loader.
+        downloading bytes. Unsupported-format blobs and blobs over 100 MB are
+        SKIPPED (logged, not yielded, never raised) so they never buffer in
+        memory or reach a loader that cannot parse them.
         """
         pager = self._container_client.list_blobs().by_page()
         for page in pager:
             for blob in page:
                 name = _blob_name(blob)
-                if not is_pdf_name(name):
-                    logger.debug("Skipping non-PDF blob: %r", name)
+                if not is_supported_name(name):
+                    logger.debug("Skipping unsupported-format blob: %r", name)
                     continue
                 size = _blob_size(blob)
                 if size is not None and size > MAX_FILE_BYTES:
@@ -157,16 +157,17 @@ class BlobConnector:
                 )
 
     def fetch(self, item: SourceItem) -> ConnectorFile:
-        """Download the COMPLETE bytes for one blob, then validate the PDF magic.
+        """Download the COMPLETE bytes for one blob, then validate content magic.
 
         Chunked streaming download with a timeout and bounded exponential
         backoff. The 100 MB ceiling is enforced DURING the download (L-Conn3)
         via a running byte counter over ``chunks()``: a size-less blob (size
         metadata absent) can never buffer an unbounded body into memory before
         the check — the transfer aborts the moment the running total crosses the
-        ceiling. PDF magic bytes (%PDF) are validated AFTER the full download so
-        a partial/interrupted read cannot feed a corrupt PDF to Document
-        Intelligence — that RAISES NotAPdfError.
+        ceiling. Content magic bytes are validated AFTER the full download
+        per format (PDF → %PDF, DOCX/PPTX → zip/OOXML) so a partial/interrupted
+        read cannot feed a corrupt file downstream — that RAISES NotAPdfError /
+        InvalidContentError. Text formats (HTML/HTM/MD/TXT) are not gated.
         """
         if item.size is not None and item.size > MAX_FILE_BYTES:
             # Should have been skipped at enumerate; guard anyway.
@@ -203,8 +204,9 @@ class BlobConnector:
         else:  # pragma: no cover - loop always breaks or raises
             raise ConnectorError(f"Blob download failed for {item.source_path!r}") from last_exc
 
-        # Post-download integrity gate. Raises NotAPdfError if not a real PDF.
-        validate_pdf_magic(content)
+        # Post-download integrity gate, dispatched by extension. Raises
+        # NotAPdfError / InvalidContentError on a corrupt/mis-typed download.
+        validate_content_magic(item.filename, content)
 
         return ConnectorFile(filename=item.filename, content=content)
 

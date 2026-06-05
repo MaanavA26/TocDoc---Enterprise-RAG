@@ -6,9 +6,15 @@ from contextlib import asynccontextmanager
 import custom_rag
 from admin.auth import require_admin_token
 from admin.routes import router as admin_router
-from errors import default_error_responses, register_exception_handlers
+from errors import (
+    ApiErrorCode,
+    default_error_responses,
+    raise_api_error,
+    register_exception_handlers,
+)
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from loaders import SUPPORTED_EXTENSIONS, is_supported_name
 from middleware import limit_upload_size
 from observability import RequestIDMiddleware
 from path_safety import resolve_upload_path
@@ -176,7 +182,7 @@ _BOT_TAG_PATTERN = r"^[A-Za-z0-9_-]{1,128}$"
 
 @app.post(
     "/upload",
-    summary="Ingest a PDF document or folder",
+    summary="Ingest a document (PDF/DOCX/PPTX/HTML/MD/TXT) or folder",
     responses=default_error_responses,
     # H2: /upload was unauthenticated. Apply the same admin-token dependency
     # that guards /admin/* so the endpoint requires a valid X-Admin-Token.
@@ -194,13 +200,21 @@ async def upload_file(
     file: UploadFile | None = File(None),
 ):
     """
-    Ingest one PDF or an entire folder of PDFs into the Azure Cognitive Search index.
+    Ingest one document (PDF/DOCX/PPTX/HTML/MD/TXT) or an entire folder of them
+    into the Azure Cognitive Search index.
+
+    PDFs are parsed via Azure Document Intelligence; the other formats are
+    extracted to plain text by the loader registry. All formats then feed the
+    same chunk → embed → index pipeline.
 
     - **bot_tag**: Logical tenant identifier stored on every indexed chunk.
-    - **filepath**: Server-side path. Pass a directory to process all PDFs recursively.
+    - **filepath**: Server-side path. Pass a directory to process all supported
+      documents recursively (unsupported file types are skipped).
     - **fr_mode**: `read` uses token-based chunking (500 tokens, 50 overlap).
-      `layout` uses Markdown-header splitting, preserving document structure.
-    - **file**: Required when `filepath` points to a single file uploaded by the client.
+      `layout` uses Markdown-header splitting, preserving document structure
+      (most useful for PDFs and Markdown).
+    - **file**: Required when `filepath` points to a single file uploaded by the
+      client. An unsupported file type returns HTTP 415.
     """
     logger.info(f"Upload request — bot_tag: {bot_tag!r}, filepath: {filepath!r}, fr_mode: {fr_mode!r}")
 
@@ -232,26 +246,29 @@ async def upload_file(
             logger.info(f"Folder upload mode — scanning: {safe_filepath!r}")
             allowed_root = os.path.realpath(safe_filepath)
 
-            pdf_files = []
+            # Collect every supported document (PDF + DOCX/PPTX/HTML/MD/TXT).
+            # Files with an unsupported extension are simply not collected — an
+            # unknown type is a clean skip in folder mode, never a 500.
+            doc_files = []
             for root, _dirs, files in os.walk(safe_filepath):
                 for f in files:
-                    if f.lower().endswith(".pdf"):
-                        pdf_files.append(os.path.join(root, f))
+                    if is_supported_name(f):
+                        doc_files.append(os.path.join(root, f))
 
-            logger.info(f"Found {len(pdf_files)} PDF file(s) to process")
+            logger.info(f"Found {len(doc_files)} supported file(s) to process")
 
             # L-X4: cap the number of files processed per request so a large
             # directory cannot drive an unbounded, worker-blocking ingestion run.
-            if len(pdf_files) > _MAX_FOLDER_FILES:
+            if len(doc_files) > _MAX_FOLDER_FILES:
                 raise HTTPException(
                     status_code=413,
-                    detail=f"Too many files in folder ({len(pdf_files)}). Maximum is {_MAX_FOLDER_FILES} per request.",
+                    detail=f"Too many files in folder ({len(doc_files)}). Maximum is {_MAX_FOLDER_FILES} per request.",
                 )
 
             results = []
-            for i, file_path in enumerate(pdf_files, 1):
+            for i, file_path in enumerate(doc_files, 1):
                 basename = os.path.basename(file_path)
-                logger.info(f"Processing {i}/{len(pdf_files)}: {basename!r}")
+                logger.info(f"Processing {i}/{len(doc_files)}: {basename!r}")
 
                 # L-Ing2: re-validate each collected file before opening. os.walk
                 # lists symlinked regular files, so a symlink inside the root
@@ -306,6 +323,19 @@ async def upload_file(
             raise HTTPException(
                 status_code=400,
                 detail="A file upload is required when filepath does not point to a directory.",
+            )
+
+        # Reject an unsupported file type BEFORE the pipeline so it returns a
+        # clean 415, not a 500. `upload()` also guards (UnsupportedFormatError)
+        # as defense-in-depth, but the generic `except Exception → 500` below
+        # would otherwise mask it — so the route owns the 4xx decision.
+        if not is_supported_name(file.filename or ""):
+            raise_api_error(
+                code=ApiErrorCode.INVALID_REQUEST,
+                message=(
+                    f"Unsupported file type. Supported extensions: {', '.join(sorted(SUPPORTED_EXTENSIONS))}."
+                ),
+                status_code=415,
             )
 
         logger.info(

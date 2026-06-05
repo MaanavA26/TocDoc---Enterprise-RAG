@@ -45,8 +45,8 @@ from .core import (
     ConnectorError,
     ConnectorFile,
     SourceItem,
-    is_pdf_name,
-    validate_pdf_magic,
+    is_supported_name,
+    validate_content_magic,
 )
 
 logger = logging.getLogger(__name__)
@@ -231,9 +231,10 @@ class SharePointConnector:
         Graph's drive-children listing is paginated; mishandling nextLink
         silently drops files, so we follow it explicitly until it is absent.
         Each item's size + change validator (eTag/cTag) are read WITHOUT
-        downloading bytes. Non-PDF items and items over 100 MB are SKIPPED
-        (logged, not yielded, never raised) so they never buffer in memory or
-        reach the PDF-only loader. Folders (no `file` facet) are skipped.
+        downloading bytes. Unsupported-format items and items over 100 MB are
+        SKIPPED (logged, not yielded, never raised) so they never buffer in
+        memory or reach a loader that cannot parse them. Folders (no `file`
+        facet) are skipped.
         """
         url: str | None = f"{_GRAPH_BASE}/drives/{self.drive_id}/root/children{_LIST_QUERY}"
         while url:
@@ -245,8 +246,8 @@ class SharePointConnector:
                 if "file" not in entry:
                     continue
                 name = entry.get("name", "")
-                if not is_pdf_name(name):
-                    logger.debug("Skipping non-PDF SharePoint item: %r", name)
+                if not is_supported_name(name):
+                    logger.debug("Skipping unsupported-format SharePoint item: %r", name)
                     continue
                 item_id = entry.get("id", "")
                 if not item_id:
@@ -281,7 +282,7 @@ class SharePointConnector:
             url = payload.get("@odata.nextLink")
 
     def fetch(self, item: SourceItem) -> ConnectorFile:
-        """Download the COMPLETE bytes for one item, then validate the PDF magic.
+        """Download the COMPLETE bytes for one item, then validate content magic.
 
         Downloads via the item-id `/content` endpoint (Graph 302-redirects to a
         transient pre-authorized URL; httpx follows it) by STREAMING the body
@@ -289,9 +290,10 @@ class SharePointConnector:
         enforced DURING the download (L-Conn3): if the running total crosses
         MAX_FILE_BYTES the stream is aborted immediately, so a size-less item
         (Graph omits `size`) can never buffer an unbounded body into memory
-        before the check. PDF magic bytes (%PDF) are validated AFTER the full
-        download so a partial/interrupted read cannot feed a corrupt PDF to
-        Document Intelligence — that RAISES NotAPdfError.
+        before the check. Content magic bytes are validated AFTER the full
+        download per format (PDF → %PDF, DOCX/PPTX → zip/OOXML) so a
+        partial/interrupted read cannot feed a corrupt file downstream — that
+        RAISES NotAPdfError / InvalidContentError. Text formats are not gated.
         """
         if item.size is not None and item.size > MAX_FILE_BYTES:
             # Should have been skipped at enumerate; guard anyway.
@@ -300,8 +302,9 @@ class SharePointConnector:
         url = f"{_GRAPH_BASE}/drives/{self.drive_id}/items/{item.identity}/content"
         content = self._stream_download_with_backoff(url, item.source_path)
 
-        # Post-download integrity gate. Raises NotAPdfError if not a real PDF.
-        validate_pdf_magic(content)
+        # Post-download integrity gate, dispatched by extension. Raises
+        # NotAPdfError / InvalidContentError on a corrupt/mis-typed download.
+        validate_content_magic(item.filename, content)
 
         return ConnectorFile(filename=item.filename, content=content)
 
