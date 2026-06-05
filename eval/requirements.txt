@@ -8,4 +8,4 @@
 
 # --- RAGAS eval-only deps (kept out of the runtime image) ---
 ragas==0.4.3
-datasets==4.4.1
+datasets==4.8.5
