@@ -88,29 +88,36 @@ spec:
             failureThreshold: {{ $svc.readinessProbe.failureThreshold }}
           resources:
             {{- toYaml $svc.resources | nindent 12 }}
-          {{- if $root.Values.keyVaultCSI.enabled }}
           volumeMounts:
+            # Writable /tmp backed by an emptyDir so the root filesystem can stay
+            # read-only. SDKs (Document Intelligence, openai, etc.) may write
+            # temp files here; the app itself persists nothing to local disk.
+            - name: tmp
+              mountPath: /tmp
+            {{- if $root.Values.keyVaultCSI.enabled }}
             # Mounting the CSI volume is what triggers the SecretProviderClass to
             # sync Key Vault objects into the synced Secret referenced by env vars.
             - name: secrets-store
               mountPath: /mnt/secrets-store
               readOnly: true
-          {{- end }}
+            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: false
+            readOnlyRootFilesystem: true
             capabilities:
               drop:
                 - ALL
-      {{- if $root.Values.keyVaultCSI.enabled }}
       volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if $root.Values.keyVaultCSI.enabled }}
         - name: secrets-store
           csi:
             driver: secrets-store.csi.k8s.io
             readOnly: true
             volumeAttributes:
               secretProviderClass: {{ $fullname }}-kv
-      {{- end }}
+        {{- end }}
       {{- with $svc.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
