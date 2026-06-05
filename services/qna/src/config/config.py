@@ -368,6 +368,37 @@ def is_map_reduce_enabled() -> bool:
     return (os.getenv("QNA_AGENT_MAP_REDUCE") or "").strip().lower() in _TRUTHY
 
 
+def is_react_enabled() -> bool:
+    """Whether the P3-3 ReAct multi-hop retrieval node is live (default OFF).
+
+    A **sub-flag** under the master ``QNA_AGENT_ENABLED``: the react route only
+    runs when BOTH this flag and the master flag are on. Read live from the
+    environment on every call so it is a no-redeploy kill-switch and tests can
+    toggle it with ``monkeypatch.setenv``. Parsed explicitly so the literal
+    string ``"false"`` is correctly falsy.
+
+    With this flag unset/empty/falsy, a ``react`` classification collapses to
+    ``standard_route`` — behaviour is byte-for-byte identical to today.
+    """
+    return (os.getenv("QNA_AGENT_REACT") or "").strip().lower() in _TRUTHY
+
+
+def is_verify_enabled() -> bool:
+    """Whether the P3-4 self-critique verifier node is live (default OFF).
+
+    A **sub-flag** under the master ``QNA_AGENT_ENABLED``: the verifier grades
+    (and may trigger one bounded refine of) an answer only when BOTH this flag
+    and the master flag are on. Read live from the environment on every call so
+    it is a no-redeploy kill-switch and tests can toggle it with
+    ``monkeypatch.setenv``. Parsed explicitly so the literal string ``"false"``
+    is correctly falsy.
+
+    With this flag unset/empty/falsy, the verifier node is a pass-through no-op
+    (writes no keys) — behaviour is byte-for-byte identical to today.
+    """
+    return (os.getenv("QNA_AGENT_VERIFY") or "").strip().lower() in _TRUTHY
+
+
 def is_tenant_binding_enforced() -> bool:
     """Whether within-tenant bot_tag<->tid binding is enforced (default **ON**).
 
@@ -495,6 +526,32 @@ class LocalConfig:
         # final synthesis. Falls back to the standard LLM model so the node
         # works without new env in tests/parity.
         self.AZURE_OPENAI_REDUCE_MODEL: str = _get_env("AZURE_OPENAI_REDUCE_MODEL") or self.AZURE_LLM_MODEL
+
+        # --- P3-3 ReAct multi-hop retrieval knobs (canonical UPPER_SNAKE; new
+        # in P3 so no legacy alias). All optional with sensible defaults so
+        # parity and tests work without any new env. ---
+        # Hard ceiling on reason->retrieve->reason iterations. BOUNDED so a
+        # mis-reasoning loop can never run away (or melt the Azure quota).
+        self.REACT_MAX_ITERATIONS: int = _int_env("REACT_MAX_ITERATIONS", 5)
+        # Max concurrent in-flight sub-query searches when one reasoning step
+        # fans out into several lookups (semaphore bound). Sized small to respect
+        # the synchronous Azure OpenAI client + bounded executor.
+        self.REACT_CONCURRENCY: int = _int_env("REACT_CONCURRENCY", 4)
+        # Max distinct sub-queries a single reason step may request (defends the
+        # fan-out width regardless of what the model emits).
+        self.REACT_MAX_SUBQUERIES: int = _int_env("REACT_MAX_SUBQUERIES", 4)
+
+        # --- P3-4 self-critique verifier knobs (canonical UPPER_SNAKE; new in
+        # P3 so no legacy alias). Optional with defaults so parity/tests work
+        # without any new env. ---
+        # Verifier model: a separate deployment for grading groundedness. Falls
+        # back to the standard LLM model so the node works without new env.
+        self.AZURE_OPENAI_VERIFIER_MODEL: str = (
+            _get_env("AZURE_OPENAI_VERIFIER_MODEL") or self.AZURE_LLM_MODEL
+        )
+        # Minimum groundedness/support score (0-100, inclusive) an answer must
+        # meet to be accepted without a refine pass.
+        self.VERIFY_MIN_SCORE: int = _int_env("VERIFY_MIN_SCORE", 70)
         # Empty string = semantic reranking disabled (default, no behavior
         # change). Canonical UPPER_SNAKE name; no legacy alias (new in P2-1).
         self.AZURE_SEARCH_SEMANTIC_CONFIG: str = _get_env("AZURE_SEARCH_SEMANTIC_CONFIG") or ""
