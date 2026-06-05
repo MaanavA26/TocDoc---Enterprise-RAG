@@ -1,0 +1,10 @@
+# Load-test harness dependencies.
+#
+# Install via your configured package index, e.g.:
+#   pip install -r loadtest/requirements.txt --index-url <your-index-url>
+#
+# Locust drives the load; pytest runs the pure-helper unit tests in
+# loadtest/tests/ (which need no Locust runtime and no live target).
+
+locust==2.44.0
+pytest==9.0.3
