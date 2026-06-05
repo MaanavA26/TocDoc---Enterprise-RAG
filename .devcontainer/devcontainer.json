@@ -1,0 +1,62 @@
+{
+  // TocDoc dev container — VS Code / GitHub Codespaces.
+  // Python 3.12 to match CI (.github/workflows/ci.yml PYTHON_VERSION) and the
+  // runtime image. JSONC: comments are allowed and stripped by the parser.
+  "name": "TocDoc (Python 3.12)",
+
+  // Prebuilt Microsoft dev container base. No Dockerfile is needed: every
+  // system + Python dependency the services require is pip-installable, so the
+  // toolchain is provisioned by postCreateCommand below rather than baked in.
+  "image": "mcr.microsoft.com/devcontainers/python:3.12",
+
+  // Forward both service ports so the in-editor browser preview works.
+  // Endpoints (see docs/LOCAL_DEV.md):
+  //   QnA       http://localhost:5500/qna/docs
+  //   Ingestion http://localhost:5501/upload_pipeline/docs
+  "forwardPorts": [5500, 5501],
+  "portsAttributes": {
+    "5500": { "label": "qna", "onAutoForward": "notify" },
+    "5501": { "label": "ingestion", "onAutoForward": "notify" }
+  },
+
+  // Provision the dev toolchain after the container is created. Run from the
+  // repo root (the workspace folder) so the Makefile and requirements paths
+  // resolve. See .devcontainer/README.md for the rationale on the eval venv.
+  "postCreateCommand": "bash .devcontainer/postCreate.sh",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "charliermarsh.ruff",
+        "ms-azuretools.vscode-docker",
+        "redhat.vscode-yaml",
+        "ms-azuretools.vscode-bicep"
+      ],
+      "settings": {
+        // Use the container's Python (postCreate installs deps into it).
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+
+        // Ruff is the formatter; format on save matches CI's `ruff format`.
+        // importStrategy=fromEnvironment forces the extension to use the
+        // CI-pinned ruff (0.15.7) installed by postCreate, NOT its bundled one.
+        "[python]": {
+          "editor.defaultFormatter": "charliermarsh.ruff",
+          "editor.formatOnSave": true
+        },
+        "ruff.importStrategy": "fromEnvironment",
+
+        // Pytest discovery. The repo has four independent suites, each with its
+        // own pytest.ini in its own directory; VS Code single-root discovery
+        // can only target one, so it points at services/qna. Use `make test`
+        // (or `make test-ingestion` / `test-sdk` / `test-eval`) for the rest.
+        "python.testing.pytestEnabled": true,
+        "python.testing.unittestEnabled": false,
+        "python.testing.pytestArgs": ["services/qna"]
+      }
+    }
+  },
+
+  // Run as the non-root user that the base image provides.
+  "remoteUser": "vscode"
+}
