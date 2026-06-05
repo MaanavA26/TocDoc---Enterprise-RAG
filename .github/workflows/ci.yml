@@ -7,8 +7,12 @@ name: ci
 #   security   → bandit (Python AST scan) + pip-audit (CVE check on installed deps)
 #   bicep      → az bicep build (validate IaC compiles)
 #   shell      → shellcheck (validate any scripts/*.sh in the repo)
+#   helm       → helm lint --strict + helm template (validate charts/tocdoc renders)
 #   test       → matrix over {qna, ingestion}; pytest with coverage, artifact uploaded
 #   test (sdk) → install clients/python SDK (light: httpx + pydantic) + pytest
+#   test (teams-bot)
+#              → install services/teams-bot deps (pulls the editable SDK
+#                transitively via requirements.txt) + pytest; fully mocked
 #   test (eval)→ install eval/ RAGAS harness (heavy: ragas + qna deps) + pytest
 #                kept as its own parallel job so the slow install never sits on
 #                the {qna, ingestion} critical path
@@ -161,6 +165,34 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
+  # Helm — lint + template-render the AKS chart
+  # ---------------------------------------------------------------------------
+  #
+  # Standalone linter like `bicep` / `shell` (no `needs:`) — validates the
+  # alternative AKS packaging path under charts/tocdoc compiles, without
+  # deploying. `--strict` promotes lint warnings to errors; `helm template`
+  # then renders every template with the default values to catch errors that
+  # only surface at render time (bad `{{ }}` references, invalid YAML output).
+  helm:
+    name: helm lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: helm lint (--strict)
+        run: helm lint --strict charts/tocdoc
+
+      # Render to /dev/null — we only care that templating succeeds, not the
+      # manifest output (the workspace stays clean).
+      - name: helm template
+        run: helm template charts/tocdoc > /dev/null
+
+  # ---------------------------------------------------------------------------
   # Test — pytest with coverage (matrix over services)
   # ---------------------------------------------------------------------------
   test:
@@ -259,6 +291,48 @@ jobs:
 
       - name: Run pytest
         working-directory: clients/python
+        run: pytest -q
+
+  # ---------------------------------------------------------------------------
+  # Test (teams-bot) — services/teams-bot Bot Framework adapter
+  # ---------------------------------------------------------------------------
+  #
+  # Its suite is fully mocked (no live Teams/Bot Connector/AAD/QnA — see
+  # tests/conftest.py fakes), so it runs on the standard runner with no system
+  # packages. Gates on lint like the other test jobs.
+  #
+  # IMPORTANT: install + pytest both run with `working-directory:
+  # services/teams-bot`. requirements.txt pins `-e ../../clients/python`, and
+  # pip resolves that relative editable path against the CWD (not the
+  # requirements file), so the install MUST run from the service dir for the
+  # in-repo SDK to install transitively. requirements-dev.txt does
+  # `-r requirements.txt` + pytest + pytest-asyncio, so one install covers all.
+  test-teams-bot:
+    name: test (teams-bot)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: lint
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            services/teams-bot/requirements.txt
+            services/teams-bot/requirements-dev.txt
+
+      - name: Install teams-bot requirements
+        working-directory: services/teams-bot
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Run pytest
+        working-directory: services/teams-bot
         run: pytest -q
 
   # ---------------------------------------------------------------------------
