@@ -37,11 +37,22 @@
 
 ## Autonomous merges this run
 
-_(appended as they land — each with a one-line revert)_
+All CI-gated on green `main`. Revert any one with `git revert <sha>` (squash commits).
 
-| PR | What | Revert |
+| PR | What | Revert (sha) |
 |---|---|---|
-| _(none yet)_ | | |
+| #167 | Live-Azure deploy + smoke-test runbook (docs) | `git revert 9de4d54` |
+| #168 | mkdocs `--strict` fix — unbreak docs build (`nav.omitted_files: info`) | `git revert 2004011` |
+| #169 | **Audit fix** — Terraform App Insights wiring + accurate IP-range var doc | `git revert 7f94adb` |
+| #170 | **Audit fix (HIGH)** — SDK SSE parser honors event types (no citation-in-answer, surfaces errors) | `git revert b6af9d3` |
+| #171 | **Audit fix (2×HIGH)** — qna SSE backpressure + cooperative cancel + verifier/cache/logging/doc | `git revert 9b37c7b` |
+| #172 | **Audit fix (HIGH)** — ingestion OTel span scrub + zip-bomb/malformed/layout/empty + 404 envelope | `git revert 6a616cd` |
+| #173 | P3 agentic-layer enablement cutover guide (docs) | `git revert 5029cda` |
+
+**Re-audit of the new strides → 20 confirmed bugs (4 HIGH) → all fixed above.** The 4 HIGH were:
+SSE no-backpressure (token-drop/deadlock/slot-leak DoS) + non-cooperative cancel (executor-pool exhaustion/denial-of-wallet) in qna #171; SDK SSE parser corrupting answers + swallowing errors #170; OTel server span leaking the `/upload` query (filepath + bot_tag) #172. A **confirmatory re-audit on the fixed code is running** to prove resolution + catch any fix-introduced regression.
+
+**Dependabot declined this run (re-raised, eval-only):** #150–155 — eval's langchain stack is pinned ragas-compatible (langchain 0.3.x); 1.x breaks ragas. Same call as #121–126. No revert needed (closed, not merged).
 
 ## Council verdicts (as the owner, adversarially checked) — all STAGE/HOLD, none executed
 
