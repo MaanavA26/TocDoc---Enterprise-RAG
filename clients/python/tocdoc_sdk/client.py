@@ -3,14 +3,17 @@
 Wraps the ``POST /qna`` endpoint with typed request/response models and the
 P0-6 error contract. Transport is ``httpx``; no service code is imported.
 
-Retry policy: only *transient* failures are retried — 5xx responses and
-connect/timeout errors. A 4xx is never retried (it will not succeed on a
-repeat). Backoff is exponential with a configurable base; ``sleep`` is
-injectable so tests stay fast and deterministic.
+Retry policy: method-aware and transient-only (see :mod:`tocdoc_sdk._retry`).
+The ``/qna`` query is idempotent (a read), so it retries on 5xx and on any
+transient connect/read/write timeout. A 4xx is never retried (it will not
+succeed on a repeat). Backoff is exponential with full jitter and a
+configurable base; ``sleep`` and ``rng`` are injectable so tests stay fast and
+deterministic.
 """
 
 from __future__ import annotations
 
+import random
 import time
 from collections.abc import Callable, Iterable
 from typing import Any
@@ -21,9 +24,11 @@ from ._retry import (
     DEFAULT_BACKOFF_BASE,
     DEFAULT_MAX_RETRIES,
     DEFAULT_TIMEOUT,
-    RETRYABLE_EXC,
-    RETRYABLE_STATUS,
+    Rng,
+    compute_backoff,
     safe_json,
+    should_retry_exception,
+    should_retry_status,
 )
 from .errors import ApiError
 from .models import BotTurn, QnAAnswer, QnARequest
@@ -60,6 +65,9 @@ class TocDocClient:
         transport: Optional ``httpx`` transport (used by tests to mock HTTP).
         sleep: Injectable sleep function (defaults to ``time.sleep``); override
             in tests to avoid real delays.
+        rng: Injectable jitter source — a no-arg callable returning a float in
+            ``[0, 1)`` (defaults to ``random.random``); override in tests so
+            backoff is deterministic.
     """
 
     def __init__(
@@ -72,6 +80,7 @@ class TocDocClient:
         backoff_base: float = DEFAULT_BACKOFF_BASE,
         transport: httpx.BaseTransport | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        rng: Rng = random.random,
     ) -> None:
         if max_retries < 0:
             raise ValueError("max_retries must be >= 0")
@@ -79,6 +88,7 @@ class TocDocClient:
         self._max_retries = max_retries
         self._backoff_base = backoff_base
         self._sleep = sleep
+        self._rng = rng
 
         headers = {"Accept": "application/json"}
         if token:
@@ -147,7 +157,9 @@ class TocDocClient:
             bot_tag=bot_tag,
         )
 
-        response = self._request_with_retries("POST", "/qna", json=request.model_dump())
+        # The /qna query is idempotent (a read), so it keeps the full transient
+        # retry policy: 5xx + any connect/read/write timeout.
+        response = self._request_with_retries("POST", "/qna", idempotent=True, json=request.model_dump())
 
         if 200 <= response.status_code < 300:
             return QnAAnswer.model_validate(response.json())
@@ -155,33 +167,39 @@ class TocDocClient:
         # Non-2xx: parse the P0-6 envelope (defensively) and raise.
         raise ApiError.from_response(response.status_code, safe_json(response))
 
-    def _request_with_retries(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
-        """Send ``method`` to ``path``, retrying transient failures only.
+    def _request_with_retries(
+        self, method: str, path: str, *, idempotent: bool, **kwargs: Any
+    ) -> httpx.Response:
+        """Send ``method`` to ``path``, retrying transient failures per policy.
 
-        Method-agnostic (POST for ``/qna``, GET for admin reads) so the same
-        transient-retry policy applies everywhere without duplication.
-        ``**kwargs`` are forwarded to ``httpx.Client.request`` (e.g. ``json=``,
-        ``params=``).
+        ``idempotent`` selects the method-aware policy (see
+        :mod:`tocdoc_sdk._retry`): idempotent requests retry on 5xx and any
+        transient timeout; non-idempotent requests retry only on connect-phase
+        errors, never on a 5xx or post-send read/write timeout. ``**kwargs`` are
+        forwarded to ``httpx.Client.request`` (e.g. ``json=``, ``params=``).
 
-        Retries on 5xx responses and connect/timeout errors, up to
-        ``max_retries`` times with exponential backoff. A 4xx response is
-        returned immediately (never retried). The last transient exception is
-        re-raised if all attempts are exhausted.
+        Backoff is exponential with full jitter. A 4xx (and, for non-idempotent
+        requests, a 5xx) is returned immediately. The last transient exception
+        is re-raised if all attempts are exhausted.
         """
         last_exc: Exception | None = None
 
         for attempt in range(self._max_retries + 1):
             try:
                 response = self._client.request(method, path, **kwargs)
-            except RETRYABLE_EXC as exc:
+            except Exception as exc:
+                if not should_retry_exception(exc, idempotent=idempotent):
+                    raise
                 last_exc = exc
                 if attempt < self._max_retries:
-                    self._sleep(self._backoff_base * (2**attempt))
+                    self._sleep(compute_backoff(attempt, base=self._backoff_base, rng=self._rng))
                     continue
                 raise
             else:
-                if response.status_code in RETRYABLE_STATUS and attempt < self._max_retries:
-                    self._sleep(self._backoff_base * (2**attempt))
+                if should_retry_status(response.status_code, idempotent=idempotent) and (
+                    attempt < self._max_retries
+                ):
+                    self._sleep(compute_backoff(attempt, base=self._backoff_base, rng=self._rng))
                     continue
                 return response
 
