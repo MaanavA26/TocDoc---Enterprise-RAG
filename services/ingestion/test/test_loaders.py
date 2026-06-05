@@ -202,6 +202,60 @@ def test_malformed_pptx_raises_extraction_error():
 
 
 # ---------------------------------------------------------------------------
+# Zip-bomb / decompression-bomb guard (OOXML)
+# ---------------------------------------------------------------------------
+
+
+def test_docx_zip_bomb_rejected_by_uncompressed_size(monkeypatch):
+    """A .docx whose inflated size exceeds the cap is rejected as ExtractionError
+    BEFORE python-docx hands the XML to lxml — never an OOM/500.
+
+    Uses a VALID OOXML doc + a tiny monkeypatched cap so the only thing that can
+    raise is the guard itself: without the guard this doc parses cleanly, so the
+    test discriminates (a generic parse failure on an invalid package would pass
+    pytest.raises for the wrong reason). The asserted message is the guard's own,
+    not any incidental parser error.
+    """
+    import loaders
+
+    # A real, valid DOCX (its uncompressed parts total a few KB).
+    content = _docx_bytes(["Some real paragraph content here."])
+    # Cap below the real uncompressed size so the SIZE check fires.
+    monkeypatch.setattr(loaders, "_MAX_OOXML_UNCOMPRESSED_BYTES", 100)
+    monkeypatch.setattr(loaders, "_MAX_OOXML_COMPRESSION_RATIO", 1_000_000)
+
+    with pytest.raises(ExtractionError) as ei:
+        extract_text("bomb.docx", content)
+    assert "exceeds" in str(ei.value)  # the guard's size-limit message
+
+
+def test_pptx_zip_bomb_rejected_by_ratio(monkeypatch):
+    """The decompression-RATIO cap also rejects an explosive .pptx.
+
+    Same discrimination strategy: a valid PPTX + a tiny ratio cap, asserting the
+    guard's ratio message so the test cannot pass on an incidental parser error.
+    """
+    import loaders
+
+    content = _pptx_bytes([["Slide one body text"], ["Slide two body text"]])
+    # Huge absolute cap, ratio cap of 1 → any real OOXML (which compresses) trips it.
+    monkeypatch.setattr(loaders, "_MAX_OOXML_UNCOMPRESSED_BYTES", 100 * 1024 * 1024)
+    monkeypatch.setattr(loaders, "_MAX_OOXML_COMPRESSION_RATIO", 1)
+
+    with pytest.raises(ExtractionError) as ei:
+        extract_text("bomb.pptx", content)
+    assert "ratio" in str(ei.value)  # the guard's ratio-limit message
+
+
+def test_normal_docx_passes_zip_bomb_guard():
+    """A real, small DOCX is well under the cap and extracts normally — the guard
+    is not a false-positive on legitimate documents."""
+    content = _docx_bytes(["Hello", "World"])
+    doc = extract_text("ok.docx", content)
+    assert "Hello" in doc.text and "World" in doc.text
+
+
+# ---------------------------------------------------------------------------
 # Registry helpers
 # ---------------------------------------------------------------------------
 
@@ -344,6 +398,72 @@ async def test_upload_markdown_layout_mode_splits_on_headers(monkeypatch):
     # Header splitting captured the markdown section header.
     section_headers = {d.get("section_header", "") for d in fake_search.uploaded}
     assert "Intro" in section_headers
+
+
+@pytest.mark.asyncio
+async def test_upload_layout_mode_bounds_headerless_chunks(monkeypatch):
+    """fr_mode=layout on header-less content must NOT yield one unbounded chunk.
+
+    MarkdownHeaderTextSplitter only splits at '#' headers; a DOCX/PPTX/TXT body
+    (or a long header-less .md) has none, so without a secondary token split the
+    WHOLE document would be a single chunk that exceeds the embedding model's
+    input window (~8191 tokens) and 500s. This asserts the layout branch
+    sub-splits each section so every embedded chunk is token-bounded, and that
+    chunk IDs stay unique (no per-section index collision).
+    """
+    import tiktoken
+    from custom_rag import _READ_MAX_TOKENS
+
+    instance, fake_search = _patched_rag(monkeypatch)
+
+    # Capture every chunk handed to the embedder so we can bound-check it.
+    embedded: list[str] = []
+
+    async def _capture_embed(text):
+        embedded.append(text)
+        return [0.1] * 3
+
+    monkeypatch.setattr(instance, "get_embedding", _capture_embed)
+
+    # ~12k tokens of header-LESS prose → far over the embedding limit if unsplit.
+    body = ("The quick brown fox jumps over the lazy dog. " * 1200).encode("utf-8")
+    file = _FakeUploadFile(body, "bigdoc.txt")
+
+    result = await instance.upload(file, "tenant1", "layout", "/srv/bigdoc.txt")
+
+    assert isinstance(result, dict)
+    assert result["status"] == "successful"
+    # Unbounded behavior would be exactly ONE chunk; bounded splitting yields many.
+    assert result["total_chunks"] > 1
+    assert len(embedded) > 1, "header-less layout doc must be split into >1 chunk"
+
+    # No embedded chunk may exceed the token cap the read branch enforces.
+    enc = tiktoken.get_encoding("cl100k_base")
+    for chunk in embedded:
+        assert len(enc.encode(chunk)) <= _READ_MAX_TOKENS
+
+    # Chunk IDs must be unique across all sub-chunks (P0-4 deterministic IDs;
+    # a per-section index would have collided and overwritten chunks).
+    ids = [d["id"] for d in fake_search.uploaded]
+    assert len(ids) == len(set(ids))
+
+
+@pytest.mark.asyncio
+async def test_upload_empty_text_returns_empty_status(monkeypatch):
+    """A document that extracts to no usable text returns a structured 'empty'
+    status (zero chunks) — NOT a success result. The route maps this to a clear
+    non-success response so a no-content document is never reported as indexed."""
+    instance, fake_search = _patched_rag(monkeypatch)
+    # Whitespace-only body → zero non-empty chunks.
+    file = _FakeUploadFile(b"   \n\t  \n   ", "blank.txt")
+
+    result = await instance.upload(file, "tenant1", "read", "/srv/blank.txt")
+
+    assert isinstance(result, dict)
+    assert result["status"] == "empty"
+    assert result["total_chunks"] == 0
+    # Nothing was written to the index.
+    assert fake_search.uploaded is None
 
 
 @pytest.mark.asyncio

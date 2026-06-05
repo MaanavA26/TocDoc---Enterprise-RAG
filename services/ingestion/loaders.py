@@ -27,9 +27,62 @@ from __future__ import annotations
 
 import io
 import logging
+import zipfile
 from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Zip-bomb / decompression-bomb guard (OOXML .docx/.pptx)
+# ---------------------------------------------------------------------------
+#
+# .docx and .pptx are zip+XML containers. python-docx / python-pptx decompress
+# the document parts fully into memory and hand multi-GB of XML to lxml. A
+# crafted OOXML file well under the 100 MB *compressed* upload ceiling can
+# decompress ~1000x to several GB of XML and OOM the worker. The only size
+# ceiling elsewhere in the ingestion path is enforced on the COMPRESSED bytes
+# (app.py / connectors), so we bound the UNCOMPRESSED size and the
+# decompression ratio here — the one place both the /upload route and the
+# (non-admin-authored) connector ingest path funnel through.
+#
+# Module-level constants so tests can monkeypatch a small cap and use a tiny,
+# highly-compressible fixture instead of fabricating multi-GB inputs.
+_MAX_OOXML_UNCOMPRESSED_BYTES = 500 * 1024 * 1024  # 500 MB total inflated size
+_MAX_OOXML_COMPRESSION_RATIO = 100  # uncompressed / compressed
+
+
+def _guard_ooxml_zip_bomb(content: bytes, fmt: str) -> None:
+    """Reject an OOXML payload that would decompress beyond safe bounds.
+
+    Opens ``content`` as a zip and sums every member's declared uncompressed
+    size BEFORE python-docx/pptx inflates it. Raises ``ExtractionError`` (a
+    4xx-friendly loader error) when the total inflated size or the
+    uncompressed/compressed ratio exceeds the configured cap, or when the bytes
+    are not a valid zip at all. The message names the format and the bound only,
+    never document content.
+
+    Args:
+        content: Raw OOXML (zip container) bytes.
+        fmt: Short format label for the error message (e.g. "DOCX").
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as zf:
+            total_uncompressed = sum(info.file_size for info in zf.infolist())
+    except zipfile.BadZipFile as exc:
+        # Not a valid OOXML/zip container — surface as a recognized-but-malformed
+        # error so the route maps it to a 4xx (not a 500), same as a corrupt doc.
+        raise ExtractionError(f"Failed to parse {fmt} (BadZipFile)") from exc
+
+    if total_uncompressed > _MAX_OOXML_UNCOMPRESSED_BYTES:
+        raise ExtractionError(
+            f"{fmt} rejected: uncompressed size exceeds the "
+            f"{_MAX_OOXML_UNCOMPRESSED_BYTES // (1024 * 1024)} MB limit."
+        )
+
+    compressed = len(content)
+    if compressed > 0 and total_uncompressed / compressed > _MAX_OOXML_COMPRESSION_RATIO:
+        raise ExtractionError(f"{fmt} rejected: decompression ratio exceeds {_MAX_OOXML_COMPRESSION_RATIO}x.")
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +182,9 @@ def _load_docx(content: bytes) -> ExtractedDocument:
     """Extract paragraph text from a DOCX (OOXML) document via python-docx."""
     from docx import Document
 
+    # Bound the inflated size BEFORE python-docx hands the XML to lxml.
+    _guard_ooxml_zip_bomb(content, "DOCX")
+
     try:
         document = Document(io.BytesIO(content))
     except Exception as exc:  # noqa: BLE001 - normalize to a safe loader error
@@ -146,6 +202,9 @@ def _load_pptx(content: bytes) -> ExtractedDocument:
     meaningful page-equivalent for decks.
     """
     from pptx import Presentation
+
+    # Bound the inflated size BEFORE python-pptx hands the XML to lxml.
+    _guard_ooxml_zip_bomb(content, "PPTX")
 
     try:
         presentation = Presentation(io.BytesIO(content))

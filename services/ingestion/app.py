@@ -14,12 +14,12 @@ from errors import (
 )
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from loaders import SUPPORTED_EXTENSIONS, is_supported_name
+from loaders import SUPPORTED_EXTENSIONS, LoaderError, is_supported_name
 from middleware import limit_upload_size
 from observability import RequestIDMiddleware
 from path_safety import resolve_upload_path
 from starlette.responses import JSONResponse
-from tracing import configure_tracing
+from tracing import configure_tracing, install_request_id_span_middleware, is_tracing_enabled
 
 # ── Per-file / per-batch upload ceilings ──────────────────────────────────────
 # 100 MB per file, enforced on actual bytes (L-X2): the declared
@@ -123,6 +123,16 @@ app.include_router(admin_router, prefix="/admin")
 app.middleware("http")(limit_upload_size)
 
 
+# Span request-ID correlation middleware (tracing-ON only). Added BEFORE
+# RequestIDMiddleware so it runs INNER of it — after `request.state.request_id`
+# is populated — and stamps the generated ID onto the OTel server span so the
+# common (no-inbound-header) path correlates spans with logs. Gated on
+# is_tracing_enabled() so the default-OFF path adds NO middleware (preserving
+# the "byte-for-byte as before" tracing contract). See tracing.py.
+if is_tracing_enabled():
+    install_request_id_span_middleware(app)
+
+
 # Request-ID / correlation middleware. Registered LAST so it becomes the
 # OUTERMOST layer in Starlette's stack — runs first on requests so
 # `request.state.request_id` is available to all downstream middleware,
@@ -163,6 +173,17 @@ def _upload_degraded(result) -> bool:
     when some chunks failed to index. The route MUST NOT mask that as success.
     """
     return isinstance(result, dict) and result.get("status") == "degraded"
+
+
+def _upload_empty(result) -> bool:
+    """True if rag.upload() extracted no usable text (zero-chunk no-op).
+
+    upload() returns a stats dict with status "empty" when extraction yielded
+    no text (whitespace-only .docx, all-markup HTML, empty .txt). The route MUST
+    NOT report this as "successfully indexed" — nothing was indexed and the
+    document is not retrievable. Mapped to a clear non-success response.
+    """
+    return isinstance(result, dict) and result.get("status") == "empty"
 
 
 def _is_within_root(path: str, root: str) -> bool:
@@ -315,7 +336,14 @@ async def upload_file(
                         _MockFile(file_path), bot_tag, fr_mode, file_path, request_id=request_id
                     )
                     # H3: surface a partial index write rather than masking it.
-                    file_status = "degraded" if _upload_degraded(result) else "success"
+                    # An empty parse is reported as "empty" (zero chunks indexed)
+                    # so a no-content file is not mislabeled "success".
+                    if _upload_degraded(result):
+                        file_status = "degraded"
+                    elif _upload_empty(result):
+                        file_status = "empty"
+                    else:
+                        file_status = "success"
                     results.append({"file": basename, "status": file_status, "result": result})
                     logger.info(f"Processed {basename!r} — status={file_status}")
                 except Exception as e:
@@ -376,11 +404,36 @@ async def upload_file(
                     content={"status": "partially indexed", "detail": result},
                 )
 
+            # Empty parse (zero chunks): do NOT report success. Return 422 with a
+            # clear status so the caller knows nothing was indexed and the
+            # document is not retrievable, rather than a misleading 200.
+            if _upload_empty(result):
+                logger.warning(f"Upload extracted no content: {result}")
+                raise_api_error(
+                    code=ApiErrorCode.VALIDATION_ERROR,
+                    message="No content could be extracted from the document; nothing was indexed.",
+                    status_code=422,
+                )
+
             logger.info(f"Upload completed successfully: {result}")
             return {"status": "successfully indexed", "detail": result}
 
         except HTTPException:
             raise
+        except LoaderError as e:
+            # A recognized extension (.docx/.pptx/.html/...) whose bytes are
+            # malformed, or an OOXML zip-bomb rejected by the loader guard, is
+            # BAD CLIENT INPUT — not a server fault. Loaders raise LoaderError
+            # (ExtractionError / UnsupportedFormatError) with safe, content-free
+            # messages, so map it to a structured 422 here rather than letting
+            # the generic handler below mask it as a 500. This honors the
+            # loaders' documented "4xx-friendly" contract.
+            logger.warning(f"Unprocessable document during upload: {type(e).__name__}")
+            raise_api_error(
+                code=ApiErrorCode.VALIDATION_ERROR,
+                message=str(e),
+                status_code=422,
+            )
         except Exception as e:
             # L-X1: log the exception CLASS only — never str(e), which may carry
             # file paths / connection detail into log sinks.

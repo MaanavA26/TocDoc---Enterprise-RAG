@@ -9,9 +9,10 @@ comparison.
 A future PR should replace this with the same Azure AD JWT mechanism the
 QnA service uses (see `services/qna/src/core/auth.py`). Until then:
 
-- The dependency is applied ONLY to `/admin/*` routes via FastAPI `Depends`.
-- Existing `/upload` and `/health` endpoints remain entirely unauthenticated
-  (consistent with prior behavior).
+- The dependency guards every `/admin/*` route via FastAPI `Depends`, and it is
+  ALSO applied to `POST /upload` (H2 hardening in app.py): ingestion is an
+  expensive DI + embedding + index path, so it requires a valid `X-Admin-Token`.
+- Only `/health` (the liveness probe) remains unauthenticated.
 - The env var is checked at request time, NOT import time, so importing this
   module never fails. A request with the env unset gets a 503 (server
   misconfigured) rather than silently bypassing auth.

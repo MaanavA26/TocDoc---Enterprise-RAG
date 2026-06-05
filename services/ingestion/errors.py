@@ -32,6 +32,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import JSONResponse
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,7 @@ _STATUS_TO_CODE = {
     401: ApiErrorCode.UNAUTHORIZED,
     403: ApiErrorCode.UNAUTHORIZED,
     404: ApiErrorCode.NOT_FOUND,
+    405: ApiErrorCode.INVALID_REQUEST,
     409: ApiErrorCode.INVALID_REQUEST,
     413: ApiErrorCode.INVALID_REQUEST,
     422: ApiErrorCode.VALIDATION_ERROR,
@@ -165,8 +167,19 @@ def build_error_response(
     )
 
 
-async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
-    """Convert any HTTPException into the envelope (string- or dict-detail)."""
+async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    """Convert any HTTPException into the envelope (string- or dict-detail).
+
+    Registered on `starlette.exceptions.HTTPException` (the PARENT of
+    `fastapi.HTTPException`) so that framework-raised routing failures —
+    unmatched path → 404, wrong method → 405 — are ALSO enveloped. Starlette's
+    ExceptionMiddleware dispatches by exact exception class; routing 404/405 are
+    raised as the Starlette parent, which a handler keyed on the FastAPI
+    subclass would never match. Registering on the parent achieves parity with
+    the QnA service (see services/qna/src/core/errors.py). fastapi.HTTPException
+    is a subclass, so existing dict-detail / string-detail callsites continue to
+    route through this same handler unchanged.
+    """
     detail = exc.detail
     if isinstance(detail, dict) and "code" in detail and "message" in detail:
         code = str(detail["code"])
@@ -226,7 +239,10 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 
 def register_exception_handlers(app: FastAPI) -> None:
     """Install the three exception handlers on the FastAPI app."""
-    app.add_exception_handler(HTTPException, http_exception_handler)
+    # Register on the Starlette PARENT class so framework-raised routing 404/405
+    # are enveloped too. fastapi.HTTPException is a subclass, so app-raised
+    # HTTPExceptions still route here. Mirrors QnA's registration.
+    app.add_exception_handler(StarletteHTTPException, http_exception_handler)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
     app.add_exception_handler(Exception, unhandled_exception_handler)
 
