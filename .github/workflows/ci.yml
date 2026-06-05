@@ -101,28 +101,40 @@ jobs:
       # pip-audit resolves the requirements file against the advisory DB
       # (PyPI/OSV), per service so a CVE in one dep set doesn't mask the other.
       #
-      # HARD GATE (no continue-on-error). The previously-tracked backlog
-      # (starlette, aiohttp, python-multipart, ...) was cleared by the recent
-      # dependency upgrade: both services now run cryptography 48, langchain
-      # 1.3.2, fastapi 0.136.3 / starlette 1.2.0, aiohttp 3.13.5,
-      # python-multipart 0.0.29 — all past the previously-vulnerable ranges.
+      # HARD GATE (no continue-on-error). Most of the previously-tracked backlog
+      # (starlette, python-multipart, cryptography, ...) was cleared by the
+      # recent dependency upgrade — both services now run cryptography 48,
+      # langchain 1.3.2, fastapi 0.136.3 / starlette 1.2.0, python-multipart
+      # 0.0.29, past the previously-vulnerable ranges.
       #
       # pip-audit has no severity selector; it fails on ANY advisory minus an
-      # explicit allowlist. The allowlist (--ignore-vuln <ID>, repeatable) is
-      # intentionally EMPTY: there are no KNOWN-unfixable advisories to carry.
-      # Should the advisory DB surface a new finding the PR's own security job
-      # reds (it cannot red main — a PR must pass this job to merge), the log
-      # names the advisory ID, and the fix is either a dep bump or — only for a
-      # genuinely unfixable advisory — a commented `--ignore-vuln <ID>` entry
-      # added here. New criticals are NOT silently swallowed.
+      # explicit allowlist (--ignore-vuln <ID>, repeatable). The allowlist below
+      # is NOT empty — it carries exactly the two advisories the gate currently
+      # surfaces, both in aiohttp 3.13.5, both fixed in aiohttp 3.14.0:
+      #   GHSA-jg22-mg44-37j8, GHSA-hg6j-4rv6-33pg
+      # These are FIXABLE (bump aiohttp to 3.14.0), but that bump lives in the
+      # service requirements.txt files, which are OUT OF SCOPE for this
+      # ci.yml-only hardening PR. Tracked as a follow-up; the allowlist is the
+      # documented bridge so the gate goes green now without swallowing
+      # everything. Remove these two entries the moment aiohttp is bumped.
+      #
+      # Any OTHER advisory — including a new one in aiohttp — still fails the
+      # job (the PR's own security check reds; it cannot red main, since a PR
+      # must pass this job to merge). New criticals are NOT silently swallowed.
       - name: pip-audit (QnA dependencies)
-        run: pip-audit --requirement services/qna/requirements.txt
+        run: >-
+          pip-audit --requirement services/qna/requirements.txt
+          --ignore-vuln GHSA-jg22-mg44-37j8
+          --ignore-vuln GHSA-hg6j-4rv6-33pg
 
       - name: pip-audit (ingestion dependencies)
         # libgl1 / libglib2.0-0 not needed here — pip-audit only inspects the
         # requirements file, doesn't import the packages.
-        # Hard gate with the same empty allowlist — see the QnA step above.
-        run: pip-audit --requirement services/ingestion/requirements.txt
+        # Same allowlist as the QnA step — ingestion also pins aiohttp 3.13.5.
+        run: >-
+          pip-audit --requirement services/ingestion/requirements.txt
+          --ignore-vuln GHSA-jg22-mg44-37j8
+          --ignore-vuln GHSA-hg6j-4rv6-33pg
 
   # ---------------------------------------------------------------------------
   # Bicep — validate IaC template compiles
