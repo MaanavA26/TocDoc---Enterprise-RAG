@@ -25,8 +25,8 @@ from azure.search.documents.indexes.models import (
     VectorSearchProfile,
 )
 from dotenv import load_dotenv
-from langchain.text_splitter import MarkdownHeaderTextSplitter
 from langchain_community.document_loaders import AzureAIDocumentIntelligenceLoader
+from langchain_text_splitters import MarkdownHeaderTextSplitter
 from observability import log_event
 
 load_dotenv()
