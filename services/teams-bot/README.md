@@ -5,11 +5,17 @@ questions from inside Microsoft Teams. It is a **new, standalone service** and
 is **purely additive**: on the happy path it requires no change to the QnA
 service, the search layer, the config module, or the SDK contract.
 
-This is a **v1 scaffold**. The structure, the unspoofable identity → `bot_tag`
-derivation, adaptive-card rendering, and the QnA call are implemented and
-unit-tested with mocks. **Live Teams/Azure are not exercised here** — the
-inbound Bot Framework JWT validation, the On-Behalf-Of (OBO) token exchange,
-and bot registration are deployment steps documented below.
+The structure, the unspoofable identity → `bot_tag` derivation, adaptive-card
+rendering, and the QnA call are implemented and unit-tested with mocks.
+
+**Inbound Bot Framework JWT validation is enforced in code:** `/api/messages`
+passes the real `Authorization` header to `BotFrameworkAdapter.process_activity`,
+which authenticates the inbound activity before the bot runs. When
+authentication fails the adapter raises `PermissionError`, which the host maps
+to **401** so a rejected activity never reaches the bot. The
+`PermissionError → 401` contract is tested offline (see "What is validated
+offline vs at deploy time" below); the **On-Behalf-Of (OBO) token exchange** and
+**bot registration** remain deployment steps documented below.
 
 Design source of truth: `docs/architect_phase_2/10_P4_1_TEAMS_BOT_ADR.md`.
 
@@ -103,6 +109,39 @@ step:**
    which the unchanged QnA token validator already handles. The adapter
    forwards it as `Authorization: Bearer`; **no QnA P0-1 code change is needed**.
 
+## What is validated offline vs at deploy time
+
+Inbound auth is enforced in code, and the **policy** is tested without live
+Microsoft keys by injecting a fake adapter at the `process_activity` boundary
+(`create_app(..., adapter=...)`):
+
+- **Offline (unit tests, `tests/test_app.py`)** — the *host's handling of the
+  auth verdict*, with the adapter's verdict mocked at the `process_activity`
+  boundary:
+  - when authentication fails, the adapter raises `PermissionError` (exactly
+    what `BotFrameworkAdapter._authenticate_request` raises for an absent token
+    or a `not is_authenticated` claim — verified against the installed
+    `botframework-connector` 4.17.1 source); the host returns **401** and the
+    bot never runs (no QnA call). Tested for a missing header and a malformed
+    `Bearer` header;
+  - when authentication succeeds, the activity is processed: the verified
+    `channelData.tenant.id` is resolved **server-side** to the configured
+    `bot_tag`, and that derived tag reaches the QnA call (the central invariant,
+    proven with auth mocked).
+
+- **Deploy time (live keys, not exercisable here):** the actual JWT
+  *signature / issuer / audience* check against the real
+  `MICROSOFT_APP_ID`/`MICROSOFT_APP_PASSWORD` and the Bot Connector's OpenID
+  metadata (a network fetch). This is performed by the unchanged
+  `BotFrameworkAdapter` built in `create_app` when no adapter is injected; the
+  tests mock only the verdict at that boundary, never weakening the production
+  validation. Note that a forged-*signature* token is rejected at this layer —
+  it is **never processed** — but the exact connector exception type for a
+  bad-signature/endorsement failure is not the `PermissionError` 401 path
+  (those raises require the live OpenID metadata fetch), so the precise status
+  code for that specific case is a deploy-time behavior rather than an offline
+  guarantee.
+
 ## Citation rendering — deliberate ADR-aligned choice
 
 The ADR's brief mentions "citations as links," but the ADR's own citation
@@ -123,7 +162,7 @@ services/teams-bot/
   pytest.ini
   teams_bot/
     __init__.py
-    app.py                  # aiohttp host + /api/messages; inbound JWT validation seam
+    app.py                  # aiohttp host + /api/messages; enforces inbound JWT validation (401 on failure)
     bot.py                  # ActivityHandler: derive bot_tag, call QnA, render card
     cards.py                # adaptive-card rendering ({answer, citation}; ApiError)
     config.py               # env config + concrete-tenant startup assertion

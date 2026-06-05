@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import Callable
 from http import HTTPStatus
 
 from aiohttp import web
@@ -61,8 +62,18 @@ def build_message_handler(
         async def logic(turn_context: TurnContext) -> None:
             await bot.on_turn(turn_context)
 
-        # process_activity performs the inbound Bot Framework JWT validation.
-        invoke_response = await adapter.process_activity(activity, auth_header, logic)
+        # process_activity performs the inbound Bot Framework JWT validation
+        # (issuer + audience = the bot's MicrosoftAppId) BEFORE invoking logic.
+        # A missing/invalid/expired token makes _authenticate_request raise
+        # PermissionError; we map that to 401 so a forged activity is rejected
+        # at the trust boundary and never reaches the bot. We catch ONLY the
+        # auth-failure type here so genuine in-turn errors still surface (they
+        # are handled by adapter.on_turn_error, not masked as a 401).
+        try:
+            invoke_response = await adapter.process_activity(activity, auth_header, logic)
+        except PermissionError:
+            logger.warning("Rejected inbound activity: Bot Framework JWT authentication failed.")
+            return web.Response(status=HTTPStatus.UNAUTHORIZED)
         if invoke_response:
             return web.json_response(data=invoke_response.body, status=invoke_response.status)
         return web.Response(status=HTTPStatus.OK)
@@ -90,6 +101,8 @@ def create_app(
     token_provider: TokenProvider,
     app_id: str,
     app_password: str,
+    adapter: BotFrameworkAdapter | None = None,
+    client_factory: Callable[[str], TocDocClient] | None = None,
 ) -> web.Application:
     """Build the aiohttp application (the live host).
 
@@ -98,9 +111,20 @@ def create_app(
         token_provider: The OBO token provider (injectable for tests).
         app_id: The bot's ``MicrosoftAppId`` (used to validate inbound JWTs).
         app_password: The bot app password.
+        adapter: Optional pre-built adapter, the inbound-auth seam. In
+            production this is left ``None`` and a real ``BotFrameworkAdapter``
+            is constructed from ``app_id``/``app_password`` so JWT validation is
+            fully enforced. Tests inject a fake adapter to exercise the
+            authenticated/unauthenticated paths offline WITHOUT weakening that
+            production validation (the real adapter is never swapped in prod).
+        client_factory: Optional per-turn QnA client factory ``(bearer) -> client``.
+            Left ``None`` in production (a real ``TocDocClient`` factory is built);
+            tests inject a recording fake so an authenticated turn can be asserted
+            to reach the QnA call with the server-derived ``bot_tag``.
     """
-    settings = BotFrameworkAdapterSettings(app_id=app_id, app_password=app_password)
-    adapter = BotFrameworkAdapter(settings)
+    if adapter is None:
+        settings = BotFrameworkAdapterSettings(app_id=app_id, app_password=app_password)
+        adapter = BotFrameworkAdapter(settings)
 
     async def on_error(turn_context: TurnContext, error: Exception) -> None:
         # Never leak internal detail to the user; reply with a generic message.
@@ -111,8 +135,10 @@ def create_app(
 
     # A per-turn client factory carries the OBO bearer token into the SDK
     # client. The base URL is the network-private QnA service.
-    def client_factory(bearer_token: str) -> TocDocClient:
-        return TocDocClient(config.qna_base_url, token=bearer_token)
+    if client_factory is None:
+
+        def client_factory(bearer_token: str) -> TocDocClient:
+            return TocDocClient(config.qna_base_url, token=bearer_token)
 
     bot = TocDocTeamsBot(
         qna_client=TocDocClient(config.qna_base_url),
