@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import random
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from typing import Any
 
 import httpx
@@ -29,8 +29,10 @@ from ._retry import (
     should_retry_exception,
     should_retry_status,
 )
+from ._sse import SSEDecoder
+from .client import _build_request
 from .errors import ApiError
-from .models import BotTurn, QnAAnswer, QnARequest
+from .models import BotTurn, QnAAnswer
 
 
 class AsyncTocDocClient:
@@ -126,20 +128,7 @@ class AsyncTocDocClient:
             ValueError: If neither or both of ``query`` / ``bot`` are given.
             ApiError: On any non-2xx response (carries the envelope fields).
         """
-        if (query is None) == (bot is None):
-            raise ValueError("provide exactly one of `query` or `bot`")
-
-        if bot is None:
-            turns = [BotTurn(user_query=query)]  # type: ignore[arg-type]
-        else:
-            turns = [t if isinstance(t, BotTurn) else BotTurn(**t) for t in bot]
-
-        request = QnARequest(
-            session_id=session_id,
-            bot=turns,
-            fr_tag=fr_tag,
-            bot_tag=bot_tag,
-        )
+        request = _build_request(session_id=session_id, bot_tag=bot_tag, fr_tag=fr_tag, query=query, bot=bot)
 
         # The /qna query is idempotent (a read), so it keeps the full transient
         # retry policy: 5xx + any connect/read/write timeout.
@@ -152,6 +141,53 @@ class AsyncTocDocClient:
 
         # Non-2xx: parse the P0-6 envelope (defensively) and raise.
         raise ApiError.from_response(response.status_code, safe_json(response))
+
+    async def stream_ask(
+        self,
+        *,
+        session_id: str,
+        bot_tag: str,
+        fr_tag: str,
+        query: str | None = None,
+        bot: Iterable[BotTurn | dict[str, Any]] | None = None,
+    ) -> AsyncIterator[str]:
+        """Async mirror of :meth:`tocdoc_sdk.TocDocClient.stream_ask`.
+
+        Streams a QnA answer token-by-token from a future ``POST /qna/stream``
+        over ``httpx.AsyncClient``. Same request contract as :meth:`ask`; provide
+        exactly one of ``query`` or ``bot``. As with the sync helper, a streaming
+        request is **not** retried, and a non-2xx status raises :class:`ApiError`
+        before any token is yielded.
+
+        Yields:
+            Each SSE ``data`` payload in order. The ``[DONE]`` sentinel
+            terminates the stream and is never yielded.
+
+        Raises:
+            ValueError: If neither or both of ``query`` / ``bot`` are given.
+            ApiError: On any non-2xx response (carries the envelope fields).
+        """
+        request = _build_request(session_id=session_id, bot_tag=bot_tag, fr_tag=fr_tag, query=query, bot=bot)
+
+        decoder = SSEDecoder()
+        async with self._client.stream(
+            "POST",
+            "/qna/stream",
+            json=request.model_dump(),
+            headers={"Accept": "text/event-stream"},
+        ) as response:
+            if not (200 <= response.status_code < 300):
+                await response.aread()
+                raise ApiError.from_response(response.status_code, safe_json(response))
+            async for raw in response.aiter_lines():
+                payload = decoder.feed(raw)
+                if payload is not None:
+                    yield payload
+                if decoder.done:
+                    return
+            payload = decoder.flush()
+            if payload is not None:
+                yield payload
 
     async def _request_with_retries(
         self, method: str, path: str, *, idempotent: bool, **kwargs: Any
