@@ -13,6 +13,7 @@ yields the event loop instead of blocking it).
 from __future__ import annotations
 
 import asyncio
+import random
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
 
@@ -22,9 +23,11 @@ from ._retry import (
     DEFAULT_BACKOFF_BASE,
     DEFAULT_MAX_RETRIES,
     DEFAULT_TIMEOUT,
-    RETRYABLE_EXC,
-    RETRYABLE_STATUS,
+    Rng,
+    compute_backoff,
     safe_json,
+    should_retry_exception,
+    should_retry_status,
 )
 from .errors import ApiError
 from .models import BotTurn, QnAAnswer, QnARequest
@@ -59,6 +62,9 @@ class AsyncTocDocClient:
             HTTP, e.g. ``httpx.MockTransport``).
         sleep: Injectable *async* sleep coroutine (defaults to ``asyncio.sleep``);
             override in tests to avoid real delays.
+        rng: Injectable jitter source — a no-arg callable returning a float in
+            ``[0, 1)`` (defaults to ``random.random``); override in tests so
+            backoff is deterministic.
     """
 
     def __init__(
@@ -71,6 +77,7 @@ class AsyncTocDocClient:
         backoff_base: float = DEFAULT_BACKOFF_BASE,
         transport: httpx.AsyncBaseTransport | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        rng: Rng = random.random,
     ) -> None:
         if max_retries < 0:
             raise ValueError("max_retries must be >= 0")
@@ -78,6 +85,7 @@ class AsyncTocDocClient:
         self._max_retries = max_retries
         self._backoff_base = backoff_base
         self._sleep = sleep
+        self._rng = rng
 
         headers = {"Accept": "application/json"}
         if token:
@@ -133,7 +141,11 @@ class AsyncTocDocClient:
             bot_tag=bot_tag,
         )
 
-        response = await self._request_with_retries("POST", "/qna", json=request.model_dump())
+        # The /qna query is idempotent (a read), so it keeps the full transient
+        # retry policy: 5xx + any connect/read/write timeout.
+        response = await self._request_with_retries(
+            "POST", "/qna", idempotent=True, json=request.model_dump()
+        )
 
         if 200 <= response.status_code < 300:
             return QnAAnswer.model_validate(response.json())
@@ -141,26 +153,33 @@ class AsyncTocDocClient:
         # Non-2xx: parse the P0-6 envelope (defensively) and raise.
         raise ApiError.from_response(response.status_code, safe_json(response))
 
-    async def _request_with_retries(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+    async def _request_with_retries(
+        self, method: str, path: str, *, idempotent: bool, **kwargs: Any
+    ) -> httpx.Response:
         """Send ``method`` to ``path`` asynchronously, retrying transient failures.
 
-        Same policy as the sync client (5xx + connect/timeout retried, 4xx
-        never), but the backoff sleep is awaited so it yields the event loop.
+        Same method-aware policy as the sync client (see
+        :mod:`tocdoc_sdk._retry`), but the backoff sleep is awaited so it yields
+        the event loop.
         """
         last_exc: Exception | None = None
 
         for attempt in range(self._max_retries + 1):
             try:
                 response = await self._client.request(method, path, **kwargs)
-            except RETRYABLE_EXC as exc:
+            except Exception as exc:
+                if not should_retry_exception(exc, idempotent=idempotent):
+                    raise
                 last_exc = exc
                 if attempt < self._max_retries:
-                    await self._sleep(self._backoff_base * (2**attempt))
+                    await self._sleep(compute_backoff(attempt, base=self._backoff_base, rng=self._rng))
                     continue
                 raise
             else:
-                if response.status_code in RETRYABLE_STATUS and attempt < self._max_retries:
-                    await self._sleep(self._backoff_base * (2**attempt))
+                if should_retry_status(response.status_code, idempotent=idempotent) and (
+                    attempt < self._max_retries
+                ):
+                    await self._sleep(compute_backoff(attempt, base=self._backoff_base, rng=self._rng))
                     continue
                 return response
 

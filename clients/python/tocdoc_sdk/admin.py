@@ -26,6 +26,7 @@ QnA clients. The admin token is sent as a header and is NEVER logged.
 
 from __future__ import annotations
 
+import random
 import time
 from collections.abc import Callable
 from typing import Any
@@ -36,9 +37,11 @@ from ._retry import (
     DEFAULT_BACKOFF_BASE,
     DEFAULT_MAX_RETRIES,
     DEFAULT_TIMEOUT,
-    RETRYABLE_EXC,
-    RETRYABLE_STATUS,
+    Rng,
+    compute_backoff,
     safe_json,
+    should_retry_exception,
+    should_retry_status,
 )
 from .errors import ApiError
 from .models import (
@@ -74,6 +77,9 @@ class AdminClient:
         transport: Optional ``httpx`` transport (used by tests to mock HTTP).
         sleep: Injectable sleep function (defaults to ``time.sleep``); override
             in tests to avoid real delays.
+        rng: Injectable jitter source — a no-arg callable returning a float in
+            ``[0, 1)`` (defaults to ``random.random``); override in tests so
+            backoff is deterministic.
     """
 
     def __init__(
@@ -86,6 +92,7 @@ class AdminClient:
         backoff_base: float = DEFAULT_BACKOFF_BASE,
         transport: httpx.BaseTransport | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        rng: Rng = random.random,
     ) -> None:
         if max_retries < 0:
             raise ValueError("max_retries must be >= 0")
@@ -95,6 +102,7 @@ class AdminClient:
         self._max_retries = max_retries
         self._backoff_base = backoff_base
         self._sleep = sleep
+        self._rng = rng
 
         self._client = httpx.Client(
             base_url=base_url.rstrip("/"),
@@ -211,7 +219,8 @@ class AdminClient:
         :class:`ApiError` (degrading non-envelope bodies, e.g. a FastAPI
         ``{"detail": ...}`` 503/404, to a synthesized ``HTTP_<status>``).
         """
-        response = self._request_with_retries("GET", path, params=params)
+        # Admin reads are idempotent: retry on 5xx and any transient timeout.
+        response = self._request_with_retries("GET", path, idempotent=True, params=params)
         if 200 <= response.status_code < 300:
             return response.json()
         raise ApiError.from_response(response.status_code, safe_json(response))
@@ -222,32 +231,45 @@ class AdminClient:
         Mirrors :meth:`_get` on the response side: any 2xx (the sync trigger
         returns 202 Accepted) yields the parsed JSON; any non-2xx raises
         :class:`ApiError`, degrading non-envelope bodies to ``HTTP_<status>``.
+
+        The trigger is **non-idempotent** (it launches a connector sync run with
+        no server-side dedup), so it retries only on connect-phase errors — never
+        on a 5xx or a post-send read/write timeout, which could otherwise launch
+        a duplicate run (L-SDK1).
         """
-        response = self._request_with_retries("POST", path)
+        response = self._request_with_retries("POST", path, idempotent=False)
         if 200 <= response.status_code < 300:
             return response.json()
         raise ApiError.from_response(response.status_code, safe_json(response))
 
-    def _request_with_retries(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
-        """Send ``method`` to ``path``, retrying transient failures only.
+    def _request_with_retries(
+        self, method: str, path: str, *, idempotent: bool, **kwargs: Any
+    ) -> httpx.Response:
+        """Send ``method`` to ``path``, retrying transient failures per policy.
 
-        Same policy as the QnA clients: 5xx + connect/timeout retried with
-        exponential backoff, 4xx never retried.
+        Same method-aware policy as the QnA clients (see
+        :mod:`tocdoc_sdk._retry`): idempotent requests retry on 5xx and any
+        transient timeout; non-idempotent requests retry only on connect-phase
+        errors. Backoff is exponential with full jitter.
         """
         last_exc: Exception | None = None
 
         for attempt in range(self._max_retries + 1):
             try:
                 response = self._client.request(method, path, **kwargs)
-            except RETRYABLE_EXC as exc:
+            except Exception as exc:
+                if not should_retry_exception(exc, idempotent=idempotent):
+                    raise
                 last_exc = exc
                 if attempt < self._max_retries:
-                    self._sleep(self._backoff_base * (2**attempt))
+                    self._sleep(compute_backoff(attempt, base=self._backoff_base, rng=self._rng))
                     continue
                 raise
             else:
-                if response.status_code in RETRYABLE_STATUS and attempt < self._max_retries:
-                    self._sleep(self._backoff_base * (2**attempt))
+                if should_retry_status(response.status_code, idempotent=idempotent) and (
+                    attempt < self._max_retries
+                ):
+                    self._sleep(compute_backoff(attempt, base=self._backoff_base, rng=self._rng))
                     continue
                 return response
 
