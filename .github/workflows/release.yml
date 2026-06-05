@@ -84,15 +84,19 @@ jobs:
       # workflow_dispatch run (no tag) the semver tag yields nothing, so the
       # branch/sha fallbacks below provide a usable tag for the test build.
       #
-      # NOTE on the image name: ghcr.io requires a LOWERCASE owner. This uses
-      # github.repository_owner verbatim per spec; it assumes the owner is
-      # already lowercase. If a repo's owner contains uppercase letters, add a
-      # downcase step (e.g. `tr '[:upper:]' '[:lower:]'`) before this step.
+      # ghcr.io requires a LOWERCASE owner; github.repository_owner can contain
+      # uppercase letters, so downcase it before using it in the image name.
+      - name: Lowercase image owner (ghcr requires lowercase)
+        id: repo
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: echo "owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
+
       - name: Extract image metadata (tags + labels)
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}
+          images: ${{ env.REGISTRY }}/${{ steps.repo.outputs.owner }}/${{ matrix.image }}
           tags: |
             type=semver,pattern={{version}}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
