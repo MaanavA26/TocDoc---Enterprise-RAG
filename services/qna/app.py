@@ -1,11 +1,13 @@
 import logging
 import os
+import threading
 import time
+from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime
 
 import src.pipeline.qna_pipeline
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from src.config.config import is_agent_enabled
 from src.core.auth import AuthUtils
@@ -16,10 +18,16 @@ from src.core.errors import (
     register_exception_handlers,
 )
 from src.core.lifecycle import shutdown_event, startup_event
-from src.core.observability import RequestIDMiddleware
+from src.core.observability import RequestIDMiddleware, log_event
 from src.core.responses import QnASuccessResponse
 from src.core.tenant_binding import enforce_tenant_bot_tag_binding
 from src.utils.util import Payload, _as_turn
+from starlette.responses import JSONResponse
+
+# Allowed retrieval modes accepted at the request boundary. Enforced once here
+# (audit L-Q3) so BOTH the legacy pipeline and the agentic map-reduce path
+# converge on the same allow-list instead of validating only in the legacy path.
+_ALLOWED_FR_TAGS = ("read", "layout")
 
 # ---------------------------------------------------------------------------
 # Logging configuration
@@ -31,6 +39,171 @@ if not logger.handlers:
     _console.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
     logger.addHandler(_console)
 logger.propagate = False
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting + concurrency cap (audit M7)
+# ---------------------------------------------------------------------------
+# Lightweight, dependency-free, in-process throttling on the expensive `/qna`
+# endpoint. `/qna` fans out to LLM + embedding + search (and map-reduce when the
+# agent flags are on), so an unthrottled caller can drive unbounded Azure spend
+# (denial-of-wallet) and saturate the 2-worker executors. We deliberately avoid
+# slowapi (an extra dependency) — a sliding-window counter plus a concurrency
+# gate covers the request path and is fully unit-testable.
+#
+# NOTE: this is per-process. For a multi-replica deployment, ingress-level
+# (Container Apps / APIM / Front Door) rate limiting is still REQUIRED; this is
+# defense-in-depth, not a substitute. The concurrency gate uses a plain int
+# guarded by a threading.Lock rather than an asyncio.Semaphore on purpose: a
+# module-level asyncio primitive binds to the import-time event loop and breaks
+# under per-request / per-test loops (same hazard documented in agents/map_reduce.py).
+
+
+def _rate_limit_per_min() -> int:
+    """Requests allowed per client key per 60s window. <=0 disables limiting."""
+    try:
+        return int(os.getenv("QNA_RATE_LIMIT_PER_MIN", "120"))
+    except ValueError:
+        return 120
+
+
+def _max_concurrency() -> int:
+    """Max simultaneous in-flight /qna requests. <=0 disables the gate."""
+    try:
+        return int(os.getenv("QNA_MAX_CONCURRENCY", "16"))
+    except ValueError:
+        return 16
+
+
+class _SlidingWindowRateLimiter:
+    """Per-key fixed-cost sliding-window limiter (60s window).
+
+    Keyed by client IP (and, when present, the validated tenant via bot_tag is
+    folded in by the caller). Thread-safe via a single lock; timestamps older
+    than the window are evicted lazily on each check so memory tracks only
+    recently-active keys.
+    """
+
+    _WINDOW_S = 60.0
+
+    def __init__(self) -> None:
+        self._hits: dict[str, deque[float]] = {}
+        self._lock = threading.Lock()
+
+    def check(self, key: str, limit: int, now: float | None = None) -> tuple[bool, int]:
+        """Return (allowed, retry_after_seconds). retry_after is 0 when allowed."""
+        if limit <= 0:
+            return True, 0
+        ts = now if now is not None else time.monotonic()
+        cutoff = ts - self._WINDOW_S
+        with self._lock:
+            dq = self._hits.setdefault(key, deque())
+            while dq and dq[0] <= cutoff:
+                dq.popleft()
+            if len(dq) >= limit:
+                # Retry after the oldest hit ages out of the window.
+                retry_after = max(1, int(dq[0] + self._WINDOW_S - ts) + 1)
+                return False, retry_after
+            dq.append(ts)
+            if not dq:
+                self._hits.pop(key, None)
+            return True, 0
+
+    def reset(self) -> None:
+        """Clear all state (test helper)."""
+        with self._lock:
+            self._hits.clear()
+
+
+class _ConcurrencyGate:
+    """Loop-agnostic in-flight counter guarded by a threading.Lock."""
+
+    def __init__(self) -> None:
+        self._inflight = 0
+        self._lock = threading.Lock()
+
+    def acquire(self, limit: int) -> bool:
+        if limit <= 0:
+            return True
+        with self._lock:
+            if self._inflight >= limit:
+                return False
+            self._inflight += 1
+            return True
+
+    def release(self) -> None:
+        with self._lock:
+            if self._inflight > 0:
+                self._inflight -= 1
+
+    def reset(self) -> None:
+        with self._lock:
+            self._inflight = 0
+
+
+_rate_limiter = _SlidingWindowRateLimiter()
+_concurrency_gate = _ConcurrencyGate()
+
+
+def _client_key(request: Request) -> str:
+    """Derive the throttle key: validated tenant id if available, else client IP.
+
+    The token's validated `tid` (set by the auth middleware on request.state)
+    is preferred so a single tenant cannot be throttled by another's traffic and
+    so NAT'd clients sharing an IP are not collapsed. Falls back to the peer IP."""
+    tid = getattr(request.state, "tid", None) or getattr(request.state, "tenant_id", None)
+    if tid:
+        return f"tid:{tid}"
+    client = request.client
+    return f"ip:{client.host}" if client and client.host else "ip:unknown"
+
+
+def rate_limit_dependency(request: Request) -> None:
+    """FastAPI dependency: enforce per-key sliding-window rate limiting.
+
+    Raises 429 (INVALID_REQUEST envelope) with a `Retry-After` header when the
+    caller exceeds `QNA_RATE_LIMIT_PER_MIN` within the 60s window."""
+    key = _client_key(request)
+    allowed, retry_after = _rate_limiter.check(key, _rate_limit_per_min())
+    if not allowed:
+        log_event(
+            logger,
+            "rate_limited",
+            request_id=getattr(request.state, "request_id", None),
+            level=logging.WARNING,
+            retry_after_s=retry_after,
+        )
+        raise_api_error(
+            ApiErrorCode.INVALID_REQUEST,
+            "Rate limit exceeded. Retry after the indicated interval.",
+            429,
+            headers={"Retry-After": str(retry_after)},
+        )
+
+
+async def concurrency_gate_dependency(request: Request):
+    """FastAPI yield-dependency: cap simultaneous in-flight requests.
+
+    Acquires a slot before the handler runs and releases it after the response
+    is produced (the `finally` runs post-yield). Returns 429 with a small
+    `Retry-After` when the in-flight cap is reached."""
+    if not _concurrency_gate.acquire(_max_concurrency()):
+        log_event(
+            logger,
+            "concurrency_rejected",
+            request_id=getattr(request.state, "request_id", None),
+            level=logging.WARNING,
+        )
+        raise_api_error(
+            ApiErrorCode.INVALID_REQUEST,
+            "Server is at capacity. Retry shortly.",
+            429,
+            headers={"Retry-After": "1"},
+        )
+    try:
+        yield
+    finally:
+        _concurrency_gate.release()
 
 
 @asynccontextmanager
@@ -137,16 +310,25 @@ async def health_check():
                 "qna_module": "loaded",
                 "timestamp": datetime.now().isoformat(),
             }
-        return {"status": "error", "qna_module": "missing generate_answer function"}
+        # Unhealthy: return HTTP 503 so Kubernetes/Azure probes (which key on
+        # the status code, not the body) pull the instance from rotation
+        # (audit L-Q5). Body shape is preserved for existing monitors.
+        return JSONResponse(
+            status_code=503,
+            content={"status": "error", "qna_module": "missing generate_answer function"},
+        )
     except Exception as e:
-        # Keep the {status, qna_module} shape stable for external monitors
-        # (this branch is still a 200 status report, not an error envelope).
+        # Unhealthy branch — return 503 so probes act on it (audit L-Q5) while
+        # keeping the {status, qna_module} body shape stable for monitors.
         # Do NOT echo `str(e)` — exception text can leak internal detail
-        # (CodeQL py/stack-trace-exposure, app.py:142). Log the exception
-        # class server-side and return a fixed, safe message — same pattern
-        # as the auth middleware (src/core/auth.py).
+        # (CodeQL py/stack-trace-exposure). Log the exception class server-side
+        # and return a fixed, safe message — same pattern as the auth
+        # middleware (src/core/auth.py).
         logger.error("Health check failed: %s", type(e).__name__)
-        return {"status": "error", "qna_module": "unavailable"}
+        return JSONResponse(
+            status_code=503,
+            content={"status": "error", "qna_module": "unavailable"},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +342,11 @@ async def health_check():
     # they never serialize as `null` on the success path.
     response_model_exclude_none=True,
     responses=default_error_responses,
+    # Throttle the expensive endpoint (audit M7): per-key sliding-window rate
+    # limit + a global in-flight concurrency cap, both returning 429 +
+    # Retry-After. Dependencies run before the handler body; the concurrency
+    # gate releases its slot after the response (yield-dependency `finally`).
+    dependencies=[Depends(rate_limit_dependency), Depends(concurrency_gate_dependency)],
 )
 async def custom_rag_qna(payload: Payload, request: Request):
     """
@@ -204,10 +391,23 @@ async def custom_rag_qna(payload: Payload, request: Request):
 
     query = history[-1]["user_query"]
 
-    logger.info(f"[{request_id}] QnA request received")
-    logger.info(f"[{request_id}] Query: {query!r}")
-    logger.info(f"[{request_id}] Bot tag: {bot_tag!r}")
-    logger.info(f"[{request_id}] FR tag: {fr_tag!r}")
+    # Metadata-only request log (audit L-Q6). NEVER log the raw user query —
+    # it routinely carries PII/confidential content and persists in log sinks.
+    # bot_tag/fr_tag are bounded identifiers and safe to log. A short query
+    # preview is emitted only when QNA_DEBUG_LOG_PREVIEW is explicitly enabled
+    # (off by default), routed through log_event so truncation applies.
+    _query_preview = None
+    if os.getenv("QNA_DEBUG_LOG_PREVIEW", "").lower() in ("1", "true", "yes"):
+        _query_preview = (query or "")[:200]
+    log_event(
+        logger,
+        "qna_request_received",
+        request_id=request_id,
+        query_length=len(query or ""),
+        bot_tag=bot_tag,
+        fr_tag=fr_tag,
+        query_preview=_query_preview,
+    )
 
     # Required field validations (kept explicit for clear 400s).
     if not query:
@@ -216,6 +416,17 @@ async def custom_rag_qna(payload: Payload, request: Request):
         raise_api_error(ApiErrorCode.INVALID_REQUEST, "Bot tag cannot be empty", 400)
     if not fr_tag:
         raise_api_error(ApiErrorCode.INVALID_REQUEST, "FR tag cannot be empty", 400)
+
+    # Allow-list fr_tag at the request boundary (audit L-Q3) so the agentic
+    # map-reduce path and the legacy pipeline converge on the same validation
+    # instead of relying on the legacy path's later check. Reject unknown modes
+    # with a 400 before any retrieval / agent fork runs.
+    if fr_tag not in _ALLOWED_FR_TAGS:
+        raise_api_error(
+            ApiErrorCode.INVALID_REQUEST,
+            f"Invalid fr_tag. Must be one of: {', '.join(_ALLOWED_FR_TAGS)}.",
+            400,
+        )
 
     # Within-tenant bot_tag<->tid binding guard (threat-model R1), DEFAULT-OFF.
     # When QNA_ENFORCE_TENANT_BINDING is unset/falsy this is fully inert — zero
