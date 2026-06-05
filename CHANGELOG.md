@@ -58,7 +58,11 @@ under `[Unreleased]`.
   quickstart, per-service READMEs, packaging-tier docs, architecture decision
   records, and planning trackers.
 - **Governance.** Public-repo governance files (CODEOWNERS, contributing guide,
-  PR/issue templates) and an automated review and security baseline.
+  PR/issue templates), an automated review baseline, and CodeQL code scanning.
+- **SDK depth.** A `tocdoc` command-line interface and connector sync-trigger /
+  run-status methods on the admin client.
+- **Terraform module.** An `infra/terraform/` (azurerm) deployment path mirroring
+  the Bicep templates, for Terraform-based self-hosting.
 
 ### Changed
 
@@ -70,13 +74,35 @@ under `[Unreleased]`.
   concurrent requests safe.
 - **Naming.** Completed the product-neutral naming pass and adopted a
   product-neutral naming policy across code and docs.
+- **Runtime → Python 3.12.** Bumped both services (CI + Dockerfiles) from Python
+  3.10 to 3.12, unblocking the modern dependency stack.
+- **LangChain 1.x.** Upgraded both services to the langchain 1.x line (with
+  langgraph 1.x); the evaluation harness pins its own ragas-compatible stack
+  independently.
+- **Fail-closed defaults (multi-tenant safety).** Workspace tenant-binding
+  enforcement now defaults ON (operators configure a tenant→`bot_tag` allow-list);
+  the ingestion `/upload` endpoint now requires an admin token; and the ingestion
+  service's ingress is internal by default.
+- **Rate limiting.** Added application-level rate limiting to the `/qna` and
+  `/upload` endpoints (HTTP 429 + `Retry-After`).
 
 ### Fixed
 
 - Coordinated dependency upgrades to address known CVEs (including a
   FastAPI / Starlette / python-multipart bump and other low-risk fixes).
+- A security-audit remediation pass: closed an unauthenticated injection vector
+  and a path-traversal on the ingestion upload path, fixed a connector
+  single-flight lock that did not serialize across runs, moved an
+  event-loop-blocking call off the hot path, batched/validated the search upsert
+  so partial failures are no longer reported as success, and restored `aiohttp`
+  to a non-vulnerable pinned version.
 
 ### Security
 
 - Source-available licensing under the Business Source License (BSL) 1.1, with
   public-readiness governance and documentation.
+- Hardened the multi-tenant isolation model to fail closed by default, added
+  JWKS negative-caching and outbound client timeouts, and removed user queries,
+  answers, and conversation content from logs.
+- Enabled CodeQL code scanning; CI now hard-gates `pip-audit` and enforces a
+  test-coverage floor.
