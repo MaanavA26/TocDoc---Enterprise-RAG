@@ -1,0 +1,39 @@
+# Example variable values. Copy to terraform.tfvars and fill in real values.
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# Do NOT commit terraform.tfvars — it carries secrets. All *_key / *_secret /
+# *_token values below are PLACEHOLDERS. Prefer supplying secrets via
+# environment variables (TF_VAR_openai_api_key=...) or a secret manager in CI
+# rather than writing them to disk.
+
+# ── Deployment target ──
+resource_group_name = "rg-tocdoc-example"
+location            = "eastus"
+
+# ── Non-secret parameters ──
+prefix                 = "tocdoc"
+environment            = "prod"
+tenant_id              = "00000000-0000-0000-0000-000000000000"
+audience_client_id     = "00000000-0000-0000-0000-000000000000"
+openai_api_version     = "2024-02-01"
+openai_llm_model       = "gpt-4o-mini"
+openai_embedding_model = "text-embedding-3-small"
+search_index_name      = "tocdoc-index"
+openai_sku             = "S0"
+search_sku             = "standard" # azurerm naming; portal/Bicep call this "S1"
+
+# ── Network / auth hardening (defaults match the current working posture) ──
+ingestion_ingress_external = false
+disable_local_auth         = false
+allowed_ip_ranges          = [] # e.g. ["203.0.113.0/24", "198.51.100.10/32"]
+
+# ── Secrets (PLACEHOLDERS — replace, and prefer TF_VAR_* env vars) ──
+openai_api_key    = "REPLACE_WITH_AZURE_OPENAI_KEY"
+search_api_key    = "REPLACE_WITH_AZURE_SEARCH_ADMIN_KEY"
+doc_intel_api_key = "REPLACE_WITH_DOCUMENT_INTELLIGENCE_KEY"
+sp_client_id      = "REPLACE_WITH_SERVICE_PRINCIPAL_CLIENT_ID"
+sp_client_secret  = "REPLACE_WITH_SERVICE_PRINCIPAL_CLIENT_SECRET"
+admin_api_token   = "REPLACE_WITH_ADMIN_API_TOKEN" # python -c "import secrets; print(secrets.token_urlsafe(48))"
+
+# ── Container image (defaults to public placeholder; replace after pushing) ──
+# container_image = "myregistry.azurecr.io/tocdoc-qna:latest"

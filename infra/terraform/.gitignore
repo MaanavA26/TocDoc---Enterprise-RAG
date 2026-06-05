@@ -1,0 +1,18 @@
+# Terraform working files
+.terraform/
+.terraform.tfstate.lock.info
+
+# State (never commit — may contain secret values in plaintext)
+*.tfstate
+*.tfstate.*
+
+# Real variable values (carries secrets) — only the .example is committed
+terraform.tfvars
+*.auto.tfvars
+
+# Crash logs / plan output
+crash.log
+*.tfplan
+
+# The provider lock file (.terraform.lock.hcl) is intentionally NOT ignored —
+# it should be committed so applies are reproducible.
