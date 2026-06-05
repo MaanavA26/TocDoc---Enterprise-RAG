@@ -62,7 +62,7 @@ langchain-community==0.3.24
 langchain-core==0.3.60
 langchain-openai==0.3.17
 langchain-text-splitters==0.3.8
-langgraph==0.2.76
+langgraph==1.0.10rc1
 langsmith==0.3.42
 openai==1.79.0
 tiktoken==0.9.0
