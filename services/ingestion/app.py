@@ -10,6 +10,7 @@ from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from middleware import limit_upload_size
 from observability import RequestIDMiddleware
+from path_safety import resolve_upload_path
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 # Stdout always; file logging only if LOG_FILE env var is set (local dev)
@@ -129,12 +130,18 @@ async def upload_file(
     # pipeline so stage events share the request lifecycle's request_id.
     request_id = getattr(request.state, "request_id", None)
 
+    # Containment guard (CodeQL py/path-injection): resolve `filepath` against a
+    # configured allowed root and reject traversal/absolute escapes with the
+    # structured error envelope. All path sinks below operate on the validated,
+    # realpath-resolved value rather than the raw query param.
+    safe_filepath = resolve_upload_path(filepath)
+
     # ── Folder batch mode ─────────────────────────────────────────────────────
-    if os.path.isdir(filepath):
-        logger.info(f"Folder upload mode — scanning: {filepath!r}")
+    if os.path.isdir(safe_filepath):
+        logger.info(f"Folder upload mode — scanning: {safe_filepath!r}")
 
         pdf_files = []
-        for root, _dirs, files in os.walk(filepath):
+        for root, _dirs, files in os.walk(safe_filepath):
             for f in files:
                 if f.lower().endswith(".pdf"):
                     pdf_files.append(os.path.join(root, f))
@@ -162,8 +169,11 @@ async def upload_file(
                 results.append({"file": basename, "status": "success", "result": result})
                 logger.info(f"Successfully processed: {basename!r}")
             except Exception as e:
-                results.append({"file": basename, "status": "error", "error": str(e)})
-                logger.error(f"Failed to process {basename!r}: {e}")
+                # Do not echo raw exception text to the client (CodeQL
+                # py/stack-trace-exposure). Log the detail server-side; return a
+                # generic message. Keep dict keys identical to preserve shape.
+                logger.error(f"Failed to process {basename!r}: {type(e).__name__}", exc_info=True)
+                results.append({"file": basename, "status": "error", "error": "Failed to process file."})
 
         return results
 
