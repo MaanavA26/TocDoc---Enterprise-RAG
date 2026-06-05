@@ -116,6 +116,11 @@ async def generate_answer(
         is_greeting = False
         is_followup = False
         file_map: dict[str, str] = {}
+        # P2-1 groundwork: accumulate filename -> ordered-unique page strings
+        # from retrieved chunks BEFORE filename dedup. Stays empty (-> None) for
+        # chunks ingested before page_number was populated, so the response is
+        # byte-identical to today's {answer, citation} shape.
+        file_pages: dict[str, list[str]] = {}
 
         # Best-effort rephrasal using full, normalized history.
         try:
@@ -191,6 +196,17 @@ async def generate_answer(
                 content = (r["content"] or "").replace("\n", "").replace("\r", "")
                 knowledge_source.append(f"{r['filename']}: {content}")
                 file_map[r["filename"]] = r["filepath"]
+
+                # Accumulate page provenance (ordered-unique, non-empty) per
+                # filename. `.get` tolerates old chunks lacking the field; the
+                # value is normalized to a trimmed string and ints are coerced.
+                page_raw = r.get("page_number")
+                if page_raw is not None:
+                    page_str = str(page_raw).strip()
+                    if page_str:
+                        pages = file_pages.setdefault(r["filename"], [])
+                        if page_str not in pages:
+                            pages.append(page_str)
 
                 doc_id = r.get("document_id")
                 if doc_id and doc_id not in _doc_ids:
@@ -296,6 +312,15 @@ async def generate_answer(
         if misses:
             logger.debug("[%s] Citation mapping misses (model → normalized): %s", request_id, misses)
 
+        # P2-1 groundwork: build page_citations for ONLY the filenames that
+        # survived into the citation map, reusing the ordered-unique pages
+        # accumulated during retrieval. Coalesce empty -> None so the response
+        # is byte-identical to {answer, citation} when no chunk carried a
+        # page_number (today's state) or no cited file had page data.
+        page_citations: dict[str, list[str]] | None = {
+            real_name: file_pages[real_name] for real_name in extracted_filepath if file_pages.get(real_name)
+        } or None
+
         total_time = time.time() - start_time
         logger.info(f"[{request_id}] Answer generation completed in {total_time:.4f}s")
         logger.info(
@@ -328,6 +353,7 @@ async def generate_answer(
         response = QnASuccessResponse(
             answer=answer_text,
             citation=CitationMap(extracted_filepath),
+            page_citations=page_citations,
         )
         return response.model_dump(exclude_none=True)
 

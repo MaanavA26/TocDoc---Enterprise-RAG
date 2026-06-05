@@ -20,11 +20,19 @@ the normal success path. `CitationMap` is a pydantic ``RootModel`` so it
 serializes to a *flat* ``{filename: filepath}`` object, never a wrapped
 ``{"root": {...}}`` shape.
 
+Page-level citations (P2-1 groundwork)
+--------------------------------------
+``page_citations`` is an **optional, additive** sibling that maps a cited
+``filename -> ordered-unique list of page strings`` (e.g.
+``{"a.md": ["3", "7"]}``). It defaults to ``None`` and is excluded by
+``response_model_exclude_none``, so until ingestion populates ``page_number``
+on chunks the wire payload stays byte-for-byte identical to the historical
+``{answer, citation}`` shape. ``CitationMap`` is intentionally left UNCHANGED.
+
 Out of scope
 ------------
-Page-level citation fields (e.g. ``page_number``) are intentionally NOT part
-of this contract; they require an ingestion reindex and a separate architect
-decision, and are tracked as a distinct gated workstream.
+The ingestion reindex / read-mode layout extraction that actually *populates*
+``page_number`` is gated on a separate spike and is NOT part of this change.
 """
 
 from __future__ import annotations
@@ -60,6 +68,10 @@ class QnASuccessResponse(BaseModel):
         citation: Mapping of cited ``filename -> filepath``. Accepts either a
             :class:`CitationMap` or a plain ``dict[str, str]`` on input and
             always serializes to a flat ``{filename: filepath}`` object.
+        page_citations: Optional mapping of cited ``filename -> ordered-unique
+            list of page strings`` (P2-1 groundwork). ``None`` (the default)
+            until ingestion populates ``page_number``; excluded by
+            ``response_model_exclude_none`` so the payload stays byte-identical.
         request_id: Optional correlation ID. Defensive/optional only — the
             normal success path does not emit it, and ``response_model_exclude_none``
             keeps it out of the wire payload when unset.
@@ -81,6 +93,14 @@ class QnASuccessResponse(BaseModel):
     citation: CitationMap = Field(
         default_factory=CitationMap,
         description="Mapping of cited filename -> filepath. Serializes flat.",
+    )
+    page_citations: dict[str, list[str]] | None = Field(
+        default=None,
+        description=(
+            "Optional cited filename -> ordered-unique page strings (P2-1 "
+            "groundwork). None until ingestion populates page_number; excluded "
+            "by response_model_exclude_none so the payload stays byte-identical."
+        ),
     )
     request_id: str | None = Field(
         default=None,
