@@ -73,3 +73,28 @@ def test_success_response_rejects_wrong_citation_type():
 def test_success_response_requires_answer():
     with pytest.raises(ValidationError):
         QnASuccessResponse(citation={})
+
+
+def test_page_citations_defaults_to_none_and_is_excluded():
+    """page_citations is optional; unset it must not appear with exclude_none,
+    keeping the historical {answer, citation} shape byte-identical."""
+    model = QnASuccessResponse(answer="a", citation={"f.md": "/p/f.md"})
+    assert model.page_citations is None
+    dumped = model.model_dump(exclude_none=True)
+    assert dumped == {"answer": "a", "citation": {"f.md": "/p/f.md"}}
+    assert "page_citations" not in dumped
+
+
+def test_page_citations_serializes_when_present():
+    """When populated, page_citations is a flat {filename: [pages]} object."""
+    model = QnASuccessResponse(
+        answer="a",
+        citation={"f.md": "/p/f.md"},
+        page_citations={"f.md": ["3", "7"]},
+    )
+    dumped = model.model_dump(exclude_none=True)
+    assert dumped == {
+        "answer": "a",
+        "citation": {"f.md": "/p/f.md"},
+        "page_citations": {"f.md": ["3", "7"]},
+    }

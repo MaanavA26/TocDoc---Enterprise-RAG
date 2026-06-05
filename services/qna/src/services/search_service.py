@@ -123,6 +123,11 @@ def _search_sync(
             "filepath",
             "document_id",
             "source_path",
+            # P2-1 groundwork: page-level provenance. The field exists in the
+            # index; chunks ingested before page extraction return it as
+            # null/absent, which the pipeline handles gracefully (no page
+            # citations until ingestion populates it).
+            "page_number",
         ],
         "filter": filter_expr,
         "top": top,

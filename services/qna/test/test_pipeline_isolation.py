@@ -424,3 +424,100 @@ async def test_concurrent_requests_do_not_cross_contaminate():
     assert "Answer for 'Who is the supplier?'" in results["tenant-y"]["answer"]
     assert "tenant-y" not in results["tenant-x"]["answer"]
     assert "tenant-x" not in results["tenant-y"]["answer"]
+
+
+# ===========================================================================
+# P2-1: page_citations groundwork (backward-compatible)
+# ===========================================================================
+
+
+async def _run_pipeline_with_search_results(search_results, cited_filenames):
+    """Drive generate_answer with mocked retrieval + citation extraction.
+
+    Returns the pipeline's result dict so tests can assert on page_citations.
+    """
+    from src.pipeline import qna_pipeline
+
+    fake_azure = FakeAzure()
+
+    async def fake_perform_search(azure, query, vector, fr_mode, bot_tag):
+        return search_results
+
+    with (
+        patch.object(
+            qna_pipeline,
+            "rephrase_queries",
+            new=AsyncMock(
+                return_value={
+                    "rephrased_query": "q",
+                    "is_greeting": False,
+                    "extracted_snippet": "",
+                    "is_followup": False,
+                    "was_rephrased": False,
+                }
+            ),
+        ),
+        patch.object(qna_pipeline, "get_embedding", new=AsyncMock(return_value=[0.1, 0.2, 0.3])),
+        patch.object(qna_pipeline, "perform_search", side_effect=fake_perform_search),
+        patch.object(
+            qna_pipeline, "generate_openai_response", new=AsyncMock(return_value="Answer.\n\n**Sources:\n")
+        ),
+        patch.object(
+            qna_pipeline,
+            "extract_answer_and_filenames_from_text",
+            new=AsyncMock(return_value=("Answer.", cited_filenames)),
+        ),
+    ):
+        return await qna_pipeline.generate_answer(
+            query="q",
+            fr_mode="read",
+            bot_tag="tenant-p",
+            history=[{"user_query": "q", "bot_response": None}],
+            azure=fake_azure,
+        )
+
+
+@pytest.mark.asyncio
+async def test_page_citations_populated_deduped_ordered_for_cited_files():
+    """A cited file with pages 3 and 7 yields ["3","7"] (not collapsed); only
+    cited filenames appear, and repeated pages are deduped in first-seen order."""
+    search_results = [
+        {"id": "1", "content": "c", "filename": "doc.md", "filepath": "/docs/doc.md", "page_number": 3},
+        {"id": "2", "content": "c", "filename": "doc.md", "filepath": "/docs/doc.md", "page_number": 7},
+        {"id": "3", "content": "c", "filename": "doc.md", "filepath": "/docs/doc.md", "page_number": 3},
+        # An uncited file with a page — must NOT appear in page_citations.
+        {"id": "4", "content": "c", "filename": "other.md", "filepath": "/docs/other.md", "page_number": 9},
+    ]
+    result = await _run_pipeline_with_search_results(search_results, ["doc.md"])
+
+    assert result["page_citations"] == {"doc.md": ["3", "7"]}
+    assert "other.md" not in result["page_citations"]
+    # Citation map still resolves only the cited file.
+    assert result["citation"] == {"doc.md": "/docs/doc.md"}
+
+
+@pytest.mark.asyncio
+async def test_page_citations_none_when_no_page_number():
+    """With no page_number on any chunk (today's state), page_citations must be
+    None and the result dict must contain ONLY {answer, citation}."""
+    search_results = [
+        {"id": "1", "content": "c", "filename": "doc.md", "filepath": "/docs/doc.md"},
+    ]
+    result = await _run_pipeline_with_search_results(search_results, ["doc.md"])
+
+    assert "page_citations" not in result
+    assert set(result.keys()) == {"answer", "citation"}
+
+
+@pytest.mark.asyncio
+async def test_page_citations_none_when_cited_file_has_no_pages():
+    """If page data exists only on an UNcited file, the cited file has no pages,
+    so page_citations coalesces to None (not {})."""
+    search_results = [
+        {"id": "1", "content": "c", "filename": "doc.md", "filepath": "/docs/doc.md"},
+        {"id": "2", "content": "c", "filename": "other.md", "filepath": "/docs/other.md", "page_number": 5},
+    ]
+    result = await _run_pipeline_with_search_results(search_results, ["doc.md"])
+
+    assert "page_citations" not in result
+    assert set(result.keys()) == {"answer", "citation"}
