@@ -38,12 +38,18 @@ tocdoc.io/environment: {{ .Values.global.environment | quote }}
 {{- end -}}
 
 {{/*
-The name of the Secret env vars are sourced from.
-Prefers secret.externalSecretName, else "<fullname>" (matches the rendered Secret).
+The name of the Secret env vars are sourced from. Precedence:
+  1. secret.externalSecretName (explicit operator override)
+  2. keyVaultCSI.syncedSecretName when keyVaultCSI.enabled (the CSI driver syncs
+     Key Vault objects into that Secret; without this the Deployment would point
+     at "<fullname>" while the driver writes to syncedSecretName -> pods fail).
+  3. "<fullname>" (matches the chart-rendered placeholder Secret).
 */}}
 {{- define "tocdoc.secretName" -}}
 {{- if .Values.secret.externalSecretName -}}
 {{- .Values.secret.externalSecretName -}}
+{{- else if .Values.keyVaultCSI.enabled -}}
+{{- .Values.keyVaultCSI.syncedSecretName -}}
 {{- else -}}
 {{- include "tocdoc.fullname" . -}}
 {{- end -}}

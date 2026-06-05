@@ -65,6 +65,19 @@ param openAiSku string = 'S0'
 @allowed(['basic', 'S1', 'S2', 'S3'])
 param searchSku string = 'S1'
 
+// ── Network / auth hardening parameters ──────────────────────────────────────
+// These default to the CURRENT working posture so a deployment stays functional
+// out of the box, while letting operators tighten exposure without code changes.
+
+@description('Expose the ingestion Container App on the public internet. Defaults to false (internal-only): the /upload endpoint drives metered Document Intelligence + OpenAI + Search writes and is admin-token-authed but still sensitive, so it should not be reachable from the public internet by default. Set true only when ingress-level auth/rate-limiting (APIM/Front Door) fronts it.')
+param ingestionIngressExternal bool = false
+
+@description('Disable shared-key (local) auth on Azure OpenAI, Cognitive Search, and Document Intelligence, forcing Entra ID / managed-identity auth. Defaults to false because the services CURRENTLY authenticate with API keys (see header). Flip to true only AFTER migrating the app code off keys to ManagedIdentityCredential — the system-assigned identities + Key Vault Secrets User roles below are the groundwork for that migration.')
+param disableLocalAuth bool = false
+
+@description('Optional list of public IP ranges (CIDR) permitted to reach the data-plane services. Empty (default) preserves current behavior (publicNetworkAccess Enabled, no IP filter). When non-empty, a default-deny networkAcls allow-list is applied to Cognitive Search; the Cognitive Services accounts continue to honor key/identity auth.')
+param allowedIpRanges array = []
+
 // ── Secret parameters (@secure prevents values appearing in deployment logs) ──
 
 @secure()
@@ -137,6 +150,10 @@ resource openAi 'Microsoft.CognitiveServices/accounts@2023-05-01' = {
   properties: {
     publicNetworkAccess: 'Enabled'
     customSubDomainName: openAiName
+    // disableLocalAuth stays false until the app migrates off API keys to
+    // ManagedIdentityCredential (system-assigned identity + KV roles are wired
+    // below for that migration). Set the disableLocalAuth param true afterward.
+    disableLocalAuth: disableLocalAuth
   }
   tags: { environment: environment, product: 'tocdoc' }
 }
@@ -151,6 +168,15 @@ resource search 'Microsoft.Search/searchServices@2023-11-01' = {
     partitionCount: 1
     publicNetworkAccess: 'enabled'
     semanticSearch: 'free'
+    // When disableLocalAuth is true, force Entra ID (RBAC) auth and drop the
+    // admin/query API keys. Defaults to keys-allowed to match current code.
+    disableLocalAuth: disableLocalAuth
+    authOptions: disableLocalAuth ? null : { aadOrApiKey: { aadAuthFailureMode: 'http401WithBearerChallenge' } }
+    // Default-deny IP firewall, applied only when allowedIpRanges is supplied.
+    // Empty (default) leaves the service open per current behavior.
+    networkAcls: empty(allowedIpRanges) ? null : {
+      ipRules: [for cidr in allowedIpRanges: { value: cidr }]
+    }
   }
   tags: { environment: environment, product: 'tocdoc' }
 }
@@ -164,6 +190,9 @@ resource docIntel 'Microsoft.CognitiveServices/accounts@2023-05-01' = {
   properties: {
     publicNetworkAccess: 'Enabled'
     customSubDomainName: docIntelName
+    // See disableLocalAuth comment on the OpenAI resource: stays false until the
+    // ingestion code uses ManagedIdentityCredential instead of the API key.
+    disableLocalAuth: disableLocalAuth
   }
   tags: { environment: environment, product: 'tocdoc' }
 }
@@ -178,6 +207,9 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
     enableRbacAuthorization: true
     enableSoftDelete: true
     softDeleteRetentionInDays: 90
+    // Prevent permanent deletion of soft-deleted secrets/vault within the
+    // retention window. Irreversible once enabled — the intended prod posture.
+    enablePurgeProtection: true
   }
   tags: { environment: environment, product: 'tocdoc' }
 }
@@ -215,8 +247,12 @@ resource ingestionApp 'Microsoft.App/containerApps@2023-11-02-preview' = {
         { name: 'doc-intel-key',     value: docIntelApiKey }
         { name: 'admin-api-token',   value: adminApiToken  }
       ]
+      // Ingestion ingress is INTERNAL by default. /upload is admin-token-authed
+      // but still sensitive (drives metered DI/OpenAI/Search writes), so it must
+      // not be publicly reachable unless an authenticating gateway fronts it.
+      // Set ingestionIngressExternal=true to opt in to public exposure.
       ingress: {
-        external: true
+        external: ingestionIngressExternal
         targetPort: 5501
       }
     }
@@ -273,6 +309,8 @@ resource qnaApp 'Microsoft.App/containerApps@2023-11-02-preview' = {
         { name: 'azure-client-id',     value: spClientId      }
         { name: 'azure-client-secret', value: spClientSecret  }
       ]
+      // QnA stays external: every request is Azure AD JWT-authed at the app
+      // layer, so public ingress is acceptable (unlike ingestion above).
       ingress: {
         external: true
         targetPort: 5500
