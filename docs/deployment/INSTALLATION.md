@@ -4,6 +4,10 @@ This guide covers a complete, runnable TocDoc deployment into a new Azure
 resource group. Following all steps in order results in both services starting
 successfully after the container image swap.
 
+> To validate a deployment end-to-end against live Azure (deploy → configure →
+> ingest → ask → admin API → connector sync), see the
+> [live-deployment smoke runbook](./SMOKE_TEST.md).
+
 ## What Bicep wires automatically vs what you provide
 
 | Value | How it is set |
