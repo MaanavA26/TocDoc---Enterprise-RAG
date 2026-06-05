@@ -158,6 +158,10 @@ resource openAi 'Microsoft.CognitiveServices/accounts@2023-05-01' = {
   tags: { environment: environment, product: 'tocdoc' }
 }
 
+// IP allow-list rules for Search. A for-expression cannot be inlined inside a
+// ternary (BCP138), so it is materialised as a variable here.
+var searchIpRules = [for cidr in allowedIpRanges: { value: cidr }]
+
 // ── Azure Cognitive Search ────────────────────────────────────────────────────
 resource search 'Microsoft.Search/searchServices@2023-11-01' = {
   name: searchName
@@ -174,8 +178,8 @@ resource search 'Microsoft.Search/searchServices@2023-11-01' = {
     authOptions: disableLocalAuth ? null : { aadOrApiKey: { aadAuthFailureMode: 'http401WithBearerChallenge' } }
     // Default-deny IP firewall, applied only when allowedIpRanges is supplied.
     // Empty (default) leaves the service open per current behavior.
-    networkAcls: empty(allowedIpRanges) ? null : {
-      ipRules: [for cidr in allowedIpRanges: { value: cidr }]
+    networkRuleSet: empty(allowedIpRanges) ? null : {
+      ipRules: searchIpRules
     }
   }
   tags: { environment: environment, product: 'tocdoc' }
