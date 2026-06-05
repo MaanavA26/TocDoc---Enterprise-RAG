@@ -19,6 +19,7 @@ from middleware import limit_upload_size
 from observability import RequestIDMiddleware
 from path_safety import resolve_upload_path
 from starlette.responses import JSONResponse
+from tracing import configure_tracing
 
 # ── Per-file / per-batch upload ceilings ──────────────────────────────────────
 # 100 MB per file, enforced on actual bytes (L-X2): the declared
@@ -135,6 +136,14 @@ app.add_middleware(RequestIDMiddleware)
 # New code should `raise_api_error(code, message, status_code)` from `errors`
 # rather than `HTTPException(status, detail="msg")` so the `code` field stays meaningful.
 register_exception_handlers(app)
+
+
+# Distributed tracing (OpenTelemetry → Azure Monitor). DEFAULT-OFF: this is a
+# strict no-op unless APPLICATIONINSIGHTS_CONNECTION_STRING is set in the
+# environment — no exporter, no network egress, zero behavior change otherwise.
+# When enabled, instruments the FastAPI app so requests + outbound HTTP calls
+# emit spans, correlated with X-Request-ID. See tracing.py.
+configure_tracing(app)
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────

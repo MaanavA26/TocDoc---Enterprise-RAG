@@ -78,6 +78,9 @@ param disableLocalAuth bool = false
 @description('Optional list of public IP ranges (CIDR) permitted to reach the data-plane services. Empty (default) preserves current behavior (publicNetworkAccess Enabled, no IP filter). When non-empty, a default-deny networkAcls allow-list is applied to Cognitive Search; the Cognitive Services accounts continue to honor key/identity auth.')
 param allowedIpRanges array = []
 
+@description('Inject the App Insights connection string (APPLICATIONINSIGHTS_CONNECTION_STRING) into both container apps to enable OpenTelemetry tracing. Defaults to false so re-deploying existing infra causes ZERO behavior change: the app code treats tracing as default-OFF and only initializes the Azure Monitor exporter when this env var is present. Set true to turn on distributed tracing → the App Insights resource provisioned below.')
+param enableAppInsightsTracing bool = false
+
 // ── Secret parameters (@secure prevents values appearing in deployment logs) ──
 
 @secure()
@@ -140,6 +143,19 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
   }
   tags: { environment: environment, product: 'tocdoc' }
 }
+
+// Optional OpenTelemetry env entry, shared by BOTH container apps. Empty by
+// default (enableAppInsightsTracing=false) so existing deployments are unchanged
+// and the app code's default-OFF tracing path stays inert. When enabled, both
+// apps receive APPLICATIONINSIGHTS_CONNECTION_STRING and emit traces to the App
+// Insights resource above. Materialised as a (possibly empty) array so it can be
+// concatenated onto each app's env list without reordering existing entries.
+// The connection string is already surfaced via the appInsightsConnectionString
+// output, so it is wired here as a plain env value (consistent with that output)
+// rather than a Container App secret.
+var appInsightsEnv = enableAppInsightsTracing ? [
+  { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appInsights.properties.ConnectionString }
+] : []
 
 // ── Azure OpenAI ──────────────────────────────────────────────────────────────
 resource openAi 'Microsoft.CognitiveServices/accounts@2023-05-01' = {
@@ -267,7 +283,9 @@ resource ingestionApp 'Microsoft.App/containerApps@2023-11-02-preview' = {
           // Replace after pushing your image: az containerapp update --image ...
           image: 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
           resources: { cpu: json('0.5'), memory: '1Gi' }
-          env: [
+          // Existing entries are unchanged; the optional App Insights env entry
+          // (empty unless enableAppInsightsTracing=true) is appended via concat.
+          env: concat([
             // ── Plain env vars (computed from deployed resources) ──
             { name: 'AZURE_OPENAI_ENDPOINT',         value: openAi.properties.endpoint }
             { name: 'AZURE_OPENAI_VERSION',           value: openAiApiVersion }
@@ -281,7 +299,7 @@ resource ingestionApp 'Microsoft.App/containerApps@2023-11-02-preview' = {
             { name: 'AZURE_SEARCH_KEY',   secretRef: 'azure-search-key' }
             { name: 'DOC_INTELLIGENCE_KEY', secretRef: 'doc-intel-key'  }
             { name: 'ADMIN_API_TOKEN',    secretRef: 'admin-api-token' }
-          ]
+          ], appInsightsEnv)
         }
       ]
       scale: { minReplicas: 0, maxReplicas: 3 }
@@ -326,7 +344,9 @@ resource qnaApp 'Microsoft.App/containerApps@2023-11-02-preview' = {
           name: 'qna'
           image: 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
           resources: { cpu: json('0.5'), memory: '1Gi' }
-          env: [
+          // Existing entries are unchanged; the optional App Insights env entry
+          // (empty unless enableAppInsightsTracing=true) is appended via concat.
+          env: concat([
             // ── Plain env vars (canonical UPPER_SNAKE) ──
             { name: 'AZURE_OPENAI_ENDPOINT',         value: openAi.properties.endpoint }
             { name: 'AZURE_OPENAI_VERSION',          value: openAiApiVersion }
@@ -343,7 +363,7 @@ resource qnaApp 'Microsoft.App/containerApps@2023-11-02-preview' = {
             { name: 'AZURE_SEARCH_KEY',     secretRef: 'azure-search-key'    }
             { name: 'AZURE_CLIENT_ID',      secretRef: 'azure-client-id'     }
             { name: 'AZURE_CLIENT_SECRET',  secretRef: 'azure-client-secret' }
-          ]
+          ], appInsightsEnv)
         }
       ]
       scale: { minReplicas: 0, maxReplicas: 3 }
