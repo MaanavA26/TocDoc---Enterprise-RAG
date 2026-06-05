@@ -6,10 +6,18 @@
 ``{answer, citation}`` dict shape so the ``/qna`` wire contract (the #28
 CitationMap contract) is preserved.
 
-PR0 graph (linear): ``START → classifier → standard_route → verifier → END``.
-The classifier is a stub that always sets ``route="standard"`` — real
-structured-output routing with ``add_conditional_edges`` is PR2 (flag
-``QNA_AGENT_ROUTER``). The verifier is a pass-through no-op.
+P3-PR1 graph: ``START → classifier → {route} → standard_route → verifier → END``.
+The classifier is now a **real** structured-output node (PR0's always-"standard"
+stub is gone): it calls ``services.openai_service.classify_route`` to set
+``state["route"] ∈ {standard, map_reduce, react}`` and the graph branches on it
+via ``add_conditional_edges``. Because the ``map_reduce``/``react`` answer nodes
+ship in later PRs, all three route labels are mapped to ``standard_route`` for
+now (the *classified* route is still logged truthfully — see ``_route_selector``).
+So the flag-ON path routes for real but, downstream, behaves identically to the
+legacy pipeline. The verifier is still a pass-through no-op.
+
+Everything stays behind the existing default-OFF ``QNA_AGENT_ENABLED`` flag
+(checked in ``app.py``); no new flag is introduced.
 
 The only module-level objects are the compiled, stateless graph and (later)
 the bounded executor — both immutable. State is never held at module level;
@@ -27,28 +35,71 @@ from src.agents.state import AgentState
 from src.agents.verifier import verifier
 from src.core.logger import logger
 from src.core.observability import log_event
+from src.services.openai_service import classify_route
 
 
 async def classifier(state: AgentState) -> dict:
-    """Routing classifier — PR0 stub.
+    """Real structured-output routing classifier (best-effort).
 
-    Always selects the standard route. A later PR replaces this with a
-    structured-output classifier (flag ``QNA_AGENT_ROUTER``) and
-    ``add_conditional_edges``; until then routing is deterministic so the
-    flag-ON path behaves identically to the legacy pipeline.
+    Calls the structured-output ``classify_route`` helper to pick one of
+    ``{standard, map_reduce, react}`` and writes it to ``state["route"]``.
+
+    Best-effort per the ADR: on **any** exception (including a malformed/
+    missing ``azure`` client) this logs a warning and defaults
+    ``route="standard"`` — a classifier failure must never fail the request.
+    The error path returns exactly ``{"route": "standard"}`` (no extra keys).
+
+    Double-rephrasal guard: this node does **not** compute ``effective_query``
+    on the live path. Everything currently collapses to ``standard_route``,
+    which already rephrases internally via ``rephrase_queries``; rephrasing
+    here too would double-rephrase. Warm-start rephrase for the non-self-
+    rephrasing routes (map_reduce/react) arrives with those nodes in later PRs.
+
+    Log hygiene: the ``route_decision`` event carries only ``route`` +
+    ``request_id`` — never the raw query (it is not passed to ``log_event``).
     """
+    request_id = state.get("request_id")
+    try:
+        route = await classify_route(state["azure"], state["query"])
+    except Exception as exc:
+        # Best-effort: warn and default to the safe route. NEVER raise.
+        logger.warning(
+            "Route classifier failed (%s); defaulting to 'standard'",
+            type(exc).__name__,
+        )
+        log_event(
+            logger,
+            "agent_route_decision",
+            request_id=request_id,
+            route="standard",
+            classifier_failed=True,
+        )
+        return {"route": "standard"}
+
     log_event(
         logger,
         "agent_route_decision",
-        request_id=state.get("request_id"),
-        route="standard",
-        stub=True,
+        request_id=request_id,
+        route=route,
     )
-    return {"route": "standard"}
+    return {"route": route}
+
+
+def _route_selector(state: AgentState) -> str:
+    """Conditional-edge selector — returns the classified route label.
+
+    Returns the value the classifier wrote (defaulting to ``"standard"`` if,
+    defensively, the key is missing). The returned label is mapped to a node
+    by the ``path_map`` in ``_build_graph``; in PR1 every label maps to
+    ``standard_route`` because the other answer nodes do not exist yet — but
+    the *classified* route is preserved in state and logs, so wiring the real
+    nodes later needs no classifier change.
+    """
+    return state.get("route", "standard")
 
 
 def _build_graph():
-    """Compile the PR0 linear graph once at import time.
+    """Compile the routing graph once at import time.
 
     The compiled graph is stateless and immutable; per-request state is passed
     to ``ainvoke`` and never stored here.
@@ -59,7 +110,18 @@ def _build_graph():
     graph.add_node("verifier", verifier)
 
     graph.add_edge(START, "classifier")
-    graph.add_edge("classifier", "standard_route")
+    # Branch on the classified route. map_reduce/react nodes ship in later PRs,
+    # so for now all three labels resolve to standard_route — an edge to a
+    # not-yet-added node would fail compile(). Documented collapse, not a bug.
+    graph.add_conditional_edges(
+        "classifier",
+        _route_selector,
+        {
+            "standard": "standard_route",
+            "map_reduce": "standard_route",
+            "react": "standard_route",
+        },
+    )
     graph.add_edge("standard_route", "verifier")
     graph.add_edge("verifier", END)
 
