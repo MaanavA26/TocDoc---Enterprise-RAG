@@ -1,0 +1,536 @@
+"""Tests for the SSE streaming endpoint ``POST /qna/stream``.
+
+Covers the streaming contract added alongside the SDK's ``stream_ask`` client:
+
+- The endpoint yields answer tokens, then a final citation event, then the
+  OpenAI-style ``[DONE]`` sentinel — in the wire format the SDK's
+  ``tocdoc_sdk._sse`` parser understands.
+- The SAME auth (RS256 JWT middleware) and tenant-binding enforcement gate the
+  stream route exactly as they gate ``/qna``.
+- ``stream_openai_response`` drives a *true* token stream (``stream=True``) off
+  the event loop via a worker thread + asyncio queue, and surfaces a mid-stream
+  failure to the consumer.
+- The non-streaming ``/qna`` path is unaffected (a focused regression check
+  lives here too; the byte-identity lock remains in ``test.py``).
+
+No live Azure: the OpenAI streaming client is a fake yielding chunk objects.
+"""
+
+import json
+import os
+
+import pytest
+from httpx import ASGITransport, AsyncClient
+from jose import jwt
+
+# ---------------------------------------------------------------------------
+# Required env BEFORE importing the app (config validates at import time).
+# ---------------------------------------------------------------------------
+os.environ.setdefault("AZURE_OPENAI_ENDPOINT", "https://fake-openai.example.com")
+os.environ.setdefault("AZURE_OPENAI_KEY", "fake-key")
+os.environ.setdefault("AZURE_OPENAI_VERSION", "2024-06-01")
+os.environ.setdefault("AZURE_OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+os.environ.setdefault("AZURE_SEARCH_ENDPOINT", "https://fake-search.example.com")
+os.environ.setdefault("AZURE_SEARCH_KEY", "fake-search-key")
+os.environ.setdefault("INDEX_NAME", "fake-index")
+os.environ.setdefault("AZURE_KEY_VAULT", "fakevault")
+os.environ.setdefault("AZURE_TENANT_ID", "11111111-1111-1111-1111-111111111111")
+os.environ.setdefault("AUDIENCE_ID", "api://fake-audience-id")
+
+from app import app  # noqa: E402
+from src.config import config as cfg  # noqa: E402
+
+# Minimal SSE parser used as the wire-compat oracle. This is a faithful,
+# self-contained reimplementation of the subset the SDK's `tocdoc_sdk._sse`
+# parser implements (the SDK lives outside services/qna, so we do not import
+# it here): blank line terminates an event, `data:` fields (one leading space
+# stripped) join with "\n", `:` comments and non-`data` fields are ignored, and
+# a `data` payload equal to `[DONE]` terminates the stream WITHOUT being yielded.
+# If this recovers tokens then the citation JSON and stops at [DONE], the server
+# matches the SDK contract.
+_DONE_SENTINEL = "[DONE]"
+
+
+def iter_sse_data(lines):
+    data_lines: list[str] = []
+    for raw in lines:
+        line = raw.rstrip("\r")
+        if line == "":
+            if data_lines:
+                payload = "\n".join(data_lines)
+                data_lines = []
+                if payload == _DONE_SENTINEL:
+                    return
+                yield payload
+            continue
+        if line.startswith(":"):
+            continue
+        field, _, value = line.partition(":")
+        if field != "data":
+            continue
+        if value.startswith(" "):
+            value = value[1:]
+        data_lines.append(value)
+    if data_lines:
+        payload = "\n".join(data_lines)
+        if payload != _DONE_SENTINEL:
+            yield payload
+
+
+# ---------------------------------------------------------------------------
+# Fakes for the Azure clients (mirrors test.py, plus a streaming completions).
+# ---------------------------------------------------------------------------
+class _Delta:
+    def __init__(self, content):
+        self.content = content
+
+
+class _StreamChoice:
+    def __init__(self, content):
+        self.delta = _Delta(content)
+
+
+class _StreamChunk:
+    def __init__(self, content):
+        self.choices = [_StreamChoice(content)]
+
+
+class _FakeStreamingCompletions:
+    """Returns a streaming iterator when ``stream=True``; a normal response
+    otherwise so the same fake serves both the /qna and /qna/stream paths."""
+
+    def __init__(self, tokens, fail_after=None):
+        self._tokens = tokens
+        self._fail_after = fail_after
+
+    def create(self, *args, stream=False, **kwargs):
+        if not stream:
+
+            class _Msg:
+                content = "".join(self._tokens)
+
+            class _Choice:
+                message = _Msg()
+
+            class _Resp:
+                choices = [_Choice()]
+
+            return _Resp()
+
+        def _gen():
+            # A role-only first chunk with no content (defensive-path coverage).
+            yield _StreamChunk(None)
+            for i, tok in enumerate(self._tokens):
+                if self._fail_after is not None and i == self._fail_after:
+                    raise RuntimeError("upstream stream blew up")
+                yield _StreamChunk(tok)
+
+        return _gen()
+
+
+class _FakeChat:
+    def __init__(self, completions):
+        self.completions = completions
+
+
+class _FakeOpenAIClient:
+    def __init__(self, completions):
+        self.chat = _FakeChat(completions)
+
+
+class _FakeEmbeddingClient:
+    def embed_query(self, text):
+        return [0.01, 0.02, 0.03]
+
+
+class _FakeSearchClient:
+    def search(self, **kwargs):
+        yield {
+            "id": "1",
+            "content": "chunk content",
+            "section_header": "sec",
+            "filename": "fileA.md",
+            "filepath": "/docs/fileA.md",
+        }
+
+
+class FakeAzure:
+    def __init__(self, tokens, fail_after=None):
+        self.embedding_client = _FakeEmbeddingClient()
+        self.openai_client = _FakeOpenAIClient(_FakeStreamingCompletions(tokens, fail_after=fail_after))
+        self.search_client = _FakeSearchClient()
+
+
+# Answer tokens whose concatenation carries a parseable ``**Sources:**`` block
+# so the citation extractor resolves fileA.md (matching the non-streaming path).
+ANSWER_TOKENS = ["This ", "is ", "the ", "answer.\n\n**Sources:**\n[fileA.md]"]
+
+
+def make_token(email="user@acme.com", tid=None):
+    iss = f"https://sts.windows.net/{cfg.settings.AZURE_TENANT_ID}/"
+    payload = {"iss": iss, "aud": cfg.settings.AUDIENCE_ID}
+    if email:
+        payload["upn"] = email
+    if tid:
+        payload["tid"] = tid
+    return jwt.encode(payload, key="dummy", algorithm="HS256")
+
+
+def url(p):
+    return f"{app.root_path}{p}"
+
+
+# ---------------------------------------------------------------------------
+# Autouse fixtures: no Key Vault, fake token validation, pass-through rephrase.
+# ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _patch_startup(monkeypatch):
+    async def _no_kv():
+        return {}
+
+    monkeypatch.setattr(cfg.settings, "load_secrets_from_keyvault", _no_kv, raising=True)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _patch_validate_token(monkeypatch):
+    import src.core.auth as auth_module
+    import src.core.token_validator as tv
+
+    async def _fake_validate(token, tenant_id, audience):
+        from jose import jwt as jose_jwt
+
+        try:
+            return jose_jwt.decode(
+                token,
+                key="dummy",
+                algorithms=["HS256"],
+                options={"verify_signature": False, "verify_aud": False},
+            )
+        except Exception:
+            raise tv.TokenValidationError("Invalid token") from None
+
+    monkeypatch.setattr(auth_module, "validate_token", _fake_validate, raising=True)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _pass_through_rephrase(monkeypatch):
+    from src.services import openai_service as oai
+
+    async def fake_rephrase(*args, **kwargs):
+        return {
+            "rephrased_query": kwargs.get("current_query") or "hi",
+            "is_greeting": False,
+            "original_response": "ok",
+            "extracted_snippet": "",
+            "is_followup": False,
+            "was_rephrased": False,
+        }
+
+    monkeypatch.setattr(oai, "rephrase_queries", fake_rephrase, raising=True)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _disable_tenant_binding(monkeypatch):
+    # Default-ON binding would 403 these tokens (no tid). Opt out except in the
+    # tests that explicitly exercise binding.
+    monkeypatch.setenv("QNA_ENFORCE_TENANT_BINDING", "false")
+    yield
+
+
+def _attach_azure(tokens=ANSWER_TOKENS, fail_after=None):
+    app.state.azure = FakeAzure(tokens, fail_after=fail_after)
+
+
+def _payload():
+    return {
+        "session_id": "s1",
+        "fr_tag": "read",
+        "bot_tag": "toc",
+        "bot": [{"user_query": "What is in fileA?"}],
+    }
+
+
+# ===========================================================================
+# Happy path: tokens -> citation event -> [DONE], in SDK-parseable framing.
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_stream_yields_tokens_then_citation_then_done():
+    _attach_azure()
+    token = make_token()
+    headers = {"Authorization": f"Bearer {token}", "Accept": "text/event-stream"}
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        r = await ac.post(url("/qna/stream"), headers=headers, json=_payload())
+
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/event-stream")
+
+    raw = r.text
+    # Raw framing: an explicit citation event, an explicit [DONE] sentinel.
+    assert "event: citation" in raw
+    assert raw.rstrip().endswith("data: [DONE]")
+
+    # Feed the raw bytes through the SDK parser. It yields every data payload
+    # (it ignores `event:` fields) and stops at [DONE], so we get the answer
+    # tokens followed by the citation JSON, and nothing after [DONE].
+    payloads = list(iter_sse_data(raw.split("\n")))
+    # The citation JSON is the last yielded payload.
+    citation_payload = json.loads(payloads[-1])
+    assert citation_payload["citation"]["fileA.md"] == "/docs/fileA.md"
+
+    # Everything before the citation reconstructs the streamed answer tokens.
+    streamed_answer = "".join(payloads[:-1])
+    assert streamed_answer == "".join(ANSWER_TOKENS)
+
+    # The post-[DONE] sentinel is never surfaced.
+    assert "after-done" not in raw
+
+
+@pytest.mark.asyncio
+async def test_stream_token_count_matches_emitted_tokens():
+    """Each non-empty model delta becomes its own SSE data event (true token
+    streaming), and the empty role-only chunk is skipped."""
+    _attach_azure(tokens=["a", "b", "c"])
+    token = make_token()
+    headers = {"Authorization": f"Bearer {token}", "Accept": "text/event-stream"}
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        r = await ac.post(url("/qna/stream"), headers=headers, json=_payload())
+
+    payloads = list(iter_sse_data(r.text.split("\n")))
+    # 3 token events + 1 citation event.
+    assert payloads[:3] == ["a", "b", "c"]
+    assert len(payloads) == 4
+
+
+# ===========================================================================
+# Auth is enforced on the stream route exactly like /qna.
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_stream_requires_bearer():
+    _attach_azure()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        r = await ac.post(url("/qna/stream"), json=_payload())
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "UNAUTHORIZED"
+
+
+@pytest.mark.asyncio
+async def test_stream_rejects_missing_email_claim():
+    _attach_azure()
+    token = make_token(email=None)
+    headers = {"Authorization": f"Bearer {token}"}
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        r = await ac.post(url("/qna/stream"), headers=headers, json=_payload())
+    assert r.status_code == 401
+
+
+# ===========================================================================
+# Request-boundary validation parity with /qna (errors BEFORE the first token
+# come back as the normal structured envelope, not an SSE stream).
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_stream_400_on_bad_fr_tag_is_envelope_not_stream():
+    _attach_azure()
+    token = make_token()
+    headers = {"Authorization": f"Bearer {token}"}
+    bad = _payload() | {"fr_tag": "nonsense"}
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        r = await ac.post(url("/qna/stream"), headers=headers, json=bad)
+    assert r.status_code == 400
+    # Structured envelope, NOT an event-stream.
+    assert not r.headers["content-type"].startswith("text/event-stream")
+    assert r.json()["error"]["code"] == "INVALID_REQUEST"
+
+
+@pytest.mark.asyncio
+async def test_stream_400_on_empty_bot():
+    _attach_azure()
+    token = make_token()
+    headers = {"Authorization": f"Bearer {token}"}
+    bad = _payload() | {"bot": []}
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        r = await ac.post(url("/qna/stream"), headers=headers, json=bad)
+    assert r.status_code == 400
+    assert "Bot list cannot be empty" in r.text
+
+
+# ===========================================================================
+# Tenant-binding is enforced on the stream route at the same call-site as /qna.
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_stream_tenant_binding_rejects_unmapped_bot_tag(monkeypatch):
+    monkeypatch.setenv("QNA_ENFORCE_TENANT_BINDING", "true")
+    monkeypatch.setenv("QNA_TENANT_BOT_TAG_MAP", '{"tenant-aaaa": ["workspace-a"]}')
+    _attach_azure()
+    token = make_token(tid="tenant-aaaa")
+    headers = {"Authorization": f"Bearer {token}"}
+    bad = _payload() | {"bot_tag": "workspace-b"}  # not allowed for this tid
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        r = await ac.post(url("/qna/stream"), headers=headers, json=bad)
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "UNAUTHORIZED"
+    # No stream opened — generic message, no tenant data echoed.
+    assert "workspace-b" not in r.text
+
+
+@pytest.mark.asyncio
+async def test_stream_tenant_binding_allows_mapped_bot_tag(monkeypatch):
+    monkeypatch.setenv("QNA_ENFORCE_TENANT_BINDING", "true")
+    monkeypatch.setenv("QNA_TENANT_BOT_TAG_MAP", '{"tenant-aaaa": ["workspace-a"]}')
+    _attach_azure()
+    token = make_token(tid="tenant-aaaa")
+    headers = {"Authorization": f"Bearer {token}"}
+    ok = _payload() | {"bot_tag": "workspace-a"}
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        r = await ac.post(url("/qna/stream"), headers=headers, json=ok)
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/event-stream")
+    assert "data: [DONE]" in r.text
+
+
+# ===========================================================================
+# Mid-stream failure: after the first token, a terminal error event then [DONE].
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_stream_midstream_failure_emits_terminal_error_event():
+    # Fail on the 3rd token (index 2) so at least one token streams first,
+    # forcing the mid-stream (post-headers) error path rather than an envelope.
+    _attach_azure(tokens=["a", "b", "c", "d"], fail_after=2)
+    token = make_token()
+    headers = {"Authorization": f"Bearer {token}"}
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        r = await ac.post(url("/qna/stream"), headers=headers, json=_payload())
+
+    # The response status is 200 (it began streaming); the failure is in-band.
+    assert r.status_code == 200
+    raw = r.text
+    assert "event: error" in raw
+    assert raw.rstrip().endswith("data: [DONE]")
+    # No raw exception text leaks into the stream.
+    assert "blew up" not in raw
+
+    # The error payload carries the safe envelope-shaped body.
+    payloads = list(iter_sse_data(raw.split("\n")))
+    err = json.loads(payloads[-1])
+    assert err["error"]["code"] == "INTERNAL_ERROR"
+    assert err["error"]["message"] == "Streaming failed"
+
+
+# ===========================================================================
+# stream_openai_response unit: true off-loop token streaming + error surfacing.
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_stream_openai_response_yields_tokens_off_loop():
+    from src.services.openai_service import stream_openai_response
+
+    azure = FakeAzure(tokens=["x", "y", "z"])
+    out = []
+    async for tok in stream_openai_response("q", [], False, False, azure):
+        out.append(tok)
+    assert out == ["x", "y", "z"]
+
+
+@pytest.mark.asyncio
+async def test_stream_openai_response_surfaces_worker_exception():
+    from src.services.openai_service import stream_openai_response
+
+    azure = FakeAzure(tokens=["x", "y", "z"], fail_after=1)
+    out = []
+    with pytest.raises(RuntimeError):
+        async for tok in stream_openai_response("q", [], False, False, azure):
+            out.append(tok)
+    # The first token streamed before the failure (true mid-stream surfacing).
+    assert out == ["x"]
+
+
+# ===========================================================================
+# Pre-first-token (priming) failure: retrieval blows up BEFORE any token, so the
+# handler returns the normal structured envelope — NOT a half-open SSE stream.
+# This locks the "errors before the first token return the normal envelope" half
+# of the contract: the pipeline generator is primed (`__anext__`) inside the
+# handler before StreamingResponse is returned, so a search/embedding failure
+# propagates to the global exception handler.
+# ===========================================================================
+class _BoomSearchClient:
+    def search(self, **kwargs):
+        raise RuntimeError("search backend exploded")
+
+
+@pytest.mark.asyncio
+async def test_stream_retrieval_failure_before_first_token_is_envelope_not_stream():
+    azure = FakeAzure(tokens=ANSWER_TOKENS)
+    azure.search_client = _BoomSearchClient()
+    app.state.azure = azure
+
+    token = make_token()
+    headers = {"Authorization": f"Bearer {token}", "Accept": "text/event-stream"}
+    # raise_app_exceptions=False so the test client returns the enveloped 500
+    # response (produced by the global handler) instead of re-raising — exactly
+    # what a real HTTP client over the wire would receive.
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        r = await ac.post(url("/qna/stream"), headers=headers, json=_payload())
+
+    # A retrieval failure during priming -> structured 500 envelope, no stream.
+    assert r.status_code == 500
+    assert not r.headers["content-type"].startswith("text/event-stream")
+    body = r.json()
+    assert body["error"]["code"] == "INTERNAL_ERROR"
+    # X-Request-ID present on the envelope (P0-6 contract) and no token leaked.
+    assert "X-Request-ID" in r.headers
+    assert "data: [DONE]" not in r.text
+    # No raw exception text leaks.
+    assert "exploded" not in r.text
+
+
+# ===========================================================================
+# Concurrency gate releases its slot after the stream finishes (no leak).
+# Two SEQUENTIAL streaming requests with a cap of 1 must BOTH succeed; a leaked
+# slot would make the second return 429.
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_stream_concurrency_slot_released_after_stream(monkeypatch):
+    monkeypatch.setenv("QNA_MAX_CONCURRENCY", "1")
+    token = make_token()
+    headers = {"Authorization": f"Bearer {token}"}
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        _attach_azure()
+        r1 = await ac.post(url("/qna/stream"), headers=headers, json=_payload())
+        assert r1.status_code == 200
+        # Drain the first stream fully so its slot is released.
+        assert "data: [DONE]" in r1.text
+        _attach_azure()
+        r2 = await ac.post(url("/qna/stream"), headers=headers, json=_payload())
+    # If the gate leaked the slot, this second request would be 429.
+    assert r2.status_code == 200
+    assert "data: [DONE]" in r2.text
+
+
+# ===========================================================================
+# Non-streaming /qna remains unaffected by the streaming addition.
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_non_streaming_qna_still_works():
+    _attach_azure()
+    token = make_token()
+    headers = {"Authorization": f"Bearer {token}"}
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        r = await ac.post(url("/qna"), headers=headers, json=_payload())
+    assert r.status_code == 200
+    body = r.json()
+    # Byte-identical top-level shape preserved.
+    assert set(body.keys()) == {"answer", "citation"}
+    assert body["citation"]["fileA.md"] == "/docs/fileA.md"
