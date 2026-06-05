@@ -154,7 +154,7 @@ Vault itself, so the Key Vault secret-name column does not apply here.
 
 ## Variable count
 
-- **Q&A service:** 20 distinct variables (plus 9 deprecated legacy aliases).
+- **Q&A service:** 21 distinct variables (plus 9 deprecated legacy aliases).
 - **Ingestion service:** 28 distinct variables.
 - **Total distinct variables across both services:** 34 (the shared Azure
   OpenAI/Search and CORS/log/Uvicorn variables are counted once in this union).
