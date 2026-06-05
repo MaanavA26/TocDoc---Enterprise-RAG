@@ -13,6 +13,7 @@ deterministic.
 
 from __future__ import annotations
 
+import json
 import random
 import time
 from collections.abc import Callable, Iterable, Iterator
@@ -30,7 +31,12 @@ from ._retry import (
     should_retry_exception,
     should_retry_status,
 )
-from ._sse import iter_sse_data
+from ._sse import (
+    CITATION_EVENT,
+    DEFAULT_EVENT,
+    ERROR_EVENT,
+    SSEDecoder,
+)
 from .errors import ApiError
 from .models import BotTurn, QnAAnswer, QnARequest
 
@@ -62,6 +68,60 @@ def _build_request(
         turns = [t if isinstance(t, BotTurn) else BotTurn(**t) for t in bot]
 
     return QnARequest(session_id=session_id, bot=turns, fr_tag=fr_tag, bot_tag=bot_tag)
+
+
+# Mid-stream failures arrive over an HTTP 200 stream (headers are already sent),
+# so there is no real status to attach. 500 is the honest synthetic status: the
+# `event: error` payload always represents a server-side failure.
+_STREAM_ERROR_STATUS = 500
+
+CitationCallback = Callable[[dict[str, Any]], None]
+
+
+def _handle_stream_event(
+    event_type: str,
+    data: str,
+    on_citation: CitationCallback | None,
+) -> str | None:
+    """Interpret one decoded SSE ``(event_type, data)`` for the QnA stream.
+
+    Shared by the sync and async ``stream_ask`` so both honor the same wire
+    contract (see ``services/qna/app.py`` /qna/stream):
+
+    - default/``message`` event -> return the token text to yield.
+    - ``event: citation`` -> deliver the parsed payload to ``on_citation`` (if
+      provided) and return ``None`` so it never lands in the answer text.
+    - ``event: error`` -> raise :class:`ApiError` built from the envelope.
+    - any other tagged event -> ignored (return ``None``).
+
+    Defensive: a malformed citation/error JSON payload does not crash the
+    stream. A bad citation is dropped; a bad error envelope still raises a
+    synthesized :class:`ApiError` (the failure must not be swallowed).
+    """
+    if event_type == DEFAULT_EVENT:
+        return data
+
+    if event_type == CITATION_EVENT:
+        if on_citation is not None:
+            try:
+                parsed = json.loads(data)
+            except (ValueError, TypeError):
+                # Malformed citation payload: drop it rather than crash the
+                # answer stream. The answer text is unaffected either way.
+                return None
+            if isinstance(parsed, dict):
+                on_citation(parsed)
+        return None
+
+    if event_type == ERROR_EVENT:
+        try:
+            body = json.loads(data)
+        except (ValueError, TypeError):
+            body = None
+        raise ApiError.from_response(_STREAM_ERROR_STATUS, body)
+
+    # Unknown tagged event type: not a token, not part of the contract — ignore.
+    return None
 
 
 class TocDocClient:
@@ -192,13 +252,27 @@ class TocDocClient:
         fr_tag: str,
         query: str | None = None,
         bot: Iterable[BotTurn | dict[str, Any]] | None = None,
+        on_citation: CitationCallback | None = None,
     ) -> Iterator[str]:
-        """Stream a QnA answer token-by-token from a future ``POST /qna/stream``.
+        """Stream a QnA answer token-by-token from ``POST /qna/stream``.
 
         Same request contract as :meth:`ask`, but the server responds with a
-        Server-Sent-Events (SSE) stream and this method yields each ``data``
-        payload (a token/chunk) as it arrives. Provide exactly one of ``query``
-        or ``bot``.
+        Server-Sent-Events (SSE) stream and this method yields each answer
+        *token* as it arrives. Provide exactly one of ``query`` or ``bot``.
+
+        The server multiplexes three event types onto the one stream: answer
+        tokens (default events), an ``event: citation`` payload, and — only on a
+        mid-stream failure — a terminal ``event: error``. This method honors the
+        framing: it yields **only** token text (so ``"".join(stream_ask(...))``
+        is the clean answer with no citation JSON appended), delivers the
+        citation map out-of-band via ``on_citation``, and **raises**
+        :class:`ApiError` on an ``event: error`` instead of swallowing it.
+
+        Args:
+            on_citation: Optional callback invoked once with the parsed citation
+                payload (``{"citation": {...}, "page_citations": {...}?}``) when
+                the ``event: citation`` event arrives. If ``None``, the citation
+                is simply not surfaced (it is never mixed into the token stream).
 
         The result is a lazy generator: the HTTP connection stays open until the
         generator is exhausted or closed, so consume it promptly (e.g. in a
@@ -210,15 +284,17 @@ class TocDocClient:
         before any token is yielded (the error body is read and parsed first).
 
         Yields:
-            Each SSE ``data`` payload in order. The OpenAI-style ``[DONE]``
-            sentinel terminates the stream and is never yielded.
+            Each answer token in order. Citation/error events and the
+            OpenAI-style ``[DONE]`` sentinel are never yielded as tokens.
 
         Raises:
             ValueError: If neither or both of ``query`` / ``bot`` are given.
-            ApiError: On any non-2xx response (carries the envelope fields).
+            ApiError: On a non-2xx response (before any token) OR on a
+                mid-stream ``event: error`` (after tokens have begun).
         """
         request = _build_request(session_id=session_id, bot_tag=bot_tag, fr_tag=fr_tag, query=query, bot=bot)
 
+        decoder = SSEDecoder()
         with self._client.stream(
             "POST",
             "/qna/stream",
@@ -230,7 +306,19 @@ class TocDocClient:
                 # envelope from a half-consumed stream.
                 response.read()
                 raise ApiError.from_response(response.status_code, safe_json(response))
-            yield from iter_sse_data(response.iter_lines())
+            for raw in response.iter_lines():
+                event = decoder.feed(raw)
+                if event is not None:
+                    token = _handle_stream_event(event[0], event[1], on_citation)
+                    if token is not None:
+                        yield token
+                if decoder.done:
+                    return
+            event = decoder.flush()
+            if event is not None:
+                token = _handle_stream_event(event[0], event[1], on_citation)
+                if token is not None:
+                    yield token
 
     def _request_with_retries(
         self, method: str, path: str, *, idempotent: bool, **kwargs: Any
