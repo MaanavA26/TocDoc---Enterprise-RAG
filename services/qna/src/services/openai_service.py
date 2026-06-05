@@ -1,4 +1,5 @@
 import asyncio
+import json
 import re
 import time
 import traceback
@@ -229,3 +230,120 @@ async def rephrase_queries(
             "is_followup": False,
             "was_rephrased": False,
         }
+
+
+# ---------------------------------------------------------------------------
+# Structured-output helper (NEW in P3) — JSON-schema-constrained classification
+# ---------------------------------------------------------------------------
+# Before P3 the service only ever regex-parsed free-text LLM output (see
+# `rephrase_queries` above). The agentic router needs a *machine-checkable*
+# decision, so this is the service's first `response_format`/JSON-schema call.
+# It is deliberately generic (caller supplies the schema) so later P3 nodes
+# (verifier, etc.) can reuse the same path rather than re-inventing it.
+
+# Routes the classifier may choose. Kept here next to the helper so callers and
+# the schema share one source of truth; the router validates against this set.
+ROUTE_LABELS: tuple[str, ...] = ("standard", "map_reduce", "react")
+
+
+def _structured_completion_sync(
+    azure,
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    schema_name: str,
+    json_schema: dict,
+    model: str | None = None,
+) -> dict:
+    """Synchronous structured-output chat call returning a parsed JSON object.
+
+    Uses Azure OpenAI's ``response_format`` with a strict JSON schema so the
+    model's reply is guaranteed to be a JSON object matching ``json_schema``.
+    Mirrors the sync-client call style of the other helpers in this module
+    (``azure.openai_client.chat.completions.create(...)``); the caller offloads
+    it to a thread when needed.
+
+    Raises on any transport/parse error — the caller (best-effort node) is
+    responsible for catching and defaulting.
+    """
+    deployment_name = model or localconfig.AZURE_LLM_MODEL
+
+    response = azure.openai_client.chat.completions.create(
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        model=deployment_name,
+        temperature=0,
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": schema_name,
+                "strict": True,
+                "schema": json_schema,
+            },
+        },
+    )
+
+    if isawaitable(response):
+        logger.debug("structured create returned awaitable; running to completion in sync context")
+        response = asyncio.run(response)
+
+    content = response.choices[0].message.content or "{}"
+    return json.loads(content)
+
+
+async def classify_route(azure, query: str) -> str:
+    """Classify a query into one of ``ROUTE_LABELS`` via structured output.
+
+    Returns a route string guaranteed to be a member of ``ROUTE_LABELS``;
+    any off-schema / unexpected value collapses to ``"standard"``. This helper
+    itself does NOT swallow transport errors — it offloads the sync call to the
+    shared OpenAI executor and lets exceptions propagate so the caller (the
+    best-effort classifier node) owns the catch-and-default policy.
+
+    The query is sent to the model (it must be, to classify it) but is never
+    logged here; log hygiene is the caller's responsibility.
+    """
+    system_prompt = (
+        "You are a routing classifier for a document question-answering system. "
+        "Choose the single best strategy to answer the user's question:\n"
+        "- 'standard': a focused question answerable from a few relevant passages "
+        "(the default; prefer it when unsure).\n"
+        "- 'map_reduce': a broad summarization/aggregation question that needs the "
+        "whole corpus (e.g. 'summarize all documents', 'list every policy').\n"
+        "- 'react': a multi-hop question requiring several dependent lookups or "
+        "entity reasoning across documents.\n"
+        "Respond ONLY with the structured object."
+    )
+    json_schema = {
+        "type": "object",
+        "properties": {
+            "route": {
+                "type": "string",
+                "enum": list(ROUTE_LABELS),
+            }
+        },
+        "required": ["route"],
+        "additionalProperties": False,
+    }
+
+    loop = asyncio.get_running_loop()
+    parsed = await loop.run_in_executor(
+        openai_executor,
+        lambda: _structured_completion_sync(
+            azure,
+            system_prompt=system_prompt,
+            user_prompt=query,
+            schema_name="route_decision",
+            json_schema=json_schema,
+        ),
+    )
+
+    route = parsed.get("route")
+    if route in ROUTE_LABELS:
+        return route
+    # Off-schema / unexpected value — never trust it (don't log the raw
+    # model-returned value), fall back to the safe route.
+    logger.warning("Classifier returned an unexpected route; defaulting to 'standard'")
+    return "standard"
