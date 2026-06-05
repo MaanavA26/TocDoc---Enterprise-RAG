@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+import threading
 import time
 import traceback
 from collections.abc import AsyncIterator
@@ -49,7 +50,10 @@ async def generate_openai_response(
     Raises:
         Exception: Any error during invocation is logged and re-raised.
     """
-    logger.info("Generating OpenAI response for query: '%s'", query)
+    # Raw query is logged at DEBUG only: the ReAct node feeds model-generated
+    # sub-query strings through this path and its contract is that the raw query
+    # is never logged at INFO (see react_agent.py module docstring).
+    logger.debug("Generating OpenAI response for query: '%s'", query)
     logger.debug(f"Knowledge source contains {len(knowledge_source)} items")
 
     try:
@@ -134,9 +138,22 @@ def _generate_response_sync(
 # OpenAI client is SYNCHRONOUS, and its `stream=True` iterator blocks on each
 # network read. Iterating it directly on the event loop would stall every other
 # coroutine, so the blocking iteration runs in the shared `openai_executor`
-# thread and each token is handed back to the loop via an `asyncio.Queue`. The
-# queue is NOT thread-safe, so the worker thread enqueues with
-# `loop.call_soon_threadsafe` — the only safe cross-thread hop.
+# thread and each token is handed back to the loop via a bounded `asyncio.Queue`.
+# The queue is NOT thread-safe, so the worker thread enqueues by scheduling a
+# real coroutine `queue.put` on the loop via `asyncio.run_coroutine_threadsafe`
+# and BLOCKING on its result — that gives genuine backpressure (a slow client
+# parks the worker on `put` instead of dropping tokens) AND keeps the cross-loop
+# hop safe.
+#
+# Cancellation is COOPERATIVE via a `threading.Event` stop flag: the worker
+# checks it each chunk and the consumer's `finally` sets it (and drains the
+# queue to release a worker parked in `put`). This stops the worker within one
+# chunk on client disconnect — it does NOT interrupt a read already blocked
+# inside the SDK (only the SDK's own close() could, which is out of scope here).
+
+# Bounded queue size. A module constant so tests can shrink it to force the
+# full-queue/backpressure path deterministically.
+_STREAM_QUEUE_MAXSIZE = 256
 
 # Sentinels pushed by the worker thread onto the queue. Tuples so they can never
 # collide with a real token string.
@@ -177,7 +194,8 @@ async def stream_openai_response(
             after some tokens have already been yielded (a mid-stream failure).
     """
     deployment_name = localconfig.AZURE_LLM_MODEL
-    logger.info("Streaming OpenAI response for query: '%s'", query)
+    # Raw query at DEBUG only (see generate_openai_response / ReAct contract).
+    logger.debug("Streaming OpenAI response for query: '%s'", query)
     logger.debug(f"Knowledge source contains {len(knowledge_source)} items")
 
     prompt = generate_bot.format(
@@ -189,22 +207,38 @@ async def stream_openai_response(
 
     loop = asyncio.get_running_loop()
     # Bounded queue so a fast producer cannot grow memory without bound if the
-    # consumer (the HTTP client) stalls; the worker blocks on put when full.
-    queue: asyncio.Queue = asyncio.Queue(maxsize=256)
+    # consumer (the HTTP client) stalls; the worker BLOCKS on put when full
+    # (real backpressure — see `_put`).
+    queue: asyncio.Queue = asyncio.Queue(maxsize=_STREAM_QUEUE_MAXSIZE)
     # Holder for the worker's exception so the consumer can re-raise it.
     error_box: dict[str, BaseException] = {}
+    # Cooperative stop flag. Set by the consumer's `finally` (disconnect /
+    # mid-stream raise / generator close); the worker checks it each chunk and
+    # in `_put` so an abandoned stream stops promptly instead of draining the
+    # whole upstream response (no executor-slot or denial-of-wallet leak).
+    stop = threading.Event()
 
     def _put(item) -> None:
-        # The queue is NOT thread-safe; the only safe way to enqueue from the
-        # worker thread is to schedule the put on the event loop thread.
-        loop.call_soon_threadsafe(queue.put_nowait, item)
+        # The queue is NOT thread-safe; enqueue by scheduling a real coroutine
+        # `queue.put` on the loop and BLOCKING on its result, so a full queue
+        # parks the worker here (backpressure) instead of dropping the item.
+        if stop.is_set():
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(queue.put(item), loop).result()
+        except RuntimeError:
+            # Event loop is closed/gone (shutdown) — nothing can consume; exit
+            # quietly so the worker thread is not killed noisily.
+            stop.set()
 
     def _drain_stream_sync() -> None:
         """Open the streaming completion and pump tokens onto the queue.
 
-        Runs entirely on a worker thread. Any exception is captured and signalled
-        via `_STREAM_ERROR` so the consumer re-raises it; a clean end signals
-        `_STREAM_DONE`. Exactly one terminal sentinel is always pushed.
+        Runs entirely on a worker thread. Checks the cooperative `stop` flag
+        each chunk so an abandoned consumer releases it promptly. Any exception
+        is captured and signalled via `_STREAM_ERROR` so the consumer re-raises
+        it; a clean end signals `_STREAM_DONE`. At most one terminal sentinel is
+        pushed (none on the stop path, since nobody is reading).
         """
         try:
             stream = azure.openai_client.chat.completions.create(
@@ -213,6 +247,12 @@ async def stream_openai_response(
                 stream=True,
             )
             for chunk in stream:
+                # Check the stop flag at the TOP of every iteration: after a
+                # parked `put` is released by the consumer's drain, the queue
+                # has free slots again, so without this per-chunk check the
+                # worker would refill it and re-park forever (moved leak).
+                if stop.is_set():
+                    return
                 # Defensive: some chunks (role-only first chunk, usage chunk)
                 # carry no choices or no content delta.
                 choices = getattr(chunk, "choices", None)
@@ -223,10 +263,14 @@ async def stream_openai_response(
                 if content:
                     _put(content)
         except BaseException as e:  # noqa: BLE001 - surfaced to the consumer
-            error_box["error"] = e
-            _put(_STREAM_ERROR)
+            # If we are stopping, nobody will read an error sentinel — do not
+            # try to enqueue one (the consumer is already gone).
+            if not stop.is_set():
+                error_box["error"] = e
+                _put(_STREAM_ERROR)
         else:
-            _put(_STREAM_DONE)
+            if not stop.is_set():
+                _put(_STREAM_DONE)
 
     # Submit the blocking work to the shared executor; do NOT await the future
     # here — that would block until the whole stream completes. We drain the
@@ -244,8 +288,19 @@ async def stream_openai_response(
                 raise err
             yield item
     finally:
-        # Ensure the worker future is observed so its exception (if any) is not
-        # swallowed silently by the loop, and the executor slot is released.
+        # Cooperative cancellation: `future.cancel()` cannot stop a started
+        # executor thread, so signal the worker to stop AND drain the queue to
+        # release a worker currently parked in a blocking `put`. Order matters:
+        # set stop FIRST so the released worker observes it before it can re-park.
+        stop.set()
+        while True:
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        # Observe the future too so its exception (if any) is not swallowed
+        # silently by the loop; cancel is best-effort (it cannot stop a started
+        # thread, hence the stop flag above does the real work).
         if not future.done():
             future.cancel()
 

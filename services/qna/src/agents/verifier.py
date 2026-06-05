@@ -6,7 +6,9 @@ draft ``final_answer`` for **groundedness + citation support** against the
 ``retrieved_chunks`` the answer was built from, and — per the task's "trigger
 one bounded refine/retry" requirement (the ADR's Option B, which the task
 overrides Option A with) — if the answer fails the bar it runs **exactly one**
-refine pass and re-grades; the better of the two answers wins.
+refine pass and re-grades. The refine is NON-DESTRUCTIVE: the original answer is
+kept unless the refined answer clears the acceptance bar (it is not a score
+comparison — a refine that scores higher but still fails the bar is discarded).
 
 The refine re-runs the **unchanged** grounded generation
 (``generate_openai_response``) over the same ``retrieved_chunks`` as a single
@@ -15,6 +17,12 @@ bounded second attempt, so the refined answer obeys the identical prompt +
 re-generation (one retry), not a different "stricter" prompt — the bar is
 re-applied by re-grading, and if the retry still fails the original answer is
 kept unchanged (non-destructive).
+
+The refine is gated to the ``react`` route only: it feeds ALL retrieved chunks
+into one generation, which on the ``map_reduce`` route would be the wide-context
+corpus slice map_reduce exists to avoid. On ``map_reduce`` a failing grade keeps
+the original answer and flags it unverified rather than attempting that
+over-context single-shot synthesis.
 
 ## Default-OFF inertness (the merge gate)
 
@@ -143,7 +151,8 @@ def _passes(grade: dict) -> bool:
 
 
 async def verifier(state: AgentState) -> dict:
-    """Grade groundedness; on failure run ONE bounded refine; pick the better.
+    """Grade groundedness; on failure run ONE bounded refine; keep the original
+    unless the refined answer clears the acceptance bar.
 
     Default-OFF no-op (writes ``{}``) when ``QNA_AGENT_VERIFY`` is off OR there
     are no ``retrieved_chunks`` to judge against. Otherwise writes ``verified``,
@@ -191,12 +200,31 @@ async def verifier(state: AgentState) -> dict:
         if _passes(grade):
             return {"verified": True, "unsupported_claims": []}
 
+        # --- Refine-scope guard. The refine re-grounds over ALL retrieved
+        # chunks in ONE generation. On the map_reduce route ``retrieved_chunks``
+        # is the full fetched corpus slice (bounded only by MAP_REDUCE_MAX_CHUNKS,
+        # default 1000) — the exact wide-context shape map_reduce exists to
+        # avoid. Stuffing that into a single synthesis call risks cost/latency/
+        # quota blowups and silent SDK truncation (a degraded refine). So gate
+        # the single-shot refine to the ``react`` route (whose retrieval is
+        # TOP_K-bounded); on map_reduce keep the original answer and flag it
+        # unverified rather than attempt an over-context refine. ---
+        if state.get("route") != "react":
+            log_event(
+                logger,
+                "agent_verifier_refine_skipped",
+                request_id=request_id,
+                route=state.get("route"),
+                reason="route_not_refinable",
+                chunk_count=len(chunks),
+            )
+            return {"verified": False, "unsupported_claims": unsupported}
+
         # --- One bounded refine pass (Option B). Re-ground the answer with the
-        # SAME generation path/contract, then re-grade. Pick the better.
-        # NOTE: this feeds all retrieved chunks into one generation. On the
-        # map_reduce route that can be a wide context (the very shape map_reduce
-        # avoids); the best-effort catch below keeps the original answer if the
-        # refine raises, so it degrades safely rather than failing the request. ---
+        # SAME generation path/contract, then re-grade. Keep the original unless
+        # the refine clears the bar. The best-effort catch below keeps the
+        # original answer if the refine raises, so it degrades safely rather
+        # than failing the request. ---
         refined_raw = await generate_openai_response(
             query=query,
             knowledge_source=_knowledge_source(chunks),

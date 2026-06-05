@@ -60,10 +60,15 @@ async def perform_search(
     # for the default path.
     top = localconfig.MAP_REDUCE_MAX_CHUNKS if fetch_all else localconfig.TOP_K
 
-    logger.info(
+    # Raw query and bot_tag (tenant key) are logged at DEBUG only: the ReAct
+    # node feeds model-generated sub-query strings here and its contract is that
+    # the raw query is never logged at INFO. Keep an INFO line with only
+    # non-sensitive operational fields.
+    logger.debug(
         f"Performing search with query: '{query}', fr_mode: '{fr_mode}', "
         f"bot_tag: '{bot_tag}', fetch_all: {fetch_all}, top: {top}"
     )
+    logger.info(f"Performing search with fr_mode: '{fr_mode}', fetch_all: {fetch_all}, top: {top}")
 
     try:
         start_time = time.time()

@@ -429,13 +429,14 @@ async def custom_rag_qna(payload: Payload, request: Request):
             400,
         )
 
-    # Within-tenant bot_tag<->tid binding guard (threat-model R1), DEFAULT-OFF.
-    # When QNA_ENFORCE_TENANT_BINDING is unset/falsy this is fully inert — zero
-    # behaviour change. When ON it validates the requested bot_tag against the
-    # allowlist for the token's validated `tid` and fails closed (envelope 403,
-    # no search) on any mismatch. Placed here — after the non-empty field checks
-    # and before the agent/legacy fork — so it guards both QnA paths and rejects
-    # before any retrieval. See src/core/tenant_binding.py.
+    # Within-tenant bot_tag<->tid binding guard (threat-model R1), DEFAULT-ON.
+    # When QNA_ENFORCE_TENANT_BINDING is unset or truthy this enforces a
+    # bot_tag<->tid allowlist and FAILS CLOSED (403 envelope, no search) if the
+    # map (QNA_TENANT_BOT_TAG_MAP) is missing or the (tid, bot_tag) pair is not
+    # allowed; set the flag to a falsy value to opt out for a single-workspace
+    # deployment that scopes bot_tag elsewhere. Placed here — after the non-empty
+    # field checks and before the agent/legacy fork — so it guards both QnA paths
+    # and rejects before any retrieval. See src/core/tenant_binding.py.
     enforce_tenant_bot_tag_binding(request, bot_tag)
 
     start = time.time()
