@@ -3,9 +3,14 @@
 # runtime image. The harness imports the QnA pipeline read-only, so it pulls the
 # service runtime deps via the -r include. Run from a venv created with:
 #     pip install -r eval/requirements.txt
-# Verified to resolve clean alongside the QnA pins (langchain-core stays 0.3.x).
+# Verified to resolve clean alongside the QnA pins. langchain-core stays 0.3.x:
+# ragas 0.4.3 imports langchain_community.chat_models.vertexai at module load,
+# which is removed in langchain-community 0.4.x, and the community releases that
+# still ship it cap langchain-core<1.0 — so the langchain family cannot move to
+# 1.x until ragas drops that import (deferred; see PR cascade table).
 -r ../services/qna/requirements.txt
 
 # --- RAGAS eval-only deps (kept out of the runtime image) ---
+# ragas 0.4.3 is the latest release; pinned here. datasets bumped to latest.
 ragas==0.4.3
-datasets==4.4.1
+datasets==4.8.5
