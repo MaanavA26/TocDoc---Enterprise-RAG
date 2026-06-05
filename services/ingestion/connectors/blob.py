@@ -159,11 +159,14 @@ class BlobConnector:
     def fetch(self, item: SourceItem) -> ConnectorFile:
         """Download the COMPLETE bytes for one blob, then validate the PDF magic.
 
-        Streaming download with a timeout and bounded exponential backoff. Size
-        is re-validated against the 100 MB ceiling (defense in depth — the bulk
-        loop bypasses the per-request route guard). PDF magic bytes (%PDF) are
-        validated AFTER download so a partial/interrupted read cannot feed a
-        corrupt PDF to Document Intelligence — that RAISES NotAPdfError.
+        Chunked streaming download with a timeout and bounded exponential
+        backoff. The 100 MB ceiling is enforced DURING the download (L-Conn3)
+        via a running byte counter over ``chunks()``: a size-less blob (size
+        metadata absent) can never buffer an unbounded body into memory before
+        the check — the transfer aborts the moment the running total crosses the
+        ceiling. PDF magic bytes (%PDF) are validated AFTER the full download so
+        a partial/interrupted read cannot feed a corrupt PDF to Document
+        Intelligence — that RAISES NotAPdfError.
         """
         if item.size is not None and item.size > MAX_FILE_BYTES:
             # Should have been skipped at enumerate; guard anyway.
@@ -175,8 +178,12 @@ class BlobConnector:
         for attempt in range(_MAX_RETRIES):
             try:
                 downloader = blob_client.download_blob(timeout=_DOWNLOAD_TIMEOUT_SECONDS)
-                content = downloader.readall()
+                content = _read_capped(downloader, item.source_path)
                 break
+            except ConnectorError:
+                # An over-ceiling abort is terminal, not a transient transport
+                # error — do not retry (it would just re-download and re-abort).
+                raise
             except Exception as exc:  # noqa: BLE001 - retry transient transport errors
                 last_exc = exc
                 if attempt == _MAX_RETRIES - 1:
@@ -196,13 +203,41 @@ class BlobConnector:
         else:  # pragma: no cover - loop always breaks or raises
             raise ConnectorError(f"Blob download failed for {item.source_path!r}") from last_exc
 
-        if len(content) > MAX_FILE_BYTES:
-            raise ConnectorError(f"Blob {item.source_path!r} exceeds the 100 MB per-file ceiling")
-
         # Post-download integrity gate. Raises NotAPdfError if not a real PDF.
         validate_pdf_magic(content)
 
         return ConnectorFile(filename=item.filename, content=content)
+
+
+# ---------------------------------------------------------------------------
+# Capped chunked read — enforce the size ceiling DURING download (L-Conn3)
+# ---------------------------------------------------------------------------
+
+
+def _read_capped(downloader, source_path: str) -> bytes:
+    """Read a blob downloader chunk-by-chunk, aborting past the 100 MB ceiling.
+
+    The Azure ``StorageStreamDownloader`` exposes ``chunks()`` — an iterator of
+    byte ranges that pulls each range from the service lazily. We accumulate
+    into a running counter and raise ``ConnectorError`` the moment the total
+    crosses MAX_FILE_BYTES, so a size-less blob never buffers an unbounded body
+    into memory before the check. Falls back to ``readall()`` for downloader
+    shapes without ``chunks()`` (older SDKs / simple test doubles), applying the
+    same post-read ceiling so the guard is never silently skipped.
+    """
+    chunks = getattr(downloader, "chunks", None)
+    if callable(chunks):
+        buf = bytearray()
+        for chunk in chunks():
+            buf.extend(chunk)
+            if len(buf) > MAX_FILE_BYTES:
+                raise ConnectorError(f"Blob {source_path!r} exceeds the 100 MB per-file ceiling")
+        return bytes(buf)
+
+    content = downloader.readall()
+    if len(content) > MAX_FILE_BYTES:
+        raise ConnectorError(f"Blob {source_path!r} exceeds the 100 MB per-file ceiling")
+    return content
 
 
 # ---------------------------------------------------------------------------

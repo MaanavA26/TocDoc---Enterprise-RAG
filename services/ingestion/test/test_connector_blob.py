@@ -53,16 +53,45 @@ class _FakeDownloader:
         return self._content
 
 
+class _ChunkedDownloader:
+    """A downloader exposing chunks() — mirrors Azure StorageStreamDownloader.
+
+    Pulls 1 MB ranges lazily. If ``tripwire`` is set it raises once more bytes
+    than the ceiling have been emitted, proving the consumer aborts mid-stream
+    (L-Conn3) rather than buffering the whole body first.
+    """
+
+    def __init__(self, content, chunk_size=1024 * 1024, tripwire=None):
+        self._content = content
+        self._chunk_size = chunk_size
+        self._tripwire = tripwire
+
+    def chunks(self):
+        emitted = 0
+        for off in range(0, len(self._content), self._chunk_size):
+            if self._tripwire is not None and emitted > self._tripwire:
+                raise AssertionError("chunks() read past the ceiling — abort did not fire")
+            piece = self._content[off : off + self._chunk_size]
+            emitted += len(piece)
+            yield piece
+
+    def readall(self):  # pragma: no cover - present for parity, not used here
+        return self._content
+
+
 class _FakeBlobClient:
-    def __init__(self, content, fail_times=0):
+    def __init__(self, content, fail_times=0, downloader_factory=None):
         self._content = content
         self._fail_times = fail_times
         self._attempts = 0
+        self._downloader_factory = downloader_factory
 
     def download_blob(self, timeout=None):
         self._attempts += 1
         if self._attempts <= self._fail_times:
             raise TimeoutError("transient transport error")
+        if self._downloader_factory is not None:
+            return self._downloader_factory(self._content)
         return _FakeDownloader(self._content)
 
 
@@ -71,6 +100,7 @@ class _FakeContainerClient:
         self._pages = pages
         self._blob_contents = blob_contents or {}
         self._fail_map = {}
+        self._downloader_factory_map = {}
 
     def list_blobs(self):
         return _FakeBlobList(self._pages)
@@ -78,8 +108,15 @@ class _FakeContainerClient:
     def set_fail_times(self, name, n):
         self._fail_map[name] = n
 
+    def set_downloader_factory(self, name, factory):
+        self._downloader_factory_map[name] = factory
+
     def get_blob_client(self, name):
-        return _FakeBlobClient(self._blob_contents.get(name, b"%PDF-default"), self._fail_map.get(name, 0))
+        return _FakeBlobClient(
+            self._blob_contents.get(name, b"%PDF-default"),
+            self._fail_map.get(name, 0),
+            self._downloader_factory_map.get(name),
+        )
 
 
 def _connector(pages, blob_contents=None):
@@ -161,6 +198,58 @@ def test_fetch_retries_transient_then_succeeds():
     item = next(iter(conn.enumerate()))
     cfile = conn.fetch(item)
     assert cfile.filename == "a.pdf"
+
+
+def test_fetch_chunked_downloader_happy_path():
+    """A downloader exposing chunks() is read chunk-by-chunk and reassembled."""
+    pages = [[_FakeBlobItem("a.pdf", 8)]]
+    conn, client = _connector(pages, blob_contents={"a.pdf": b"%PDF-streamed-ok"})
+    client.set_downloader_factory("a.pdf", lambda c: _ChunkedDownloader(c, chunk_size=4))
+    item = next(iter(conn.enumerate()))
+    cfile = conn.fetch(item)
+    import asyncio
+
+    assert asyncio.run(cfile.read()) == b"%PDF-streamed-ok"
+
+
+# ---------------------------------------------------------------------------
+# L-Conn3 — size-less blob: ceiling enforced DURING the chunked download
+# ---------------------------------------------------------------------------
+
+
+def test_enumerate_yields_size_less_blob():
+    """A blob with size=None is yielded (not skipped at enumerate)."""
+    pages = [[_FakeBlobItem("a.pdf", None)]]
+    conn, _ = _connector(pages)
+    items = list(conn.enumerate())
+    assert len(items) == 1
+    assert items[0].size is None
+
+
+def test_fetch_aborts_size_less_oversized_blob_mid_stream():
+    """A size-less blob exceeding 100 MB aborts DURING the chunked download.
+
+    The fake downloader's chunks() raises if read past the ceiling, so the test
+    fails unless the running byte counter aborts the transfer before the whole
+    body is buffered (L-Conn3). The over-ceiling abort is a ConnectorError and
+    must NOT be retried as a transient transport error.
+    """
+    # Content larger than the ceiling; emitted in 8 MB chunks with a tripwire.
+    oversized = b"%PDF" + b"\x00" * (MAX_FILE_BYTES + 8 * 1024 * 1024)
+    pages = [[_FakeBlobItem("big.pdf", None)]]  # size unknown → not skipped at enumerate
+    conn, client = _connector(pages, blob_contents={"big.pdf": oversized})
+    client.set_downloader_factory(
+        "big.pdf",
+        lambda c: _ChunkedDownloader(
+            c, chunk_size=8 * 1024 * 1024, tripwire=MAX_FILE_BYTES + 8 * 1024 * 1024
+        ),
+    )
+    item = next(iter(conn.enumerate()))
+    assert item.size is None
+    from connectors.core import ConnectorError
+
+    with pytest.raises(ConnectorError, match="100 MB"):
+        conn.fetch(item)
 
 
 # ---------------------------------------------------------------------------

@@ -284,10 +284,12 @@ class SharePointConnector:
         """Download the COMPLETE bytes for one item, then validate the PDF magic.
 
         Downloads via the item-id `/content` endpoint (Graph 302-redirects to a
-        transient pre-authorized URL; httpx follows it). Uses the shared
-        timeout + 429/Retry-After-honoring backoff. Size is re-validated against
-        the 100 MB ceiling (defense in depth — the bulk loop bypasses the
-        per-request route guard). PDF magic bytes (%PDF) are validated AFTER
+        transient pre-authorized URL; httpx follows it) by STREAMING the body
+        and accumulating into a running byte counter. The 100 MB ceiling is
+        enforced DURING the download (L-Conn3): if the running total crosses
+        MAX_FILE_BYTES the stream is aborted immediately, so a size-less item
+        (Graph omits `size`) can never buffer an unbounded body into memory
+        before the check. PDF magic bytes (%PDF) are validated AFTER the full
         download so a partial/interrupted read cannot feed a corrupt PDF to
         Document Intelligence — that RAISES NotAPdfError.
         """
@@ -296,13 +298,66 @@ class SharePointConnector:
             raise ConnectorError(f"SharePoint item {item.source_path!r} exceeds the 100 MB per-file ceiling")
 
         url = f"{_GRAPH_BASE}/drives/{self.drive_id}/items/{item.identity}/content"
-        response = self._request_with_backoff("GET", url)
-        content = response.content
-
-        if len(content) > MAX_FILE_BYTES:
-            raise ConnectorError(f"SharePoint item {item.source_path!r} exceeds the 100 MB per-file ceiling")
+        content = self._stream_download_with_backoff(url, item.source_path)
 
         # Post-download integrity gate. Raises NotAPdfError if not a real PDF.
         validate_pdf_magic(content)
 
         return ConnectorFile(filename=item.filename, content=content)
+
+    def _stream_download_with_backoff(self, url: str, source_path: str) -> bytes:
+        """Stream one Graph download, enforcing the size ceiling mid-stream.
+
+        Mirrors ``_request_with_backoff`` retry policy (429/Retry-After + 5xx +
+        transport errors) but consumes the body via ``iter_bytes()`` with a
+        running counter, so the 100 MB ceiling aborts the transfer the moment it
+        is crossed rather than after buffering the whole body. The streamed
+        response is always closed (context manager) even on an early abort.
+        Response bodies/headers are NEVER logged (may carry tokens).
+        """
+        last_exc: Exception | None = None
+        for attempt in range(_MAX_RETRIES):
+            try:
+                with self._client.stream("GET", url) as response:
+                    if response.status_code == 429 or response.status_code >= 500:
+                        if attempt == _MAX_RETRIES - 1:
+                            raise ConnectorError(
+                                f"Graph request returned {response.status_code} after {_MAX_RETRIES} attempts"
+                            )
+                        delay = self._retry_delay(response, attempt)
+                        log_event(
+                            logger,
+                            "connector_graph_throttled",
+                            request_id=self.run_id,
+                            level=logging.WARNING,
+                            source_type=self.source_type,
+                            bot_tag=self.bot_tag,
+                            status_code=response.status_code,
+                            attempt=attempt + 1,
+                            backoff_seconds=delay,
+                        )
+                        self._sleep(delay)
+                        continue
+
+                    if response.status_code >= 400:
+                        # Non-retryable client error — do not echo the body.
+                        raise ConnectorError(f"Graph request failed with status {response.status_code}")
+
+                    buf = bytearray()
+                    for chunk in response.iter_bytes():
+                        buf.extend(chunk)
+                        if len(buf) > MAX_FILE_BYTES:
+                            # Abort mid-stream; the `with` closes the connection.
+                            raise ConnectorError(
+                                f"SharePoint item {source_path!r} exceeds the 100 MB per-file ceiling"
+                            )
+                    return bytes(buf)
+            except httpx.HTTPError as exc:
+                last_exc = exc
+                if attempt == _MAX_RETRIES - 1:
+                    raise ConnectorError(f"Graph request failed after {_MAX_RETRIES} attempts") from exc
+                self._sleep(self._exp_backoff(attempt))
+                continue
+
+        # pragma: no cover - loop always returns or raises above
+        raise ConnectorError("Graph request failed") from last_exc
