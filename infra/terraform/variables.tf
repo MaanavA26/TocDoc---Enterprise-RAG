@@ -116,12 +116,24 @@ variable "disable_local_auth" {
   default     = false
 }
 
+variable "enable_app_insights_tracing" {
+  description = <<-EOT
+    Inject APPLICATIONINSIGHTS_CONNECTION_STRING (from the provisioned App
+    Insights resource) into both Container Apps, enabling the Azure Monitor
+    trace exporter in the service code. Defaults to false, mirroring the Bicep
+    'enableAppInsightsTracing' param default. App Insights is always provisioned;
+    this only controls whether the apps are wired to emit traces to it.
+  EOT
+  type        = bool
+  default     = false
+}
+
 variable "allowed_ip_ranges" {
   description = <<-EOT
     Optional list of public IP ranges (CIDR) permitted to reach the data-plane
     services. Empty (default) preserves current behavior (public network access
     enabled, no IP filter). When non-empty, an IP allow-list is applied to
-    Cognitive Search and the Cognitive Services accounts.
+    Cognitive Search only.
   EOT
   type        = list(string)
   default     = []
