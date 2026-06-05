@@ -86,3 +86,76 @@ class QnAAnswer(BaseModel):
     def citations(self) -> dict[str, str]:
         """The citation mapping as a plain ``{filename: filepath}`` dict."""
         return self.citation.root
+
+
+# ---------------------------------------------------------------------------
+# Admin API (read-only) — mirrors services/ingestion/admin/models.py
+# ---------------------------------------------------------------------------
+#
+# Standalone copies of the read-only admin response shapes. As with QnAAnswer,
+# these use ``extra="ignore"`` so the SDK tolerates and drops forward-compatible
+# keys the server may add, instead of failing validation.
+
+
+class DocumentSummary(BaseModel):
+    """One row in the document list — aggregated from chunk metadata.
+
+    Nullable fields reflect that older indexed chunks may lack metadata added
+    in later ingestion revisions.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    document_id: str
+    source_path: str | None = None
+    source_type: str | None = None
+    fr_tag: str | None = None
+    chunk_count: int = Field(ge=0)
+    first_ingested_at: str | None = None
+    last_ingested_at: str | None = None
+
+
+class DocumentListResponse(BaseModel):
+    """Typed body for ``GET /admin/documents``."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    bot_tag: str
+    count: int = Field(ge=0)
+    documents: list[DocumentSummary]
+
+
+class ChunkSample(BaseModel):
+    """A small per-chunk payload returned in the document detail response."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    chunk_index: int | None = None
+
+
+class DocumentDetailResponse(BaseModel):
+    """Typed body for ``GET /admin/documents/{document_id}``."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    bot_tag: str
+    document_id: str
+    source_path: str | None = None
+    source_type: str | None = None
+    fr_tag: str | None = None
+    chunk_count: int = Field(ge=0)
+    ingestion_timestamps: list[str] = Field(default_factory=list)
+    sample_chunks: list[ChunkSample] = Field(default_factory=list)
+
+
+class IndexStatsResponse(BaseModel):
+    """Typed body for ``GET /admin/index/stats``."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    bot_tag: str
+    document_count: int = Field(ge=0)
+    chunk_count: int = Field(ge=0)
+    source_types: dict[str, int] = Field(default_factory=dict)
+    fr_modes: dict[str, int] = Field(default_factory=dict)
