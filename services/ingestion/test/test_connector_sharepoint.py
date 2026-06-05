@@ -220,6 +220,75 @@ def test_fetch_honors_429_retry_after():
 
 
 # ---------------------------------------------------------------------------
+# L-Conn3 — size-less item: ceiling enforced DURING the streamed download
+# ---------------------------------------------------------------------------
+
+
+def _file_entry_no_size(item_id, name):
+    """A driveItem entry WITHOUT a `size` facet (Graph occasionally omits it)."""
+    return {"id": item_id, "name": name, "file": {}, "cTag": "ctag-x"}
+
+
+def test_enumerate_yields_size_less_item():
+    """A driveItem with no `size` is yielded with size=None (not skipped)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"value": [_file_entry_no_size("1", "a.pdf")]})
+
+    conn, _ = _connector_with_handler(handler)
+    items = list(conn.enumerate())
+    assert len(items) == 1
+    assert items[0].size is None
+
+
+def test_fetch_aborts_size_less_oversized_item_mid_stream():
+    """A size-less item whose body exceeds 100 MB aborts DURING the stream.
+
+    The stream is a generator that raises if read past the ceiling, proving the
+    download is aborted by the running byte counter BEFORE the whole body is
+    buffered into memory (L-Conn3) — not after a `len()` check on a fully
+    buffered body.
+    """
+    from connectors.core import MAX_FILE_BYTES
+
+    chunk = b"%" + b"A" * (8 * 1024 * 1024 - 1)  # 8 MB chunks; first carries %PDF-ish lead
+
+    def body_generator():
+        emitted = 0
+        # Emit enough chunks to cross the ceiling, then a tripwire chunk that
+        # must NEVER be requested if the abort fires on time.
+        while emitted <= MAX_FILE_BYTES + len(chunk):
+            yield chunk
+            emitted += len(chunk)
+        raise AssertionError("stream read past the size ceiling — abort did not fire")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url).endswith("/content"):
+            return httpx.Response(200, stream=_IterStream(body_generator()))
+        return httpx.Response(200, json={"value": [_file_entry_no_size("1", "big.pdf")]})
+
+    conn, _ = _connector_with_handler(handler)
+    item = next(iter(conn.enumerate()))
+    assert item.size is None
+    with pytest.raises(ConnectorError, match="100 MB"):
+        conn.fetch(item)
+
+
+class _IterStream(httpx.SyncByteStream):
+    """An httpx SyncByteStream backed by a byte-chunk generator (for streaming)."""
+
+    def __init__(self, gen):
+        self._gen = gen
+
+    def __iter__(self):
+        yield from self._gen
+
+    def close(self):
+        # Closing the generator is enough; nothing else to release.
+        self._gen.close()
+
+
+# ---------------------------------------------------------------------------
 # auth / config
 # ---------------------------------------------------------------------------
 

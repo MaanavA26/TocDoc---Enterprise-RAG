@@ -25,7 +25,7 @@ from connectors import (  # noqa: E402
     SourceItem,
     run_connector,
 )
-from connectors.core import ConnectorError  # noqa: E402
+from connectors.core import ConnectorError, ConnectorRunError  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Test doubles
@@ -157,7 +157,12 @@ async def test_driver_rerun_is_idempotent():
 
 @pytest.mark.asyncio
 async def test_driver_propagates_errors_not_swallowed():
-    """A failing upload must propagate (P0-6), not be silently swallowed."""
+    """A failing upload must propagate (P0-6), not be silently swallowed.
+
+    The item failure is wrapped in a ConnectorRunError (L-Conn2) carrying the
+    partial-progress count, with the original exception chained as __cause__ so
+    the underlying error class is never hidden.
+    """
     cfg = ConnectorConfig(bot_tag="tenant-x")
     conn = FakeConnector(cfg, [("a.pdf", "fake://store/a.pdf", b"%PDF-a")])
 
@@ -165,5 +170,10 @@ async def test_driver_propagates_errors_not_swallowed():
         async def upload(self, *a, **k):
             raise RuntimeError("boom")
 
-    with pytest.raises(RuntimeError, match="boom"):
+    with pytest.raises(ConnectorRunError) as excinfo:
         await run_connector(conn, _BoomRag(), run_id="run-x")
+    # Nothing was successfully processed before the first item failed.
+    assert excinfo.value.processed_count == 0
+    # Original exception is preserved, not hidden.
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+    assert str(excinfo.value.__cause__) == "boom"

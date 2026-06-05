@@ -22,6 +22,7 @@ import asyncio
 import contextlib
 import logging
 import re
+import threading
 from collections.abc import Iterator
 from typing import Protocol, runtime_checkable
 
@@ -70,6 +71,28 @@ class NotAPdfError(ConnectorError):
     Raised in fetch() — a partial/interrupted download or a misfiltered item
     must not feed a corrupt PDF to Document Intelligence.
     """
+
+
+class ConnectorRunError(ConnectorError):
+    """A connector run aborted mid-flight on an item failure (L-Conn2).
+
+    ``run_connector`` is fail-fast: the first failing item aborts the run. The
+    original implementation re-raised the bare item exception, so the running
+    ``processed`` count (e.g. 199/200 already-ingested files) was lost — the
+    background driver then recorded ``processed_count=0``, misreporting a
+    near-complete run as zero progress.
+
+    This wrapper carries that partial-progress accounting across the abort
+    boundary so a consumer can record an accurate count. The triggering
+    exception is chained (``raise ... from exc``) and exposed as ``__cause__``
+    so the underlying error class is never hidden. The message stays SAFE — no
+    secrets, no raw exception text, no source content.
+    """
+
+    def __init__(self, *, processed_count: int, failed_count: int = 1) -> None:
+        super().__init__(f"Connector run aborted after {processed_count} item(s) ingested")
+        self.processed_count = processed_count
+        self.failed_count = failed_count
 
 
 # ---------------------------------------------------------------------------
@@ -230,27 +253,79 @@ class ConnectorConfig:
 
 
 # ---------------------------------------------------------------------------
-# Per-(source_path, bot_tag) single-flight lock
+# Per-(source_path, bot_tag) single-flight lock (H4 / L-Conn1)
 # ---------------------------------------------------------------------------
 
 # The driver's delete_by_source_path + upload window is non-atomic; two
-# overlapping runs on the same (source_path, bot_tag) can race. ADR open-Q1
-# ratifies an in-process asyncio lock for v1 (single-replica ingestion). A
-# distributed lock (e.g. a Blob lease) is a documented follow-up if ingestion
-# goes multi-replica.
-_locks: dict[tuple[str, str], asyncio.Lock] = {}
-_locks_guard = asyncio.Lock()
+# overlapping runs on the same (source_path, bot_tag) MUST be serialized or a
+# run A `delete` can interleave run B `upload`, leaving a tenant's chunks
+# deleted-but-not-reuploaded.
+#
+# H4: the previous implementation used a module-level ``asyncio.Lock``. But the
+# trigger (`admin/routes.py:_run_connector_background`) drives each run via
+# ``asyncio.run(...)`` on a SEPARATE Starlette threadpool THREAD, each with its
+# own fresh event loop. ``asyncio.Lock`` is not thread-safe and binds to one
+# loop, so it provided NO mutual exclusion across runs (and raises on 3.13 when
+# waiters bind to a different loop). We serialize at the layer that actually
+# crosses threads/loops: a ``threading.Lock``-keyed registry, mirroring the
+# thread-safe pattern in ``run_status.py``. A distributed lock (e.g. a Blob
+# lease) remains the documented follow-up if ingestion goes multi-replica.
+#
+# L-Conn1: the registry is bounded by DROP-WHEN-IDLE refcounting rather than an
+# LRU cap. LRU eviction is unsafe for locks — evicting a key whose lock is
+# currently held/awaited would let the next run mint a fresh lock and run
+# concurrently with the holder, silently re-breaking exclusion. Instead each
+# acquirer increments a waiter count under the guard; the last releaser (count
+# back to 0) deletes the key. The registry is thus bounded to the number of
+# CONCURRENTLY-ACTIVE keys, never growing with the total corpus size.
+
+_locks_guard = threading.Lock()
+# key -> [lock, waiter_count]. The waiter_count is guarded by _locks_guard, not
+# by the per-key lock, so it stays consistent across acquire/release.
+_locks: dict[tuple[str, str], list] = {}
 
 
-async def _single_flight(source_path: str, bot_tag: str) -> asyncio.Lock:
-    """Return the process-wide lock for one (source_path, bot_tag) key."""
+def _acquire_single_flight(source_path: str, bot_tag: str) -> threading.Lock:
+    """Register interest in one (source_path, bot_tag) key and return its lock.
+
+    Increments the key's waiter count under the registry guard, creating the
+    entry on first interest. The CALLER must then ``lock.acquire()`` (blocking)
+    and pair every call with exactly one ``_release_single_flight`` in a
+    ``finally`` — even if the acquire is interrupted — so the refcount never
+    leaks and the key is dropped once idle.
+    """
     key = (source_path, bot_tag)
-    async with _locks_guard:
-        lock = _locks.get(key)
-        if lock is None:
-            lock = asyncio.Lock()
-            _locks[key] = lock
-        return lock
+    with _locks_guard:
+        entry = _locks.get(key)
+        if entry is None:
+            entry = [threading.Lock(), 0]
+            _locks[key] = entry
+        entry[1] += 1
+        return entry[0]
+
+
+def _release_single_flight(source_path: str, bot_tag: str) -> None:
+    """Drop one waiter's interest; delete the key's lock once nobody wants it.
+
+    Decrements the waiter count under the registry guard. When it reaches zero
+    the lock is no longer held OR awaited by anyone, so removing it cannot race
+    a holder — the next interested run simply recreates a fresh, uncontended
+    lock. This is the bound: idle keys leave no residue.
+    """
+    key = (source_path, bot_tag)
+    with _locks_guard:
+        entry = _locks.get(key)
+        if entry is None:  # pragma: no cover - defensive; release always paired
+            return
+        entry[1] -= 1
+        if entry[1] <= 0:
+            del _locks[key]
+
+
+def _active_lock_keys() -> int:
+    """Number of keys currently tracked in the registry (test/inspection hook)."""
+    with _locks_guard:
+        return len(_locks)
 
 
 # ---------------------------------------------------------------------------
@@ -303,10 +378,21 @@ async def run_connector(connector: SourceConnector, rag_instance, *, run_id: str
     processed = 0
     items: list[str] = []
     for item in connector.enumerate():
-        cfile = connector.fetch(item)
-        lock = await _single_flight(item.source_path, connector.bot_tag)
-        async with lock:
+        # Register interest in the per-key lock BEFORE acquiring so the registry
+        # never drops a key another run is waiting on (L-Conn1 refcounting).
+        lock = _acquire_single_flight(item.source_path, connector.bot_tag)
+        try:
+            # Acquire the cross-thread lock OFF the event loop so this run's
+            # loop stays responsive while it waits for a concurrent run on the
+            # same key to finish. Holding it across the delete→upload await is
+            # the whole point: it serializes that non-atomic window across the
+            # separate loops/threads each run executes on (H4).
+            await asyncio.to_thread(lock.acquire)
             try:
+                # fetch() is inside the try so a download failure is diagnosable
+                # (emits connector_item_failed with source_path) instead of
+                # aborting the run with no per-item record (L-Conn2).
+                cfile = connector.fetch(item)
                 # Edited-file cleanup BEFORE upload: a changed file gets a new
                 # document_id, so the document_id-keyed stale-delete inside
                 # upload() would miss the old chunks. This removes them first.
@@ -319,19 +405,29 @@ async def run_connector(connector: SourceConnector, rag_instance, *, run_id: str
                     source_type=connector.source_type,
                     request_id=run_id,
                 )
-            except Exception as exc:
-                log_event(
-                    logger,
-                    "connector_item_failed",
-                    request_id=run_id,
-                    level=logging.ERROR,
-                    source_type=connector.source_type,
-                    bot_tag=connector.bot_tag,
-                    source_path=item.source_path,
-                    error_class=type(exc).__name__,
-                    safe_message="Connector item ingestion failed",
-                )
+            finally:
+                lock.release()
+        except Exception as exc:
+            log_event(
+                logger,
+                "connector_item_failed",
+                request_id=run_id,
+                level=logging.ERROR,
+                source_type=connector.source_type,
+                bot_tag=connector.bot_tag,
+                source_path=item.source_path,
+                error_class=type(exc).__name__,
+                safe_message="Connector item ingestion failed",
+            )
+            # Carry the partial-progress count across the abort boundary so the
+            # driver records an accurate processed_count instead of 0 (L-Conn2).
+            # A ConnectorRunError just re-states existing accounting — pass it
+            # through; any other item failure is wrapped (cause chained).
+            if isinstance(exc, ConnectorRunError):
                 raise
+            raise ConnectorRunError(processed_count=processed) from exc
+        finally:
+            _release_single_flight(item.source_path, connector.bot_tag)
         processed += 1
         items.append(item.source_path)
         log_event(
