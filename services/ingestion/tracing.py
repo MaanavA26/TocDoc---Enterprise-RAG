@@ -20,14 +20,27 @@ that tracing is a **strict no-op unless** the environment variable
 Security / privacy:
 - The connection string is read from the environment ONLY and is never logged.
   It carries an InstrumentationKey, so it is treated like a secret.
+- This module exports SPANS (traces) ONLY. `configure_azure_monitor` is called
+  with `disable_logging=True` and `disable_metrics=True` so the Azure Monitor
+  logging and metrics pipelines are NOT installed. That matters because the
+  default logging pipeline attaches a `LoggingHandler` to the ROOT logger and
+  would ship raw application log records — which carry the absolute server
+  `filepath`, the tenant `bot_tag`, and full tracebacks (`exc_info=True`) — to
+  App Insights through a SECOND, completely un-redacted channel, defeating the
+  spans-only redaction below. Keeping logs/metrics off means the span hooks are
+  the only thing that reaches App Insights, so the redaction here is the whole
+  egress story. (If a logs export is ever wanted, route it through a dedicated,
+  scrubbed logger via the `logger_name` kwarg — never the root logger.)
 - We do not add request/response bodies or headers to spans beyond the
   request_id correlation attribute. The default ASGI instrumentation records
   the request URL on the server span — and `/upload` carries its two most
   sensitive inputs (`filepath`, an absolute server path, and `bot_tag`, the
   tenant id) as QUERY parameters — so `_server_request_hook` overwrites the
-  query-bearing `http.url` attribute with the path-only URL. NO request query
-  data lands on any span. (`http.target` is already path-only on the pinned
-  instrumentation; we redact `http.url` defensively and verify in tests.)
+  query-bearing `http.url` / `url.full` attributes with the path-only URL and
+  clears `url.query`. NO request query data lands on any span, under both the
+  default and the stable HTTP semconv (`OTEL_SEMCONV_STABILITY_OPT_IN=http`)
+  attribute namings. (`http.target` is already path-only on the pinned
+  instrumentation; we redact the URL attributes defensively and verify in tests.)
 
 Kept separate from `observability.py` deliberately: that module is duplicated
 verbatim in `services/qna/src/core/observability.py` and must stay in sync, so
@@ -57,6 +70,13 @@ _REQUEST_ID_HEADER = b"x-request-id"
 # `http.target` / `url.path` are already path-only on the pinned wheel.
 _QUERY_BEARING_SPAN_ATTRIBUTES = ("http.url", "url.full")
 
+# Under the stable HTTP semconv opt-in (`OTEL_SEMCONV_STABILITY_OPT_IN=http`),
+# the ASGI instrumentation records the raw query string in a SEPARATE
+# `url.query` attribute (NOT part of the full-URL attributes above). It is
+# cleared to an empty string rather than added to the tuple above — that tuple
+# is assigned the path-only full URL, which would be semantically wrong here.
+_QUERY_STRING_SPAN_ATTRIBUTE = "url.query"
+
 logger = logging.getLogger("observability.tracing")
 
 # Module-level guard so a double call (e.g. tests, or an accidental second
@@ -79,9 +99,12 @@ def _redact_query_string(span: Any, scope: dict) -> None:
     The default HTTP instrumentation records the full request URL (with the
     query string) as `http.url` / `url.full`. `/upload` carries `filepath` and
     `bot_tag` as query params, so we recompute a path-only URL from the ASGI
-    scope and overwrite those attributes. `set_attribute` with the same key
-    replaces the value, and this hook runs after the instrumentation has set the
-    URL but before the span ends, so the redaction sticks on the exported span.
+    scope and overwrite those attributes. Under the stable HTTP semconv opt-in
+    the instrumentation ALSO records the raw query string as a separate
+    `url.query` attribute, so we clear that to an empty string too. `set_attribute`
+    with the same key replaces the value, and this hook runs after the
+    instrumentation has set the URL but before the span ends, so the redaction
+    sticks on the exported span.
     """
     scheme = scope.get("scheme", "http")
     path = scope.get("path", "") or ""
@@ -100,6 +123,11 @@ def _redact_query_string(span: Any, scope: dict) -> None:
         # Overwrite unconditionally: the path-only URL is always safe, and we do
         # not depend on which attribute the installed wheel happens to populate.
         span.set_attribute(attr, safe_url)
+    # Stable-semconv mode (`OTEL_SEMCONV_STABILITY_OPT_IN=http`/`http/dup`) records
+    # the raw query string in a separate `url.query` attribute. Clear it to empty
+    # so `filepath`/`bot_tag` cannot leak there either. Set separately (NOT via the
+    # tuple above) because that path assigns the full path-only URL, not a query.
+    span.set_attribute(_QUERY_STRING_SPAN_ATTRIBUTE, "")
 
 
 def _server_request_hook(span: Any, scope: dict) -> None:
@@ -212,7 +240,14 @@ def configure_tracing(app: Any) -> bool:
 
     # The connection string is read from the env by configure_azure_monitor
     # itself; we pass nothing secret here and never log its value.
-    configure_azure_monitor()
+    #
+    # SPANS-ONLY: disable the logging and metrics pipelines. The default logging
+    # pipeline attaches a LoggingHandler to the ROOT logger and would ship raw app
+    # log records (carrying the absolute server `filepath`, the tenant `bot_tag`,
+    # and full `exc_info` tracebacks) to App Insights through an UN-redacted
+    # channel — defeating the span redaction above. Only redacted spans (traces)
+    # are exported.
+    configure_azure_monitor(disable_logging=True, disable_metrics=True)
     FastAPIInstrumentor.instrument_app(app, server_request_hook=_server_request_hook)
 
     _configured = True

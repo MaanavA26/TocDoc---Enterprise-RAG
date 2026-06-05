@@ -139,6 +139,40 @@ class TestEnabled:
         assert "server_request_hook" in kwargs
         assert kwargs["server_request_hook"] is fresh_tracing._server_request_hook
 
+    def test_logs_and_metrics_pipelines_disabled(self, fresh_tracing, app, monkeypatch):
+        """configure_azure_monitor must be called with logs+metrics disabled.
+
+        The default logging pipeline attaches a LoggingHandler to the ROOT
+        logger, which would ship raw app log records (carrying the absolute
+        server `filepath`, the tenant `bot_tag`, and full `exc_info` tracebacks)
+        to App Insights through a second, UN-redacted channel — defeating the
+        spans-only redaction. We export SPANS only, so the helper must be invoked
+        with `disable_logging=True` / `disable_metrics=True`. Capturing the
+        kwargs on the (mocked) helper is the level at which this is verifiable
+        without a live Azure Monitor / network setup.
+        """
+        monkeypatch.setenv(_CONN_ENV, _FAKE_CONN)
+
+        captured = {}
+
+        import azure.monitor.opentelemetry as amo
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+        def fake_configure(*args, **kwargs):
+            captured.update(kwargs)
+
+        monkeypatch.setattr(amo, "configure_azure_monitor", fake_configure)
+        monkeypatch.setattr(FastAPIInstrumentor, "instrument_app", staticmethod(lambda *a, **k: None))
+
+        assert fresh_tracing.configure_tracing(app) is True
+        assert captured.get("disable_logging") is True, (
+            "the Azure Monitor LOGGING pipeline must be disabled so raw app logs "
+            "(filepath/bot_tag/tracebacks) are not shipped to App Insights"
+        )
+        assert captured.get("disable_metrics") is True, (
+            "the metrics pipeline must be disabled (spans-only export)"
+        )
+
     def test_connection_string_never_logged(self, fresh_tracing, app, monkeypatch, caplog):
         monkeypatch.setenv(_CONN_ENV, _FAKE_CONN)
         caplog.set_level(logging.DEBUG)
@@ -329,6 +363,32 @@ class TestServerRequestHook:
         # The scrub overwrote the URL attributes with a path-only value (no query).
         for v in span.attributes.values():
             assert "?" not in str(v)
+
+    def test_clears_url_query_for_stable_semconv(self, fresh_tracing, monkeypatch):
+        # Under the stable HTTP semconv opt-in (OTEL_SEMCONV_STABILITY_OPT_IN=http)
+        # the ASGI instrumentation records the raw query string in a SEPARATE
+        # `url.query` attribute (legacy `http.url`/`url.full` are full-URL attrs).
+        # The hook must clear `url.query` to empty so filepath/bot_tag cannot leak
+        # there. The hook scrubs unconditionally; the env var only documents the
+        # mode in which `url.query` would otherwise be populated upstream.
+        monkeypatch.setenv("OTEL_SEMCONV_STABILITY_OPT_IN", "http")
+        span = _FakeSpan()
+        # Simulate the instrumentation having set url.query before the hook fires.
+        span.set_attribute("url.query", "filepath=/srv/secret/path.docx&bot_tag=tenant42")
+        scope = {
+            "headers": [(b"content-type", b"application/json")],
+            "scheme": "http",
+            "path": "/upload",
+            "server": ("testserver", 80),
+        }
+        fresh_tracing._server_request_hook(span, scope)
+        assert span.attributes.get("url.query") == "", (
+            "url.query must be cleared so the query string never leaks"
+        )
+        # And nothing anywhere retains the sensitive query data.
+        for v in span.attributes.values():
+            sval = str(v)
+            assert "tenant42" not in sval and "/srv/secret/path.docx" not in sval
 
     def test_noop_when_span_not_recording(self, fresh_tracing):
         span = _FakeSpan(recording=False)
