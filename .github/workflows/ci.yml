@@ -35,7 +35,7 @@ permissions:
   contents: read
 
 env:
-  PYTHON_VERSION: "3.10"
+  PYTHON_VERSION: "3.12"
   RUFF_VERSION: "0.15.7"
   BANDIT_VERSION: "1.7.10"
   PIP_AUDIT_VERSION: "2.7.3"
