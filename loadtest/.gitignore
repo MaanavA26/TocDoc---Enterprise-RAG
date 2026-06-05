@@ -1,0 +1,9 @@
+# Local virtualenv and Locust run artifacts — never committed.
+.venv/
+results/
+*_stats.csv
+*_stats_history.csv
+*_failures.csv
+*_exceptions.csv
+.pytest_cache/
+__pycache__/
