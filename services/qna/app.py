@@ -18,6 +18,7 @@ from src.core.errors import (
 from src.core.lifecycle import shutdown_event, startup_event
 from src.core.observability import RequestIDMiddleware
 from src.core.responses import QnASuccessResponse
+from src.core.tenant_binding import enforce_tenant_bot_tag_binding
 from src.utils.util import Payload, _as_turn
 
 # ---------------------------------------------------------------------------
@@ -138,8 +139,14 @@ async def health_check():
             }
         return {"status": "error", "qna_module": "missing generate_answer function"}
     except Exception as e:
-        # Keep shape stable for external monitors; surface error as string.
-        return {"status": "error", "qna_module": str(e)}
+        # Keep the {status, qna_module} shape stable for external monitors
+        # (this branch is still a 200 status report, not an error envelope).
+        # Do NOT echo `str(e)` — exception text can leak internal detail
+        # (CodeQL py/stack-trace-exposure, app.py:142). Log the exception
+        # class server-side and return a fixed, safe message — same pattern
+        # as the auth middleware (src/core/auth.py).
+        logger.error("Health check failed: %s", type(e).__name__)
+        return {"status": "error", "qna_module": "unavailable"}
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +216,15 @@ async def custom_rag_qna(payload: Payload, request: Request):
         raise_api_error(ApiErrorCode.INVALID_REQUEST, "Bot tag cannot be empty", 400)
     if not fr_tag:
         raise_api_error(ApiErrorCode.INVALID_REQUEST, "FR tag cannot be empty", 400)
+
+    # Within-tenant bot_tag<->tid binding guard (threat-model R1), DEFAULT-OFF.
+    # When QNA_ENFORCE_TENANT_BINDING is unset/falsy this is fully inert — zero
+    # behaviour change. When ON it validates the requested bot_tag against the
+    # allowlist for the token's validated `tid` and fails closed (envelope 403,
+    # no search) on any mismatch. Placed here — after the non-empty field checks
+    # and before the agent/legacy fork — so it guards both QnA paths and rejects
+    # before any retrieval. See src/core/tenant_binding.py.
+    enforce_tenant_bot_tag_binding(request, bot_tag)
 
     start = time.time()
 

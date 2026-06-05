@@ -360,6 +360,25 @@ def is_map_reduce_enabled() -> bool:
     return (os.getenv("QNA_AGENT_MAP_REDUCE") or "").strip().lower() in _TRUTHY
 
 
+def is_tenant_binding_enforced() -> bool:
+    """Whether within-tenant bot_tag<->tid binding is enforced (default OFF).
+
+    Addresses the threat-model **R1** gap: today a caller authenticated for
+    tenant ``T`` can pass any ``bot_tag`` in the request body, so they can
+    query another workspace's ``bot_tag`` that happens to live under the same
+    tenant. When this flag is OFF (default), behaviour is byte-for-byte
+    identical to today — the guard is fully inert and the map below is never
+    even parsed. When ON, the request-path guard validates the requested
+    ``bot_tag`` against an allowlist keyed by the token's ``tid`` and fails
+    closed on any mismatch / unmapped tid (see ``src/core/tenant_binding.py``).
+
+    Read live from the environment on every call so it is a no-redeploy
+    kill-switch and tests can toggle it with ``monkeypatch.setenv``. Parsed
+    explicitly so the literal string ``"false"`` is correctly falsy.
+    """
+    return (os.getenv("QNA_ENFORCE_TENANT_BINDING") or "").strip().lower() in _TRUTHY
+
+
 def is_agent_enabled() -> bool:
     """Whether the P3 LangGraph agentic layer handles ``/qna`` (default OFF).
 
