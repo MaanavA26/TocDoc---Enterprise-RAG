@@ -130,6 +130,35 @@ class TestHttpExceptionHandling:
         assert body["error"]["message"] == "Search index down"
 
 
+class TestFrameworkRoutingErrors:
+    """Framework-raised 404/405 must be ENVELOPED (registered on the Starlette
+    parent HTTPException, mirroring QnA). A handler keyed only on
+    fastapi.HTTPException would miss these (Starlette dispatches by exact class),
+    leaving a bare `{"detail": "Not Found"}` with no `error` envelope / code /
+    X-Request-ID."""
+
+    def test_unmatched_path_404_is_enveloped(self, client: TestClient):
+        r = client.get("/no-such-route-xyz")
+        assert r.status_code == 404
+        body = r.json()
+        # Enveloped, NOT Starlette's bare {"detail": "Not Found"}.
+        assert "error" in body
+        assert "detail" not in body
+        assert body["error"]["code"] == ApiErrorCode.NOT_FOUND
+        assert "X-Request-ID" in r.headers
+        assert body["error"]["request_id"] == r.headers["X-Request-ID"]
+
+    def test_wrong_method_405_is_enveloped(self, client: TestClient):
+        # /string-detail-400 is a GET route; POST → framework 405.
+        r = client.post("/string-detail-400")
+        assert r.status_code == 405
+        body = r.json()
+        assert "error" in body
+        assert "detail" not in body
+        assert body["error"]["code"] == ApiErrorCode.INVALID_REQUEST
+        assert body["error"]["request_id"] == r.headers["X-Request-ID"]
+
+
 class TestUnhandledException:
     def test_returns_500_envelope(self, client: TestClient):
         r = client.get("/unhandled")

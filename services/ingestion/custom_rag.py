@@ -492,53 +492,79 @@ class rag:
                 splits = text_splitter.split_text(docs_string)
                 end_time = time.time()
 
-                logger.info(f"Text split into {len(splits)} chunks in {end_time - start_time:.2f} seconds")
+                logger.info(
+                    f"Text split into {len(splits)} header section(s) in {end_time - start_time:.2f} seconds"
+                )
 
-                for i, chunk in enumerate(splits):
-                    logger.debug(f"Processing chunk {i + 1}/{len(splits)}")
-                    content = chunk.page_content
-
-                    if not content.strip():
-                        logger.debug(f"Skipping empty chunk {i + 1}")
+                # P0-5 / embedding-limit guard: MarkdownHeaderTextSplitter only
+                # splits at '#' header boundaries and applies NO secondary size
+                # split, so a header-less section (any DOCX/PPTX/TXT/HTML text, or
+                # a large .md with few headers) would otherwise be ONE unbounded
+                # chunk that exceeds the embedding model's input window and 500s
+                # the request. Run the same token-aware splitter the read branch
+                # uses over each section's content so no chunk is over-limit.
+                #
+                # A SINGLE running index across every sub-chunk keeps chunk IDs
+                # unique — a per-section index would collide IDs across sections
+                # and silently overwrite chunks in the index (breaks the P0-4
+                # deterministic-ID guarantee).
+                _chunk_max_tokens = _READ_MAX_TOKENS
+                _chunk_overlap_tokens = _READ_OVERLAP_TOKENS
+                chunk_index = 0
+                for section_i, section in enumerate(splits):
+                    section_content = section.page_content
+                    if not section_content.strip():
+                        logger.debug(f"Skipping empty section {section_i + 1}")
                         continue
 
-                    section_name = chunk.metadata.get("Header_1", "")
-                    logger.debug(f"Chunk {i + 1} - section: {section_name}, content length: {len(content)}")
+                    section_name = section.metadata.get("Header_1", "")
+                    sub_section_name = section.metadata.get("Header_2", "")
 
-                    # Get embedding for content
-                    stage = "embedding"
-                    logger.debug(f"Generating embedding for chunk {i + 1}")
-                    _emb_start = time.perf_counter()
-                    content_vector = await self.get_embedding(content)
-                    _embedding_latency_ms += (time.perf_counter() - _emb_start) * 1000
-                    _embedding_count += 1
-                    stage = "chunking"
-
-                    # Calculate token count
-                    token_count = await self.chunk_token(content)
-                    token_list.append(token_count)
-
-                    azure_docs.append(
-                        {
-                            "id": f"{tag}_{document_id}_{fr_mode}_{i:05d}",
-                            "bot_tag": tag,
-                            "fr_tag": f"fr_{fr_mode}",
-                            "filename": filename,
-                            "filepath": file_path,
-                            "chunk_size": str(token_count),
-                            "section_header": section_name,
-                            "sub_section": chunk.metadata.get("Header_2", ""),
-                            "source": filename,
-                            "content": content,
-                            "content_vector": content_vector,
-                            "document_id": document_id,
-                            "ingestion_timestamp": datetime.utcnow().isoformat() + "Z",
-                            "source_type": source_type,
-                            "source_path": file_path,
-                        }
+                    sub_chunks = await self._chunk_text_by_tokens(
+                        section_content, max_tokens=_READ_MAX_TOKENS, overlap=_READ_OVERLAP_TOKENS
                     )
 
-                    logger.debug(f"Chunk {i + 1} processed successfully")
+                    for content in sub_chunks:
+                        content = content.strip()
+                        if not content:
+                            continue
+
+                        logger.debug(f"Layout chunk {chunk_index} - section: {section_name}")
+
+                        # Get embedding for content
+                        stage = "embedding"
+                        _emb_start = time.perf_counter()
+                        content_vector = await self.get_embedding(content)
+                        _embedding_latency_ms += (time.perf_counter() - _emb_start) * 1000
+                        _embedding_count += 1
+                        stage = "chunking"
+
+                        # Calculate token count
+                        token_count = await self.chunk_token(content)
+                        token_list.append(token_count)
+
+                        azure_docs.append(
+                            {
+                                "id": f"{tag}_{document_id}_{fr_mode}_{chunk_index:05d}",
+                                "bot_tag": tag,
+                                "fr_tag": f"fr_{fr_mode}",
+                                "filename": filename,
+                                "filepath": file_path,
+                                "chunk_size": str(token_count),
+                                "section_header": section_name,
+                                "sub_section": sub_section_name,
+                                "source": filename,
+                                "content": content,
+                                "content_vector": content_vector,
+                                "document_id": document_id,
+                                "ingestion_timestamp": datetime.utcnow().isoformat() + "Z",
+                                "source_type": source_type,
+                                "source_path": file_path,
+                            }
+                        )
+
+                        logger.debug(f"Layout chunk {chunk_index} processed successfully")
+                        chunk_index += 1
 
             elif fr_mode == "read":
                 logger.info("Processing document in read mode with token-based splitting")
@@ -714,7 +740,18 @@ class rag:
                 # would zero out a document on a transient bad parse. Leave the
                 # existing chunks in place (self-healing on a good re-run).
                 logger.warning("No documents to upload; leaving existing chunks intact")
-                return "No documents to upload"
+                # Return a STRUCTURED status (not a bare success string) so the
+                # route can distinguish a real index write from a zero-chunk
+                # no-op. A whitespace-only .docx, all-markup HTML, or empty .txt
+                # parses to no usable text — reporting "successfully indexed" for
+                # it would tell the client a non-retrievable document is indexed.
+                return {
+                    "status": "empty",
+                    "filename": filename,
+                    "total_pages": total_pages,
+                    "total_chunks": 0,
+                    "detail": "No content extracted from document.",
+                }
 
         except Exception as e:
             logger.error(f"Error in upload process: {str(e)}", exc_info=True)

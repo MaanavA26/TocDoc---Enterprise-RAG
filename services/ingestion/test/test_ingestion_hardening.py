@@ -501,7 +501,11 @@ class TestUploadResultSurfacing:
 
         file = _BytesFile(b"%PDF-1.4 data", "doc.pdf")
         result = asyncio.run(instance.upload(file, "t1", "layout", "doc.pdf"))
-        assert result == "No documents to upload"
+        # An empty parse now returns a STRUCTURED status (not a bare success
+        # string) so the route can map it to a clear non-success response.
+        assert isinstance(result, dict)
+        assert result["status"] == "empty"
+        assert result["total_chunks"] == 0
         assert client.deleted == []  # prior chunks untouched
 
 

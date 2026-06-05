@@ -222,6 +222,83 @@ class _FakeSpan:
         self.attributes[key] = value
 
 
+class TestSpanScrubAndCorrelation:
+    """Real-instrumentation span capture: the prior tests MOCK instrument_app,
+    so they cannot observe a real span's attributes. These stand up an in-memory
+    span exporter + the REAL FastAPIInstrumentor so we can assert on the exported
+    span: (1) no query string leaks onto any attribute, (2) the generated
+    request_id correlates spans with logs even when no inbound header is sent.
+    """
+
+    def _capture_spans(self, fresh_tracing, monkeypatch, *, path, headers=None):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from opentelemetry import trace
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+            InMemorySpanExporter,
+        )
+
+        provider = TracerProvider()
+        exporter = InMemorySpanExporter()
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
+        # set_tracer_provider only takes effect once per process; override the
+        # internal so each test reads a fresh exporter regardless of call order.
+        monkeypatch.setattr(trace, "_TRACER_PROVIDER", provider, raising=False)
+        trace._TRACER_PROVIDER = provider
+
+        monkeypatch.setenv(_CONN_ENV, _FAKE_CONN)
+        import azure.monitor.opentelemetry as amo
+
+        monkeypatch.setattr(amo, "configure_azure_monitor", lambda *a, **k: None)
+
+        from observability import RequestIDMiddleware
+
+        app = FastAPI()
+
+        @app.post("/upload")
+        def upload():
+            return {"ok": True}
+
+        # Mirror app.py wiring: span-stamp middleware INNER of RequestIDMiddleware.
+        fresh_tracing.install_request_id_span_middleware(app)
+        app.add_middleware(RequestIDMiddleware)
+        FastAPIInstrumentor.instrument_app(app, server_request_hook=fresh_tracing._server_request_hook)
+
+        try:
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(path, headers=headers or {})
+            server_span = next(s for s in exporter.get_finished_spans() if s.name == "POST /upload")
+            return server_span, resp
+        finally:
+            FastAPIInstrumentor.uninstrument_app(app)
+
+    def test_query_string_not_on_any_span_attribute(self, fresh_tracing, monkeypatch):
+        # filepath + bot_tag are the sensitive /upload query params.
+        span, _ = self._capture_spans(
+            fresh_tracing,
+            monkeypatch,
+            path="/upload?filepath=/srv/secret/path.docx&bot_tag=tenant42",
+        )
+        # No attribute value may contain ANY part of the query string.
+        for value in span.attributes.values():
+            sval = str(value)
+            assert "tenant42" not in sval, f"bot_tag leaked in {value!r}"
+            assert "/srv/secret/path.docx" not in sval, f"filepath leaked in {value!r}"
+            assert "filepath=" not in sval and "bot_tag=" not in sval
+
+    def test_request_id_on_span_for_generated_id_path(self, fresh_tracing, monkeypatch):
+        # NO inbound X-Request-ID header → RequestIDMiddleware GENERATES one.
+        # The span must still carry tocdoc.request_id, equal to the response
+        # header, so spans and logs join on the same id (the documented goal).
+        span, resp = self._capture_spans(fresh_tracing, monkeypatch, path="/upload?filepath=/x&bot_tag=t")
+        stamped = span.attributes.get("tocdoc.request_id")
+        assert stamped, "generated request_id must be stamped on the span"
+        assert stamped == resp.headers["X-Request-ID"]
+
+
 class TestServerRequestHook:
     def test_sets_request_id_attribute_from_valid_header(self, fresh_tracing):
         span = _FakeSpan()
@@ -236,11 +313,22 @@ class TestServerRequestHook:
         fresh_tracing._server_request_hook(span, scope)
         assert "tocdoc.request_id" not in span.attributes
 
-    def test_noop_when_no_header(self, fresh_tracing):
+    def test_no_request_id_attribute_when_no_header(self, fresh_tracing):
+        # Without an inbound X-Request-ID, the hook stamps NO correlation
+        # attribute (the generated-id path is handled by the span middleware).
+        # The query-scrub may set a path-only URL attribute; that's expected.
         span = _FakeSpan()
-        scope = {"headers": [(b"content-type", b"application/json")]}
+        scope = {
+            "headers": [(b"content-type", b"application/json")],
+            "scheme": "http",
+            "path": "/health",
+            "server": ("testserver", 80),
+        }
         fresh_tracing._server_request_hook(span, scope)
-        assert span.attributes == {}
+        assert "tocdoc.request_id" not in span.attributes
+        # The scrub overwrote the URL attributes with a path-only value (no query).
+        for v in span.attributes.values():
+            assert "?" not in str(v)
 
     def test_noop_when_span_not_recording(self, fresh_tracing):
         span = _FakeSpan(recording=False)

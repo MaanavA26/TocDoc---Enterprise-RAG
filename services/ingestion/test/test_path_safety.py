@@ -217,3 +217,57 @@ class TestUploadEndpointFolderMode:
         assert "secret stacktrace detail" not in r.text
         assert "token-xyz789" not in r.text
         assert "RuntimeError" not in r.text
+
+    def test_single_file_malformed_docx_returns_422_not_500(self, tmp_path, app_client):
+        """A recognized-but-malformed .docx (valid extension, corrupt bytes)
+        raises LoaderError from the pipeline; single-file mode must map it to a
+        structured 422 (bad client input) — NOT a 500 "service unavailable"."""
+        from loaders import ExtractionError
+
+        client, rag_mock = app_client
+
+        async def _bad_doc(*args, **kwargs):
+            # The loader registry raises ExtractionError (a LoaderError) on
+            # non-OOXML bytes with a valid .docx extension.
+            raise ExtractionError("Failed to parse DOCX (BadZipFile)")
+
+        rag_mock.upload = _bad_doc
+
+        r = client.post(
+            "/upload",
+            params={"bot_tag": "t1", "filepath": "report.docx"},
+            headers=self._AUTH,
+            files={"file": ("report.docx", b"not a real ooxml zip", "application/octet-stream")},
+        )
+        assert r.status_code == 422
+        body = r.json()
+        assert "error" in body and "detail" not in body
+        assert body["error"]["code"] == ApiErrorCode.VALIDATION_ERROR
+        assert body["error"]["request_id"] == r.headers["X-Request-ID"]
+
+    def test_single_file_empty_parse_is_not_200_success(self, tmp_path, app_client):
+        """An empty-text parse (zero chunks) must NOT report 200 'successfully
+        indexed'. The route maps the structured 'empty' status to a clear 422."""
+        client, rag_mock = app_client
+
+        async def _empty(*args, **kwargs):
+            return {
+                "status": "empty",
+                "filename": "blank.txt",
+                "total_pages": 1,
+                "total_chunks": 0,
+                "detail": "No content extracted from document.",
+            }
+
+        rag_mock.upload = _empty
+
+        r = client.post(
+            "/upload",
+            params={"bot_tag": "t1", "filepath": "blank.txt"},
+            headers=self._AUTH,
+            files={"file": ("blank.txt", b"   \n  ", "text/plain")},
+        )
+        assert r.status_code == 422
+        body = r.json()
+        assert "successfully indexed" not in r.text
+        assert body["error"]["code"] == ApiErrorCode.VALIDATION_ERROR
