@@ -318,6 +318,28 @@ class Settings:
         return results
 
 
+# ---------------------------------------------------------------------------
+# Feature flags (read at request time so they are togglable without redeploy)
+# ---------------------------------------------------------------------------
+# Canonical UPPER_SNAKE per the P0-7 convention. No legacy alias (new in P3).
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def is_agent_enabled() -> bool:
+    """Whether the P3 LangGraph agentic layer handles ``/qna`` (default OFF).
+
+    Read live from the environment on every call so the flag is a no-redeploy
+    kill-switch: flipping ``QNA_AGENT_ENABLED`` takes effect on the next
+    request, and tests can toggle it with ``monkeypatch.setenv``. Parsed
+    explicitly so the literal string ``"false"`` is correctly falsy (a bare
+    ``bool(os.getenv(...))`` would treat any non-empty string as True).
+
+    With the flag unset/empty/falsy, ``/qna`` retains the legacy direct
+    ``generate_answer`` call — byte-for-byte identical behaviour.
+    """
+    return (os.getenv("QNA_AGENT_ENABLED") or "").strip().lower() in _TRUTHY
+
+
 def run_async(coro):
     """Execute an async coroutine from both async and sync contexts.
 

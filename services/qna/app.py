@@ -7,6 +7,7 @@ from datetime import datetime
 import src.pipeline.qna_pipeline
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from src.config.config import is_agent_enabled
 from src.core.auth import AuthUtils
 from src.core.errors import (
     ApiErrorCode,
@@ -210,22 +211,45 @@ async def custom_rag_qna(payload: Payload, request: Request):
         raise_api_error(ApiErrorCode.INVALID_REQUEST, "FR tag cannot be empty", 400)
 
     start = time.time()
-    logger.info(f"[{request_id}] Calling qna.generate_answer...")
 
-    # No local exception swallowing — any pipeline failure propagates to the
-    # global handler, which produces an envelope-shaped 500 with X-Request-ID.
-    # The previous `raise HTTPException(500, f"QnA processing failed: {e}")`
-    # leaked exception text to the client; this path no longer does.
-    ans = await src.pipeline.qna_pipeline.generate_answer(
-        query=query,
-        fr_mode=fr_tag,
-        bot_tag=bot_tag,
-        history=history,
-        azure=azure,
-        # Thread the middleware correlation ID so pipeline stage events share
-        # the same request_id as request_started/request_completed.
-        request_id=getattr(request.state, "request_id", None),
-    )
+    # P3 dark seam (default-OFF). When QNA_AGENT_ENABLED is unset/falsy the
+    # legacy direct call below runs verbatim — byte-identical behaviour and
+    # the #28 CitationMap contract hold. When ON, the LangGraph agentic layer
+    # handles the request and returns the SAME {answer, citation} shape. The
+    # router is imported lazily inside the ON branch so the off-path import
+    # surface (and thus its behaviour) is literally unchanged and cannot break
+    # on a langgraph import error. The flag is read per-request (no redeploy
+    # to flip the kill-switch). See docs/architect_phase_2/07_P3_LANGGRAPH_ADR.md.
+    #
+    # No local exception swallowing on either path — any pipeline/node failure
+    # propagates to the global handler, which produces an envelope-shaped 500
+    # with X-Request-ID (the P0-6 contract). The previous
+    # `raise HTTPException(500, f"QnA processing failed: {e}")` leaked exception
+    # text to the client; this path no longer does.
+    if is_agent_enabled():
+        logger.info(f"[{request_id}] Calling agents.router.agentic_generate_answer...")
+        from src.agents.router import agentic_generate_answer
+
+        ans = await agentic_generate_answer(
+            query,
+            fr_tag,
+            bot_tag=bot_tag,
+            history=history,
+            azure=azure,
+            request_id=getattr(request.state, "request_id", None),
+        )
+    else:
+        logger.info(f"[{request_id}] Calling qna.generate_answer...")
+        ans = await src.pipeline.qna_pipeline.generate_answer(
+            query=query,
+            fr_mode=fr_tag,
+            bot_tag=bot_tag,
+            history=history,
+            azure=azure,
+            # Thread the middleware correlation ID so pipeline stage events
+            # share the same request_id as request_started/request_completed.
+            request_id=getattr(request.state, "request_id", None),
+        )
 
     elapsed = time.time() - start
     logger.info(f"[{request_id}] QnA processing completed in {elapsed:.4f}s")
