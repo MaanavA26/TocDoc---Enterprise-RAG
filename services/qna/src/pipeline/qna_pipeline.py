@@ -20,7 +20,8 @@ from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from src.config.config import LocalConfig
+from src.cache.answer_cache import get_cache, make_cache_key
+from src.config.config import LocalConfig, is_cache_enabled
 from src.core.logger import logger
 from src.core.observability import log_event
 from src.core.responses import CitationMap, QnASuccessResponse
@@ -106,6 +107,32 @@ async def generate_answer(
             msg = f"Invalid fr_mode: {fr_mode}. Must be 'read' or 'layout'."
             logger.error(f"[{request_id}] {msg}")
             raise ValueError(msg)
+
+        # ---- Optional within-tenant answer cache (default OFF) ----
+        # Lookup happens here — after fr_mode is validated and the tenant-scoped
+        # key fields (bot_tag, fr_mode, query) are known — so a hit skips the
+        # entire rephrase → embed → search → LLM fan-out below. The key is the
+        # tuple (bot_tag, fr_mode, normalized_query); a cached answer is NEVER
+        # served across bot_tag boundaries (the key's first element). When
+        # QNA_CACHE_ENABLED is unset/falsy this block is fully inert and the
+        # path is byte-identical to the historical pipeline. History is NOT part
+        # of the key (documented trade-off; see src/cache/answer_cache.py).
+        _cache_enabled = is_cache_enabled()
+        _cache_key = None
+        if _cache_enabled:
+            _cache_key = make_cache_key(bot_tag, fr_mode, query)
+            cached = get_cache().get(_cache_key)
+            if cached is not None:
+                # Metadata-only event — NEVER log the query or answer body.
+                log_event(
+                    logger,
+                    "cache_hit",
+                    request_id=request_id,
+                    bot_tag=bot_tag,
+                    fr_mode=fr_mode,
+                )
+                # get() already returns a copy; return it directly.
+                return cached
 
         # Pull: current user query, the two prior user queries, and
         # the latest bot response.
@@ -373,7 +400,15 @@ async def generate_answer(
             citation=CitationMap(extracted_filepath),
             page_citations=page_citations,
         )
-        return response.model_dump(exclude_none=True)
+        result = response.model_dump(exclude_none=True)
+
+        # Populate the cache on the SUCCESS path only (never in `finally`), so a
+        # failed request is never cached. Caches the whole returned dict so
+        # page_citations round-trips on a hit. set() stores its own copy.
+        if _cache_enabled and _cache_key is not None:
+            get_cache().set(_cache_key, result)
+
+        return result
 
     except Exception as e:
         # Log with full traceback for server-side debugging, then re-raise.

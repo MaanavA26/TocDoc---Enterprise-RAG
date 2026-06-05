@@ -430,6 +430,40 @@ def is_tenant_binding_enforced() -> bool:
     return raw not in _FALSY
 
 
+def is_cache_enabled() -> bool:
+    """Whether the optional within-tenant answer cache is live (default OFF).
+
+    Gates the non-streaming ``/qna`` answer cache (see ``src/cache``). Read live
+    from the environment on every call so it is a no-redeploy kill-switch and
+    tests can toggle it with ``monkeypatch.setenv``. Parsed explicitly so the
+    literal string ``"false"`` is correctly falsy.
+
+    With this flag unset/empty/falsy the cache is never consulted or populated
+    and pipeline behaviour is byte-for-byte identical to today.
+    """
+    return (os.getenv("QNA_CACHE_ENABLED") or "").strip().lower() in _TRUTHY
+
+
+def cache_ttl_seconds() -> int:
+    """Entry lifetime for the answer cache, in seconds (default 300).
+
+    Canonical UPPER_SNAKE ``QNA_CACHE_TTL_SECONDS`` (new with the cache feature;
+    no legacy alias). A malformed/non-positive value falls back to the default
+    rather than raising — a bad knob must never crash the process.
+    """
+    return _int_env("QNA_CACHE_TTL_SECONDS", 300)
+
+
+def cache_max_entries() -> int:
+    """Maximum number of live answer-cache entries (default 1024).
+
+    Canonical UPPER_SNAKE ``QNA_CACHE_MAX_ENTRIES`` (new with the cache feature;
+    no legacy alias). The least-recently-used entry is evicted on overflow. A
+    malformed/non-positive value falls back to the default.
+    """
+    return _int_env("QNA_CACHE_MAX_ENTRIES", 1024)
+
+
 def is_agent_enabled() -> bool:
     """Whether the P3 LangGraph agentic layer handles ``/qna`` (default OFF).
 
