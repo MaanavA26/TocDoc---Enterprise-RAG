@@ -43,9 +43,17 @@ _(appended as they land — each with a one-line revert)_
 |---|---|---|
 | _(none yet)_ | | |
 
-## Council verdicts
+## Council verdicts (as the owner, adversarially checked) — all STAGE/HOLD, none executed
 
-_(filled when the decisions council completes)_
+| Decision | Verdict | Wake-blind risk | Why (short) |
+|---|---|---|---|
+| **P3 enable** (default-ON) | STAGE for owner | high | Agentic paths never ran against live Azure; the **verifier node is a confirmed pass-through no-op** and ReAct silently collapses to standard — no safety net, no upside tonight, only added classifier-hop cost on 100% of traffic. Flip is reversible; the *answers served* are not. |
+| **#90 threat-model merge** | HOLD / internal | high | Public merge = first public exposure of live residual-risk recipes (R1 cross-workspace read, R2 unauth `/upload`) **before** fixes ship; irreversible (forks/cache). Keep as internal backlog. |
+| **#142 docker** | HOLD | medium | CI never builds images, so merging adds zero validation; the only real gate (`docker build`+run) is impossible here. |
+| **#140 web** | HOLD | medium | npm registry unreachable here; can't build the first admin surface (destructive Danger Zone) before merge. |
+| **BSL Licensor + Change Date** | HOLD | high | Owner-only legal facts; guessing = a defective public legal instrument. Placeholders left intact. |
+
+**Live item flagged for verification (NOT acted on):** the council observed `SECURITY.md` may overclaim "bot_tag isolation at the search layer" vs `search_service.py` (escapes but doesn't bind `bot_tag`→`tid` *in the search layer*). The default-ON `tenant_binding` guard (#134/#115) binds it *before* search — the re-audit's tenant-binding-coherence lens is verifying whether enforcement holds on **every** path (incl. `/qna/stream`, cache, agentic). Real gap → fix; otherwise → clarify the `SECURITY.md` wording.
 
 ---
 _Last updated: start of run. This file is maintained throughout the autonomous session._
