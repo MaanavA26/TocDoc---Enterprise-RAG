@@ -192,6 +192,68 @@ class TestH3RouteSurfacesDegraded:
 
 
 # ---------------------------------------------------------------------------
+# Multi-format — /upload accepts the new formats and rejects unknown types
+# ---------------------------------------------------------------------------
+class TestMultiFormatRoute:
+    def test_unsupported_single_file_returns_415(self, tmp_path, app_client):
+        client, rag_mock, _ = app_client
+        # An unknown extension must be rejected at the route as a clean 4xx —
+        # never a 500 — and the pipeline must never run.
+        files = {"file": ("image.png", b"\x89PNG\r\n\x1a\n", "image/png")}
+        r = client.post(
+            "/upload",
+            params={"bot_tag": "t1", "filepath": "image.png"},
+            headers=_AUTH,
+            files=files,
+        )
+        assert r.status_code == 415
+        rag_mock.upload.assert_not_called()
+        body = r.json()
+        assert body["error"]["code"] == "INVALID_REQUEST"
+
+    @pytest.mark.parametrize(
+        "filename",
+        ["notes.txt", "report.docx", "deck.pptx", "page.html", "legacy.htm", "guide.md"],
+    )
+    def test_supported_new_formats_reach_pipeline(self, tmp_path, app_client, filename):
+        client, rag_mock, _ = app_client
+
+        async def _ok(*args, **kwargs):
+            return {"status": "successful", "failed_chunks": 0}
+
+        rag_mock.upload = _ok
+        files = {"file": (filename, b"some bytes", "application/octet-stream")}
+        r = client.post(
+            "/upload",
+            params={"bot_tag": "t1", "filepath": filename},
+            headers=_AUTH,
+            files=files,
+        )
+        assert r.status_code == 200
+        assert r.json()["status"] == "successfully indexed"
+
+    def test_folder_mode_skips_unsupported_types(self, tmp_path, app_client):
+        client, rag_mock, _ = app_client
+        batch = tmp_path / "batch"
+        batch.mkdir()
+        (batch / "a.txt").write_bytes(b"plain text content")
+        (batch / "b.docx").write_bytes(b"PK\x03\x04 docx bytes")
+        (batch / "skip.png").write_bytes(b"\x89PNG\r\n\x1a\n")  # unsupported → skipped
+
+        calls = []
+
+        async def _ok(file, *args, **kwargs):
+            calls.append(file.filename)
+            return {"status": "successful", "failed_chunks": 0}
+
+        rag_mock.upload = _ok
+        r = client.post("/upload", params={"bot_tag": "t1", "filepath": "batch"}, headers=_AUTH)
+        assert r.status_code == 200
+        # Only the two supported files were processed; the .png was skipped.
+        assert sorted(calls) == ["a.txt", "b.docx"]
+
+
+# ---------------------------------------------------------------------------
 # M7 — concurrency cap returns 429
 # ---------------------------------------------------------------------------
 class TestM7ConcurrencyCap:

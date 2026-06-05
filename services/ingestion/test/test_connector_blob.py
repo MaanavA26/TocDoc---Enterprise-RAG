@@ -2,10 +2,11 @@
 
 Covers:
 - enumerate() pagination via continuation tokens (>1 page).
-- PDF allowlist (non-PDF blobs filtered out at enumerate).
+- Multi-format allowlist (PDF/DOCX/TXT yielded; unsupported types filtered out).
 - 100 MB skip (oversized blobs never yielded).
 - source_path format: blob://{container}/{blob_name}.
 - fetch() PDF magic-byte rejection of a non-PDF download (raises NotAPdfError).
+- fetch() does NOT gate a text format (.txt) on magic bytes.
 - fetch() happy path returns a ConnectorFile with the downloaded bytes.
 
 No live Azure — a fake ContainerClient is injected.
@@ -143,11 +144,20 @@ def test_enumerate_paginates_across_continuation_tokens():
     assert names == ["a.pdf", "b.pdf", "c.pdf"]
 
 
-def test_enumerate_filters_non_pdf():
-    pages = [[_FakeBlobItem("doc.pdf", 100), _FakeBlobItem("notes.txt", 100), _FakeBlobItem("img.PNG", 100)]]
+def test_enumerate_filters_unsupported_formats():
+    # Multi-format: PDF + DOCX/TXT are now supported and yielded; a genuinely
+    # unsupported type (.PNG) is still filtered out at enumerate.
+    pages = [
+        [
+            _FakeBlobItem("doc.pdf", 100),
+            _FakeBlobItem("notes.txt", 100),
+            _FakeBlobItem("deck.docx", 100),
+            _FakeBlobItem("img.PNG", 100),
+        ]
+    ]
     conn, _ = _connector(pages)
     items = list(conn.enumerate())
-    assert [i.filename for i in items] == ["doc.pdf"]
+    assert [i.filename for i in items] == ["doc.pdf", "notes.txt", "deck.docx"]
 
 
 def test_enumerate_skips_oversized_blob():
@@ -183,12 +193,23 @@ async def test_fetch_returns_connector_file_with_bytes():
 
 
 def test_fetch_rejects_non_pdf_magic_bytes():
-    """A download whose bytes are not a real PDF raises NotAPdfError."""
+    """A .pdf download whose bytes are not a real PDF raises NotAPdfError."""
     pages = [[_FakeBlobItem("masquerade.pdf", 10)]]
     conn, _ = _connector(pages, blob_contents={"masquerade.pdf": b"GIF89a-not-a-pdf"})
     item = next(iter(conn.enumerate()))
     with pytest.raises(NotAPdfError):
         conn.fetch(item)
+
+
+@pytest.mark.asyncio
+async def test_fetch_text_format_not_magic_gated():
+    """A .txt download is NOT magic-gated — arbitrary text bytes pass through."""
+    pages = [[_FakeBlobItem("notes.txt", 12)]]
+    conn, _ = _connector(pages, blob_contents={"notes.txt": b"plain text!!"})
+    item = next(iter(conn.enumerate()))
+    cfile = conn.fetch(item)
+    assert cfile.filename == "notes.txt"
+    assert await cfile.read() == b"plain text!!"
 
 
 def test_fetch_retries_transient_then_succeeds():

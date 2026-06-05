@@ -4,6 +4,7 @@ import os
 import sys
 import time
 from datetime import datetime
+from types import SimpleNamespace
 
 import fitz
 import tiktoken
@@ -27,6 +28,7 @@ from azure.search.documents.indexes.models import (
 from dotenv import load_dotenv
 from langchain_community.document_loaders import AzureAIDocumentIntelligenceLoader
 from langchain_text_splitters import MarkdownHeaderTextSplitter
+from loaders import PDF_EXTENSION, extract_text, get_extension
 from observability import log_event
 
 load_dotenv()
@@ -357,12 +359,27 @@ class rag:
             document_id = hashlib.sha256(file_content).hexdigest()[:16]
             logger.info(f"Document ID (content hash): {document_id}")
 
-            # Get total pages using fitz
-            logger.debug("Analyzing PDF structure with fitz")
-            doc = fitz.open(stream=file_content, filetype="pdf")
-            total_pages = doc.page_count
-            doc.close()
-            logger.info(f"PDF analysis complete - total pages: {total_pages}")
+            # Dispatch by file extension. PDF keeps its exact PyMuPDF + Azure
+            # Document Intelligence path (below); every other supported format is
+            # routed through the pluggable loader registry, which extracts PLAIN
+            # TEXT only. Both paths converge on `docs_string` / `total_pages` and
+            # feed the SAME chunk → embed → index pipeline, so deterministic chunk
+            # IDs (P0-4) and chunking (P0-5) stay untouched. An unknown extension
+            # is a clean 4xx upstream; here it raises UnsupportedFormatError from
+            # the registry as a defense-in-depth backstop.
+            extension = get_extension(filename)
+            is_pdf = extension == PDF_EXTENSION
+
+            if is_pdf:
+                # Get total pages using fitz (PDF path — unchanged).
+                logger.debug("Analyzing PDF structure with fitz")
+                doc = fitz.open(stream=file_content, filetype="pdf")
+                total_pages = doc.page_count
+                doc.close()
+                logger.info(f"PDF analysis complete - total pages: {total_pages}")
+            else:
+                # Non-PDF: page/slide count comes from the registry loader below.
+                total_pages = 0
 
             # Initialize search client
             logger.info("Initializing search client")
@@ -390,20 +407,36 @@ class rag:
                 # carry index/path detail).
                 logger.warning(f"Stale chunk enumeration failed (non-fatal): {type(cleanup_err).__name__}")
 
-            # Load document using Azure AI Document Intelligence
-            stage = "document_intelligence"
-            logger.info(f"Loading document with Azure AI Document Intelligence - mode: {fr_mode}")
-            start_time = time.time()
+            # Load document text. PDF → Azure Document Intelligence (unchanged);
+            # other supported formats → the loader registry (plain-text extract).
+            if is_pdf:
+                stage = "document_intelligence"
+                logger.info(f"Loading document with Azure AI Document Intelligence - mode: {fr_mode}")
+                start_time = time.time()
 
-            loader = AzureAIDocumentIntelligenceLoader(
-                bytes_source=file_content,
-                api_key=os.getenv("DOC_INTELLIGENCE_KEY"),
-                api_endpoint=os.getenv("DOC_INTELLIGENCE_ENDPOINT"),
-                api_model=f"prebuilt-{fr_mode}",
-            )
+                loader = AzureAIDocumentIntelligenceLoader(
+                    bytes_source=file_content,
+                    api_key=os.getenv("DOC_INTELLIGENCE_KEY"),
+                    api_endpoint=os.getenv("DOC_INTELLIGENCE_ENDPOINT"),
+                    api_model=f"prebuilt-{fr_mode}",
+                )
 
-            docs = loader.load()
-            end_time = time.time()
+                docs = loader.load()
+                end_time = time.time()
+                _parser_name = "azure_document_intelligence"
+            else:
+                # Registry path: extract plain text, then wrap it in the minimal
+                # shim the chunking branches read (`docs[0].page_content`). A
+                # SimpleNamespace is enough — only `.page_content` is consumed.
+                stage = "text_extraction"
+                logger.info(f"Extracting text via loader registry - extension: {extension}")
+                start_time = time.time()
+
+                extracted = extract_text(filename, file_content)
+                docs = [SimpleNamespace(page_content=extracted.text)]
+                total_pages = extracted.page_count
+                end_time = time.time()
+                _parser_name = extracted.parser
 
             logger.info(f"Document loaded successfully in {end_time - start_time:.2f} seconds")
             logger.info(f"Loaded {len(docs)} document(s)")
@@ -416,7 +449,7 @@ class rag:
                 logger,
                 "document_parsed",
                 request_id=request_id,
-                parser="azure_document_intelligence",
+                parser=_parser_name,
                 latency_ms=round((end_time - start_time) * 1000, 2),
                 page_count=total_pages,
                 content_length_chars=_content_length_chars,

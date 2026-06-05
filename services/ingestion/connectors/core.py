@@ -26,6 +26,8 @@ import threading
 from collections.abc import Iterator
 from typing import Protocol, runtime_checkable
 
+from loaders import get_extension
+from loaders import is_supported_name as _registry_is_supported_name
 from observability import log_event
 
 logger = logging.getLogger(__name__)
@@ -40,10 +42,17 @@ _BOT_TAG_RE = re.compile(BOT_TAG_PATTERN)
 # they never buffer in memory; fetch() re-validates as defense in depth.
 MAX_FILE_BYTES = 100 * 1024 * 1024
 
-# PDF magic bytes. v1 is PDF-only (upload() is hard-wired to PDF + Document
-# Intelligence), so connectors filter to this allowlist at enumerate and
-# validate the downloaded bytes in fetch().
+# Content magic bytes used as a post-download integrity gate (defense in depth
+# against a partial/interrupted download or a mis-filtered item). Only formats
+# with a stable, cheap magic signature are gated:
+#   - PDF          → b"%PDF"
+#   - DOCX / PPTX  → b"PK" (OOXML files are zip containers)
+# Text formats (HTML/HTM/MD/TXT) have no reliable magic header, so they are not
+# gated here — the loader registry surfaces any genuinely-malformed content.
 _PDF_MAGIC = b"%PDF"
+_ZIP_MAGIC = b"PK"
+# Extensions whose bytes are validated as a zip/OOXML container post-download.
+_OOXML_EXTENSIONS = frozenset({".docx", ".pptx"})
 
 
 # ---------------------------------------------------------------------------
@@ -68,8 +77,17 @@ class InvalidBotTagError(ConnectorError):
 class NotAPdfError(ConnectorError):
     """Downloaded bytes did not start with the PDF magic header (%PDF).
 
-    Raised in fetch() — a partial/interrupted download or a misfiltered item
-    must not feed a corrupt PDF to Document Intelligence.
+    Raised in fetch() for a ``.pdf`` item — a partial/interrupted download or a
+    misfiltered item must not feed a corrupt PDF to Document Intelligence.
+    """
+
+
+class InvalidContentError(ConnectorError):
+    """Downloaded bytes failed a non-PDF format's post-download magic-byte gate.
+
+    Raised in fetch() for a gated non-PDF format (DOCX/PPTX) whose bytes do not
+    look like the expected container (an OOXML file that is not a zip). Like
+    NotAPdfError, this is an error (corrupt/mis-typed download), not a skip.
     """
 
 
@@ -192,8 +210,9 @@ class SourceConnector(Protocol):
         """Lazily yield items to ingest.
 
         Pagination is owned internally (continuation tokens / @odata.nextLink);
-        the full listing is never materialized in memory. Filters to the PDF
-        allowlist here and SKIPS (does not raise on) non-PDF and >100 MB items.
+        the full listing is never materialized in memory. Filters to the
+        supported-format allowlist (PDF + DOCX/PPTX/HTML/HTM/MD/TXT) here and
+        SKIPS (does not raise on) unsupported and >100 MB items.
         """
         ...
 
@@ -201,8 +220,10 @@ class SourceConnector(Protocol):
         """Download the COMPLETE bytes for one item.
 
         Uses a timeout + bounded retry; size is pre-validated against the 100 MB
-        ceiling; PDF magic bytes are validated post-download. RAISES NotAPdfError
-        on a corrupt/mis-typed download — that is an error, not a skip.
+        ceiling; content magic bytes are validated post-download per format
+        (PDF → %PDF, DOCX/PPTX → zip; text formats are not gated). RAISES
+        NotAPdfError / InvalidContentError on a corrupt/mis-typed download — that
+        is an error, not a skip.
         """
         ...
 
@@ -217,10 +238,41 @@ def is_pdf_name(name: str) -> bool:
     return name.lower().endswith(".pdf")
 
 
+def is_supported_name(name: str) -> bool:
+    """Return True if `name`'s extension is an ingestion-supported format.
+
+    Delegates to the loader registry's single source of truth (PDF +
+    DOCX/PPTX/HTML/HTM/MD/TXT) so connectors filter on the exact same allowlist
+    the /upload route and upload() use — no duplicated extension list.
+    """
+    return _registry_is_supported_name(name)
+
+
 def validate_pdf_magic(content: bytes) -> None:
     """Raise NotAPdfError unless `content` starts with the %PDF magic header."""
     if not content[:4] == _PDF_MAGIC:
         raise NotAPdfError("Downloaded content is not a valid PDF (missing %PDF header)")
+
+
+def validate_content_magic(filename: str, content: bytes) -> None:
+    """Post-download integrity gate dispatched by `filename`'s extension.
+
+    - ``.pdf``         → must start with ``%PDF`` (raises NotAPdfError).
+    - ``.docx``/``.pptx`` → must start with ``PK`` (zip/OOXML; raises
+      InvalidContentError).
+    - text formats (HTML/HTM/MD/TXT) → no reliable magic header, so no gate;
+      the loader registry surfaces any genuinely-malformed content downstream.
+
+    A mis-typed/corrupt download is an error, not a skip — consistent with the
+    PDF-only behavior connectors had before multi-format support.
+    """
+    ext = get_extension(filename)
+    if ext == ".pdf":
+        validate_pdf_magic(content)
+    elif ext in _OOXML_EXTENSIONS and content[:2] != _ZIP_MAGIC:
+        raise InvalidContentError(
+            f"Downloaded content is not a valid {ext} container (missing zip/OOXML header)"
+        )
 
 
 # ---------------------------------------------------------------------------

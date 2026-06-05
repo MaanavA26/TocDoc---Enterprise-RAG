@@ -23,11 +23,14 @@ from .core import (
     ConnectorFile,
     ConnectorRunError,
     InvalidBotTagError,
+    InvalidContentError,
     NotAPdfError,
     SourceConnector,
     SourceItem,
     is_pdf_name,
+    is_supported_name,
     run_connector,
+    validate_content_magic,
 )
 
 __all__ = [
@@ -38,9 +41,12 @@ __all__ = [
     "ConnectorFile",
     "ConnectorRunError",
     "InvalidBotTagError",
+    "InvalidContentError",
     "NotAPdfError",
     "SourceConnector",
     "SourceItem",
     "is_pdf_name",
+    "is_supported_name",
     "run_connector",
+    "validate_content_magic",
 ]
