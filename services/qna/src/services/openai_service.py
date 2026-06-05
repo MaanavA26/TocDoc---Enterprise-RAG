@@ -343,6 +343,7 @@ async def classify_route(azure, query: str) -> str:
     route = parsed.get("route")
     if route in ROUTE_LABELS:
         return route
-    # Off-schema / unexpected value — never trust it, fall back to the safe route.
-    logger.warning("Classifier returned unexpected route %r; defaulting to 'standard'", route)
+    # Off-schema / unexpected value — never trust it (don't log the raw
+    # model-returned value), fall back to the safe route.
+    logger.warning("Classifier returned an unexpected route; defaulting to 'standard'")
     return "standard"
