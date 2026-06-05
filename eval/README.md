@@ -75,10 +75,56 @@ python -m eval.ragas_eval --benchmark eval/benchmark/sample.jsonl --out eval/out
 ```
 
 Output: `eval/out/ragas_report.json` and `eval/out/ragas_report.md`
-(per-record scores + aggregate means).
+(per-record scores, aggregate means, and a per-metric mean/min/max summary).
 
 A per-record failure (pipeline, retrieval, or sample assembly) is **caught and
 recorded** on that record; the run continues and still produces a report.
+
+## Report contents
+
+The JSON report always carries:
+
+* `aggregate` — flat `{metric: mean}` over scored records. **Stable shape**: the
+  `--baseline` reader and downstream tooling depend on it, so min/max are kept
+  out of this key.
+* `summary` — per-metric `{mean, min, max, count}` (the richer view, also
+  rendered as a "Summary (mean / min / max)" table in the markdown report).
+
+## Baseline comparison (`--baseline`, off by default)
+
+Diff the current run's `aggregate` against a prior `ragas_report.json`:
+
+```bash
+python -m eval.ragas_eval --benchmark eval/benchmark/sample.jsonl \
+    --out eval/out --baseline path/to/previous/ragas_report.json
+```
+
+This adds a `comparison` object (`{metric: {baseline, current, delta,
+regressed}}`) to the JSON and a "Baseline comparison" table to the markdown. A
+metric is flagged `regressed` only when it dropped by more than a small epsilon
+(`1e-4`, to swallow float noise) and exists in **both** runs; a metric present
+in only one run reports `delta=null` and is never flagged. Baseline comparison
+is **informational only** — it does **not** change the process exit code.
+
+## Threshold gating (`--min-<metric>`, off by default)
+
+Enforce an absolute floor on any metric's mean. There is one auto-generated flag
+per metric (derived from the scored metric names):
+
+```bash
+python -m eval.ragas_eval --benchmark eval/benchmark/sample.jsonl \
+    --out eval/out \
+    --min-faithfulness 0.70 \
+    --min-answer-relevancy 0.60 \
+    --min-llm-context-precision-with-reference 0.50
+```
+
+Each supplied flag adds an entry to the `threshold_gate` object and the
+"Threshold gate" markdown table. If **any** gated metric's mean is below its
+floor (or has no value to check), the process **exits non-zero (1)** so CI can
+gate on quality. With no `--min-*` flags the run always exits `0`, and the
+default report shape is unchanged. Thresholds and `--baseline` are independent
+and may be combined.
 
 ## Benchmark format
 

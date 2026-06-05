@@ -2,3 +2,7 @@
 {"question": "Summarize the first section of the example document.", "ground_truth": "This is a synthetic placeholder summary used only to exercise the eval harness.", "bot_tag": "client_a", "fr_tag": "read"}
 {"question": "Which topic does the example document discuss?", "ground_truth": "A neutral, made-up topic used purely for demonstration; replace with real records before scoring.", "bot_tag": "demo_workspace", "fr_tag": "layout"}
 {"question": "What does the closing paragraph of the sample document say?", "ground_truth": "An illustrative placeholder closing statement with no real-world meaning.", "bot_tag": "demo_workspace", "fr_tag": "read"}
+{"question": "How many sections does the example document contain?", "ground_truth": "A made-up count used only to exercise the harness; it describes no real document.", "bot_tag": "client_a", "fr_tag": "layout"}
+{"question": "What heading appears at the top of the sample page?", "ground_truth": "A synthetic placeholder heading with no real-world meaning, used for demonstration only.", "bot_tag": "client_a", "fr_tag": "read"}
+{"question": "Describe the example table referenced in the sample document.", "ground_truth": "An illustrative placeholder description of a fictional table; it makes no product claims.", "bot_tag": "demo_workspace", "fr_tag": "layout"}
+{"question": "What is mentioned in the introductory note of the example?", "ground_truth": "A neutral placeholder note used purely to exercise the eval harness; replace before scoring.", "bot_tag": "demo_workspace", "fr_tag": "read"}
