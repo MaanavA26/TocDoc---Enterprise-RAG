@@ -1,17 +1,51 @@
+# Secrets / local config — never bake into an image layer.
 .env
 .env.*
-__pycache__
-*.pyc
-*.pyo
-*.pyd
-.pytest_cache
-.coverage
-htmlcov/
-*.log
-*.ipynb
-.DS_Store
-.venv
-.git
+
+# Python bytecode / build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtualenvs — the image builds its own at /opt/venv.
+.venv/
+venv/
+
+# Test / coverage artifacts (tests are not needed at runtime).
 test/
-# Markdown docs are not required at runtime; exclude to keep image layers clean.
+tests/
+.pytest_cache/
+pytest.ini
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+requirements-dev.txt
+
+# Notebooks
+*.ipynb
+.ipynb_checkpoints/
+
+# VCS / editor / OS cruft
+.git/
+.gitignore
+.DS_Store
+.idea/
+.vscode/
+
+# JS deps (kept here to keep the context lean if ever introduced).
+node_modules/
+
+# Logs
+*.log
+
+# Docs are not required at runtime; exclude to keep image layers clean.
 *.md
+
+# Docker definitions themselves don't belong in the build context.
+Dockerfile
+.dockerignore
