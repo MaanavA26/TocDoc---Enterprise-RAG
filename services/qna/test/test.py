@@ -175,6 +175,17 @@ async def _attach_fake_azure():
     app.state.azure = None
 
 
+@pytest.fixture(autouse=True)
+def _disable_tenant_binding(monkeypatch):
+    """Tenant binding now defaults ON (H1, fail-closed). These functional tests
+    predate binding and use tokens without a `tid` claim, so they would 403 at
+    the guard. They are not exercising binding — explicitly opt out so they keep
+    testing the underlying pipeline/auth behaviour. Binding's own fail-closed
+    semantics are covered in test_tenant_binding.py."""
+    monkeypatch.setenv("QNA_ENFORCE_TENANT_BINDING", "false")
+    yield
+
+
 # ---------------------------------------------------------------------------
 # Auth & endpoint tests
 # ---------------------------------------------------------------------------

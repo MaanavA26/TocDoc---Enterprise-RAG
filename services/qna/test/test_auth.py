@@ -297,3 +297,136 @@ async def test_valid_token_sets_email_on_request_state(app, rsa_keypair, monkeyp
         )
     # Auth passed if we get anything other than 401
     assert r.status_code != 401, f"Expected auth to succeed but got 401: {r.json()}"
+
+
+# ---------------------------------------------------------------------------
+# M1 — unknown-`kid` refetch throttle + negative cache (pre-auth DoS guard)
+# ---------------------------------------------------------------------------
+class TestUnknownKidThrottle:
+    """An attacker can present a syntactically valid JWT *header* with a bogus
+    `kid` before any signature check. Without throttling each request forces a
+    fresh JWKS fetch (pre-auth DoS). These tests pin that a flood of bogus-kid
+    tokens does NOT cause one outbound fetch per request.
+
+    These bypass the module-wide `mock_jwks` autouse fixture by patching the
+    lower-level `_fetch_jwks_sync` so we can COUNT real fetch attempts. State is
+    reset between tests so the throttle/negative caches don't leak.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_state(self):
+        import src.core.token_validator as tv
+
+        tv._reset_jwks_state()
+        yield
+        tv._reset_jwks_state()
+
+    @pytest.mark.asyncio
+    async def test_unknown_kid_does_not_refetch_within_throttle_window(self, rsa_keypair, jwk_key):
+        """First unknown-kid request may fetch once (to confirm rotation); a
+        second one within the throttle window must NOT trigger another fetch."""
+        import src.core.token_validator as tv
+
+        private_key, _ = rsa_keypair
+        # Token signed with a kid the JWKS does not contain.
+        token = _make_rs256_token(private_key, kid="bogus-kid-zzz")
+
+        fetch_calls = {"n": 0}
+
+        def _fake_fetch(url: str):
+            fetch_calls["n"] += 1
+            # Return a key set that never contains the bogus kid.
+            return [jwk_key]
+
+        with patch("src.core.token_validator._fetch_jwks_sync", side_effect=_fake_fetch):
+            with pytest.raises(tv.TokenValidationError):
+                await tv.validate_token(token, _TENANT_ID, _AUDIENCE)
+            first = fetch_calls["n"]
+            # Second bogus-kid request within the window: must short-circuit.
+            with pytest.raises(tv.TokenValidationError):
+                await tv.validate_token(token, _TENANT_ID, _AUDIENCE)
+            second = fetch_calls["n"]
+
+        assert first <= 1, "first unknown-kid request should fetch at most once"
+        assert second == first, "second request within window must NOT refetch"
+
+    @pytest.mark.asyncio
+    async def test_distinct_bogus_kids_still_throttled_by_fresh_cache(self, rsa_keypair, jwk_key):
+        """Once a fresh JWKS is cached, a DIFFERENT bogus kid must not force a
+        refetch (cache age is under the throttle interval)."""
+        import src.core.token_validator as tv
+
+        private_key, _ = rsa_keypair
+        fetch_calls = {"n": 0}
+
+        def _fake_fetch(url: str):
+            fetch_calls["n"] += 1
+            return [jwk_key]
+
+        with patch("src.core.token_validator._fetch_jwks_sync", side_effect=_fake_fetch):
+            for kid in ("bogus-a", "bogus-b", "bogus-c"):
+                token = _make_rs256_token(private_key, kid=kid)
+                with pytest.raises(tv.TokenValidationError):
+                    await tv.validate_token(token, _TENANT_ID, _AUDIENCE)
+
+        # At most one fetch across three distinct bogus kids: the first populated
+        # a fresh cache; the rest were inside the refetch throttle window.
+        assert fetch_calls["n"] <= 1
+
+    @pytest.mark.asyncio
+    async def test_negative_cache_is_bounded(self, rsa_keypair, jwk_key, monkeypatch):
+        """The attacker-keyed negative cache must not grow without bound: after a
+        flood of DISTINCT bogus kids it stays at/under the cap (FIFO eviction)."""
+        import src.core.token_validator as tv
+
+        private_key, _ = rsa_keypair
+        monkeypatch.setattr(tv, "_NEGATIVE_KID_MAX_ENTRIES", 8)
+
+        def _fake_fetch(url: str):
+            return [jwk_key]
+
+        with patch("src.core.token_validator._fetch_jwks_sync", side_effect=_fake_fetch):
+            for i in range(50):
+                token = _make_rs256_token(private_key, kid=f"flood-kid-{i}")
+                with pytest.raises(tv.TokenValidationError):
+                    await tv.validate_token(token, _TENANT_ID, _AUDIENCE)
+
+        assert len(tv._negative_kid_cache) <= 8
+
+
+# ---------------------------------------------------------------------------
+# L-Q1 — audience verification is mandatory (require_aud)
+# ---------------------------------------------------------------------------
+class TestRequireAudience:
+    @pytest.mark.asyncio
+    async def test_token_without_aud_is_rejected(self, rsa_keypair, jwk_key):
+        """A signed token that OMITS the `aud` claim must be rejected now that
+        `require_aud=True` is passed to jwt.decode (L-Q1)."""
+        import src.core.token_validator as tv
+
+        private_key, _ = rsa_keypair
+
+        # Build a token with NO aud claim (valid signature, valid issuer, kid).
+        pem = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        now = int(time.time())
+        payload = {
+            "iss": f"https://sts.windows.net/{_TENANT_ID}/",
+            "sub": "user-subject-id",
+            "iat": now,
+            "nbf": now,
+            "exp": now + 3600,
+            "upn": "user@example.com",
+            # NB: no "aud"
+        }
+        token = jose_jwt.encode(payload, pem, algorithm="RS256", headers={"kid": "test-kid-1"})
+
+        with patch(
+            "src.core.token_validator._get_jwks",
+            new=AsyncMock(return_value=[jwk_key]),
+        ):
+            with pytest.raises(tv.TokenValidationError):
+                await tv.validate_token(token, _TENANT_ID, _AUDIENCE)

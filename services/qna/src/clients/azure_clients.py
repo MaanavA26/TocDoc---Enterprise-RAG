@@ -6,6 +6,14 @@ from openai import AzureOpenAI
 from src.config.config import AzureConfig, LocalConfig
 from src.core.logger import logger
 
+# Interactive-grade per-call timeout (seconds) for all outbound Azure clients.
+# Every call is dispatched through small (max_workers=2) ThreadPoolExecutors, so
+# without a bounded timeout two simultaneously-hung upstream calls saturate a
+# pool and wedge all QnA traffic of that type for up to the SDK default (~600s
+# for the OpenAI client). A 30s ceiling fails the slow call instead of holding
+# the pool slot indefinitely (M5).
+_AZURE_CLIENT_TIMEOUT_SECONDS = 30.0
+
 
 class AzureOpenAIHandler:
     """
@@ -84,6 +92,9 @@ class AzureOpenAIHandler:
                     api_key=self.azureconfig.AZURE_OPENAI_KEY,
                     api_version=self.azureconfig.AZURE_OPENAI_API_VERSION,
                     model=self.localconfig.AZURE_OPENAI_EMBEDDING_MODEL,
+                    # Bound embedding calls so a hung upstream cannot wedge the
+                    # bounded embedding executor (M5).
+                    timeout=_AZURE_CLIENT_TIMEOUT_SECONDS,
                 )
                 logger.info("Azure OpenAI Embeddings client initialized successfully")
             except Exception as e:
@@ -96,6 +107,9 @@ class AzureOpenAIHandler:
                     api_key=self.azureconfig.AZURE_OPENAI_KEY,
                     api_version=self.azureconfig.AZURE_OPENAI_API_VERSION,
                     azure_endpoint=self.azureconfig.AZURE_OPENAI_ENDPOINT,
+                    # Bound every chat/completions call so a hung upstream call
+                    # cannot occupy a bounded-executor slot indefinitely (M5).
+                    timeout=_AZURE_CLIENT_TIMEOUT_SECONDS,
                 )
                 logger.info("Azure OpenAI client initialized successfully")
             except Exception as e:
@@ -108,6 +122,11 @@ class AzureOpenAIHandler:
                     endpoint=self.azureconfig.AZURE_SEARCH_ENDPOINT,
                     index_name=self.localconfig.INDEX_NAME,
                     credential=AzureKeyCredential(self.azureconfig.AZURE_SEARCH_KEY),
+                    # azure-core transport timeouts (forwarded via **kwargs) bound
+                    # every search call so a hung Search backend cannot wedge the
+                    # bounded search executor (M5).
+                    connection_timeout=_AZURE_CLIENT_TIMEOUT_SECONDS,
+                    read_timeout=_AZURE_CLIENT_TIMEOUT_SECONDS,
                 )
                 logger.info("Azure Search client initialized successfully")
             except Exception as e:

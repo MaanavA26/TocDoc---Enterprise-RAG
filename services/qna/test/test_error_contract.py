@@ -414,12 +414,28 @@ class TestAuthMiddlewareEnvelope:
         assert r.headers["X-Request-ID"] == "trace-auth-fail-001"
 
     def test_health_path_bypasses_auth(self, client: TestClient, app: FastAPI):
-        @app.get("/qna/health")
+        # The health bypass is now an EXACT-path match (L-Q2), not a suffix
+        # match, so it keys off the real "/health" endpoint (this test app has
+        # no root_path prefix). A path that merely ENDS in "/health" no longer
+        # bypasses auth — see test_endswith_health_does_not_bypass below.
+        @app.get("/health")
         def health():
             return {"status": "ok"}
 
         # No auth header — should pass through the middleware's bypass path.
-        r = client.get("/qna/health")
+        r = client.get("/health")
         assert r.status_code == 200
         # Even on success, X-Request-ID is set by RequestIDMiddleware.
         assert "X-Request-ID" in r.headers
+
+    def test_endswith_health_does_not_bypass(self, client: TestClient, app: FastAPI):
+        """L-Q2: a route that merely ends in "/health" (e.g. "/admin/health")
+        must NOT inherit the public bypass — it requires auth like any other."""
+
+        @app.get("/admin/health")
+        def admin_health():
+            return {"status": "ok"}
+
+        r = client.get("/admin/health")  # no auth header
+        assert r.status_code == 401
+        assert r.json()["error"]["code"] == ApiErrorCode.UNAUTHORIZED

@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import OrderedDict
 from functools import partial
 from urllib import request as urllib_request
 from urllib.error import URLError
@@ -40,6 +41,49 @@ class TokenValidationError(Exception):
 _jwks_cache: dict = {}
 _CACHE_TTL = 3600  # seconds
 
+# --- Unknown-`kid` refetch throttle + negative cache (M1) -------------------
+# An attacker can present a syntactically valid JWT *header* carrying a bogus
+# `kid` before any signature check runs. Without throttling, each such request
+# forces a fresh outbound JWKS fetch to login.microsoftonline.com — a pre-auth
+# auth-availability DoS with ~1:1 outbound amplification. To bound that:
+#
+#   * We only trigger an unknown-`kid` refresh if the cached JWKS is older than
+#     `_UNKNOWN_KID_REFRESH_INTERVAL` (legitimate key rotation is rare, so a
+#     short floor is safe and still picks up rotations quickly).
+#   * We remember recently-seen unresolved `(tenant_id, kid)` pairs for
+#     `_NEGATIVE_KID_TTL` and short-circuit them without any fetch.
+#   * On refresh we update the cache in place (never `pop`), so a fetch failure
+#     keeps serving the existing keys instead of evicting good state.
+_UNKNOWN_KID_REFRESH_INTERVAL = 60.0  # seconds
+_NEGATIVE_KID_TTL = 60.0  # seconds
+# Hard cap on the negative cache so an attacker streaming endless DISTINCT bogus
+# `kid`s cannot grow it without bound (the entries are attacker-controlled keys)
+# — that would re-open the very memory-DoS this throttle exists to close. We
+# evict the oldest entry (FIFO via OrderedDict) once the cap is hit. The TTL is
+# short, so legitimate churn never approaches the cap.
+_NEGATIVE_KID_MAX_ENTRIES = 1024
+# {(tenant_id, kid): first_seen_unresolved_at} — insertion-ordered for FIFO evict.
+_negative_kid_cache: "OrderedDict[tuple[str, str], float]" = OrderedDict()
+
+
+def _record_unresolved_kid(tenant_id: str, kid: str) -> None:
+    """Remember an unresolved ``(tenant_id, kid)`` for the negative-cache TTL,
+    evicting the oldest entry when the bounded cache is full so the dict cannot
+    grow without limit under an attacker-controlled flood of distinct kids."""
+    key = (tenant_id, kid)
+    # Refresh ordering if already present so it counts as recently seen.
+    _negative_kid_cache.pop(key, None)
+    _negative_kid_cache[key] = time.time()
+    while len(_negative_kid_cache) > _NEGATIVE_KID_MAX_ENTRIES:
+        _negative_kid_cache.popitem(last=False)  # evict oldest (FIFO)
+
+
+def _reset_jwks_state() -> None:
+    """Clear all module-level JWKS caches. Test-only helper so the throttle /
+    negative-cache state does not leak across tests."""
+    _jwks_cache.clear()
+    _negative_kid_cache.clear()
+
 
 def _fetch_jwks_sync(url: str) -> list:
     """Fetch JWKS keys synchronously using urllib (stdlib, no extra deps)."""
@@ -63,6 +107,14 @@ def _fetch_jwks_sync(url: str) -> list:
     except Exception as exc:
         logger.error("Unexpected error fetching JWKS from %s: %s", url, exc)
         raise TokenValidationError("Unable to retrieve Azure AD signing keys", status_code=503) from exc
+
+
+def _find_key(jwks_keys: list, kid: str) -> dict | None:
+    """Return the JWK whose ``kid`` matches, or ``None``."""
+    for key in jwks_keys:
+        if key.get("kid") == kid:
+            return key
+    return None
 
 
 async def _get_jwks(tenant_id: str) -> list:
@@ -89,6 +141,23 @@ async def _get_jwks(tenant_id: str) -> list:
     keys = await loop.run_in_executor(None, partial(_fetch_jwks_sync, jwks_url))
 
     _jwks_cache[tenant_id] = {"keys": keys, "fetched_at": now}
+    return keys
+
+
+async def _refresh_jwks_in_place(tenant_id: str) -> list:
+    """Force a fresh JWKS fetch and update the cache **in place**.
+
+    Unlike ``_get_jwks`` this ignores the TTL freshness short-circuit (the
+    caller has already decided a refresh is warranted) but, critically, it does
+    NOT evict the existing cache before fetching: on a fetch failure the prior
+    keys remain cached so the service keeps validating already-known ``kid``s
+    (M1 — refresh-in-place, not ``pop``).
+    """
+    jwks_url = f"https://login.microsoftonline.com/{tenant_id}/discovery/v2.0/keys"
+    logger.info("Refreshing JWKS from %s", jwks_url)
+    loop = asyncio.get_running_loop()
+    keys = await loop.run_in_executor(None, partial(_fetch_jwks_sync, jwks_url))
+    _jwks_cache[tenant_id] = {"keys": keys, "fetched_at": time.time()}
     return keys
 
 
@@ -143,26 +212,46 @@ async def validate_token(token: str, tenant_id: str, audience: str) -> dict:
     except TokenValidationError:
         raise
 
-    matching_key: dict | None = None
-    for key in jwks_keys:
-        if key.get("kid") == kid:
-            matching_key = key
-            break
+    matching_key = _find_key(jwks_keys, kid)
 
     if matching_key is None:
-        # The key might have been rotated since we cached — clear cache and retry once.
-        logger.info("kid '%s' not found in cache; refreshing JWKS", kid)
-        _jwks_cache.pop(tenant_id, None)
-        try:
-            jwks_keys = await _get_jwks(tenant_id)
-        except TokenValidationError:
-            raise
-        for key in jwks_keys:
-            if key.get("kid") == kid:
-                matching_key = key
-                break
+        # Unknown kid. This is reachable pre-signature-check with only a bogus
+        # token header, so the refetch is throttled to bound a pre-auth DoS (M1).
+        now = time.time()
+
+        # 1) Negative cache: a kid we recently failed to resolve is short-circuited
+        #    with NO outbound fetch for a short TTL.
+        neg_key = (tenant_id, kid)
+        neg_seen = _negative_kid_cache.get(neg_key)
+        if neg_seen is not None and (now - neg_seen) < _NEGATIVE_KID_TTL:
+            raise TokenValidationError("No matching signing key found for token 'kid'")
+
+        # 2) Refetch throttle: only refresh if the cached JWKS is older than the
+        #    minimum interval. Legitimate key rotation is rare, so this still
+        #    picks up rotated keys promptly while collapsing a flood of bogus-kid
+        #    requests into at most one fetch per interval.
+        cached = _jwks_cache.get(tenant_id)
+        cache_age = (now - cached["fetched_at"]) if cached else None
+        if cache_age is None or cache_age >= _UNKNOWN_KID_REFRESH_INTERVAL:
+            logger.info("kid '%s' not found in cache; refreshing JWKS (throttled)", kid)
+            try:
+                # Refresh in place — keep serving existing keys on fetch failure.
+                jwks_keys = await _refresh_jwks_in_place(tenant_id)
+            except TokenValidationError:
+                raise
+            matching_key = _find_key(jwks_keys, kid)
+        else:
+            logger.info(
+                "kid '%s' not found; skipping refetch (cache age %.1fs < %.0fs throttle)",
+                kid,
+                cache_age,
+                _UNKNOWN_KID_REFRESH_INTERVAL,
+            )
 
     if matching_key is None:
+        # Remember this unresolved kid briefly so repeated probes don't re-fetch
+        # (bounded + FIFO-evicted so the cache itself can't be a memory DoS).
+        _record_unresolved_kid(tenant_id, kid)
         raise TokenValidationError("No matching signing key found for token 'kid'")
 
     # ------------------------------------------------------------------
@@ -196,7 +285,12 @@ async def validate_token(token: str, tenant_id: str, audience: str) -> dict:
             algorithms=["RS256"],
             audience=audience,
             issuer=expected_issuer,
-            options={"leeway": 10},  # 10-second clock skew tolerance
+            # leeway: 10-second clock skew tolerance.
+            # require_aud: make audience verification MANDATORY (L-Q1) — reject a
+            # signed token that omits the `aud` claim rather than skipping the
+            # audience check. Azure AD always issues `aud`, so this only closes a
+            # hypothetical aud-less-token gap with no impact on valid traffic.
+            options={"leeway": 10, "require_aud": True},
         )
     except ExpiredSignatureError as exc:
         raise TokenValidationError("Token has expired") from exc
