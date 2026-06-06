@@ -29,6 +29,22 @@ For licensing terms, see the root [LICENSE](../LICENSE) (Business Source License
 - [LOCAL_DEV.md](LOCAL_DEV.md) — Local development quickstart.
 - [deployment/INSTALLATION.md](deployment/INSTALLATION.md) — Client installation
   guide for deploying TocDoc into a client Azure resource group.
+- [deployment/SMOKE_TEST.md](deployment/SMOKE_TEST.md) — End-to-end **live-Azure**
+  deployment + smoke-test runbook (run this to validate a real deployment).
+- [deployment/P3_ENABLEMENT.md](deployment/P3_ENABLEMENT.md) — Cutover guide for
+  enabling the default-OFF P3 agentic layer.
+- [deployment/CONTAINER_IMAGES.md](deployment/CONTAINER_IMAGES.md) — Pulling the
+  published container images.
+
+## Security, compliance & audit
+
+- [../SECURITY.md](../SECURITY.md) — Security policy + the security-controls posture.
+- [security/CODEQL_TRIAGE.md](security/CODEQL_TRIAGE.md) — CodeQL scan triage.
+- [LICENSE_COMPLIANCE.md](LICENSE_COMPLIANCE.md) — Dependency license-compatibility
+  audit for BSL-1.1 sellability (incl. the **PyMuPDF AGPL** blocker).
+- [AUTONOMOUS_SESSION_LOG.md](AUTONOMOUS_SESSION_LOG.md) — Record of the autonomous
+  audit/hardening run: every change with a one-line revert, council verdicts, and
+  items held for the owner.
 
 ## Planning & tracker (`agent_plan/`)
 
