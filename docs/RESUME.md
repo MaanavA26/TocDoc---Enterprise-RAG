@@ -1,8 +1,19 @@
 # Picking TocDoc back up
 
-> A resume-from-cold guide. Last refreshed 2026-06-05 after a large hardening +
-> modernization pass. Read this first, then `docs/agent_plan/00_MASTER_TRACKER.md`
+> A resume-from-cold guide. Read this first, then `docs/agent_plan/00_MASTER_TRACKER.md`
 > for per-item status and `docs/ARCHITECTURE.md` for the system tour.
+>
+> **⚠️ Most recent — autonomous hardening run (2026-06-06).** A deep multi-audit pass
+> ran (security + integration/new-strides + license-compatibility): **65 findings fixed,
+> 5 HIGH** (all in the new strides — SSE streaming, OTel leaks, SDK parser), on green
+> `main`. Full record + a one-line `git revert` for every change:
+> [`AUTONOMOUS_SESSION_LOG.md`](AUTONOMOUS_SESSION_LOG.md).
+> **Top open item — a sellability blocker:** PyMuPDF (`fitz`) is **AGPL-3.0**,
+> incompatible with selling under BSL 1.1 → [`LICENSE_COMPLIANCE.md`](LICENSE_COMPLIANCE.md)
+> (buy the Artifex license or swap to `pypdf`/`pdfplumber` + validate).
+> **Nothing has been validated against live Azure** — run
+> [`deployment/SMOKE_TEST.md`](deployment/SMOKE_TEST.md) before any client traffic.
+> To turn on the dark P3 agentic layer, see [`deployment/P3_ENABLEMENT.md`](deployment/P3_ENABLEMENT.md).
 
 ## Status in one paragraph
 
@@ -161,8 +172,11 @@ pytest eval/tests
   - `10_P4_1_TEAMS_BOT_ADR.md` — Teams bot (**shipped**, `services/teams-bot/`)
   - `00_PHASE_2_EXECUTION_PLAN.md`, `01`–`06` — Phase 2 specs and decisions
 - **Packaging:** `docs/PRODUCT_TIERS.md`. **Deploy:** `infra/main.bicep` (Bicep)
-  or `infra/terraform/` (Terraform); `charts/tocdoc/` (Helm).
-- **Security:** the full audit report from the hardening pass was kept **out of
-  the repo** (a live-findings doc is an attacker checklist on a public repo); all
-  36 findings are fixed in `main`. `docs/security/CODEQL_TRIAGE.md` is the
-  committed scan triage.
+  or `infra/terraform/` (Terraform); `charts/tocdoc/` (Helm). **Live-validate:**
+  `docs/deployment/SMOKE_TEST.md`. **Published images:** `docs/deployment/CONTAINER_IMAGES.md`.
+- **Enable the dark P3 agentic layer:** `docs/deployment/P3_ENABLEMENT.md`.
+- **Autonomous hardening run:** `docs/AUTONOMOUS_SESSION_LOG.md` — full audit→fix
+  record (65 findings, 5 HIGH) with one-line reverts.
+- **License / sellability:** `docs/LICENSE_COMPLIANCE.md` (incl. the PyMuPDF AGPL blocker).
+- **Security posture:** `SECURITY.md` (controls in place) + `docs/security/CODEQL_TRIAGE.md`.
+  Detailed residual-risk threat models were kept out of the public repo by design.
