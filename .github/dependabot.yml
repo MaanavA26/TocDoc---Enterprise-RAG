@@ -37,6 +37,11 @@ updates:
       python-minor-patch:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+    ignore:
+      # pydantic_core moves only in lockstep with pydantic (each pydantic
+      # release pins its exact pydantic-core); a solo core bump can never
+      # resolve against the pinned closure (see closed #186/#187).
+      - dependency-name: "pydantic_core"
 
   # ---------------------------------------------------------------------------
   # Python — ingestion service (requirements.txt + requirements-dev.txt)
@@ -62,6 +67,19 @@ updates:
       python-minor-patch:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+    ignore:
+      # pydantic_core moves only in lockstep with pydantic (see the qna block).
+      - dependency-name: "pydantic_core"
+      # The OpenTelemetry family is exact-pinned by azure-monitor-opentelemetry
+      # (1.8.8, the latest as of 2026-06-12, pins instrumentation==0.61b0;
+      # instrumentation 0.61b0 requires wrapt<2; opentelemetry-api 1.40 holds
+      # importlib_metadata). None of these can move until Microsoft ships a
+      # newer azure-monitor-opentelemetry — the azure group will surface that
+      # release; unignore these and bump the whole family together then
+      # (see closed #194/#195/#196).
+      - dependency-name: "wrapt"
+      - dependency-name: "opentelemetry-*"
+      - dependency-name: "importlib_metadata"
 
   # ---------------------------------------------------------------------------
   # Python — client SDK (clients/python, pyproject.toml)
@@ -100,6 +118,20 @@ updates:
       eval-minor-patch:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+    ignore:
+      # eval/ is deliberately held on the ragas-compatible langchain 0.3.x line:
+      # ragas 0.4.3 breaks on langchain(-community) 0.4+/1.x (removed
+      # ChatVertexAI import — see the rationale header in eval/requirements.txt).
+      # langsmith/openai/tiktoken are version-coupled to that line. eval is a
+      # CI-only harness (never deployed); the mocked test (eval) gate is the
+      # regression backstop. Remove these when ragas supports langchain-core >= 1
+      # (third decline of this family: #121–#126, #150–#155, #188–#192).
+      - dependency-name: "langchain*"
+      - dependency-name: "langgraph*"
+      - dependency-name: "langsmith"
+      - dependency-name: "openai"
+      - dependency-name: "tiktoken"
+      - dependency-name: "ragas"
 
   # ---------------------------------------------------------------------------
   # GitHub Actions — CI workflow pins
