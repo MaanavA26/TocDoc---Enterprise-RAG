@@ -119,12 +119,28 @@ coordinated jump ⇒ do it as a runtime-validated upgrade PR with the suite gree
 Note the dev pip proxy mirror can lag public PyPI (it once froze `aiohttp` to
 3.13.5) — **CI (public PyPI) is the source of truth, not a local proxy venv.**
 
-## Branch-protection gotcha
+## Branch protection & the `--admin` merge rule
 
-`main` requires a code-owner review. CODEOWNERS (added via #64) resolves to the
-repo owner, who also authors PRs — so GitHub blocks self-approval and
-owner-authored PRs are merged with an `--admin` bypass. For a real gate long-term,
-add a documented admin/bot bypass exception or bring in a second reviewer.
+`main` protection (hardened 2026-06-12): **13 required status checks** — the 12
+`ci.yml` job contexts plus `analyze (python)` from `codeql.yml` (`strict`
+up-to-date is OFF; the default-setup `CodeQL` check and the path-filtered docs
+checks are deliberately NOT required) — plus 1 code-owner review with
+stale-dismissal, required conversation resolution, linear history, and no
+force-pushes/deletions. Renaming a `ci.yml` job or adding workflow path
+filters strands PRs on "Expected — waiting"; update the protection rule in the
+same change (warning comment at the top of `ci.yml`).
+
+CODEOWNERS (added via #64) resolves to the repo owner, who also authors PRs —
+so GitHub blocks self-approval and owner-authored PRs are merged with an
+`--admin` bypass. Because `enforce_admins` is OFF, **`--admin` bypasses the
+required checks too**, so the gate binds the owner only procedurally:
+
+> **`--admin` merge is permitted only after `gh pr checks <n>` shows every
+> required context green on the PR's current head SHA. Never use `--admin` to
+> step past a red or missing required check.**
+
+For a real mechanical gate long-term, bring in a second reviewer (or a review
+bot) and turn `enforce_admins` on.
 
 ## How to run tests locally
 
