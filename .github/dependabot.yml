@@ -140,6 +140,10 @@ updates:
       - dependency-name: "openai"
       - dependency-name: "tiktoken"
       - dependency-name: "ragas"
+      # pydantic_core moves only in lockstep with pydantic (see the service
+      # blocks); a solo core bump poisons the whole eval-minor-patch group
+      # (closed #204/#213).
+      - dependency-name: "pydantic_core"
 
   # ---------------------------------------------------------------------------
   # GitHub Actions — CI workflow pins
