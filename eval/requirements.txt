@@ -81,7 +81,7 @@ pillow==12.2.0
 pydantic==2.13.4
 pydantic-settings==2.14.1
 pydantic_core==2.46.4
-marshmallow==3.26.2
+marshmallow==4.3.0
 dataclasses-json==0.6.7
 SQLAlchemy==2.0.41
 sqlmodel==0.0.24
