@@ -21,6 +21,14 @@ name: ci
 # job) intended to PREVENT regressions and be ratcheted upward over time, not
 # to red the build at its current baseline. Concurrency cancels superseded
 # runs on the same ref.
+#
+# ⚠ BRANCH-PROTECTION COUPLING: the job/check names this workflow produces
+# (lint (ruff), security (bandit + pip-audit), bicep build, helm lint,
+# shellcheck, test (qna|ingestion|sdk|eval|teams-bot|integration|loadtest))
+# are REQUIRED status checks on main, plus analyze (python) from codeql.yml.
+# Renaming a job, changing matrix values, or adding workflow-level path
+# filters will strand PRs on "Expected — waiting" forever. Update the branch
+# protection rule in the same change, or don't make the change.
 
 on:
   pull_request:
@@ -101,40 +109,25 @@ jobs:
       # pip-audit resolves the requirements file against the advisory DB
       # (PyPI/OSV), per service so a CVE in one dep set doesn't mask the other.
       #
-      # HARD GATE (no continue-on-error). Most of the previously-tracked backlog
-      # (starlette, python-multipart, cryptography, ...) was cleared by the
-      # recent dependency upgrade — both services now run cryptography 48,
-      # langchain 1.3.2, fastapi 0.136.3 / starlette 1.2.0, python-multipart
-      # 0.0.29, past the previously-vulnerable ranges.
+      # HARD GATE (no continue-on-error). The previously-tracked advisory
+      # backlog (starlette, python-multipart, cryptography, aiohttp, ...) was
+      # cleared by coordinated dependency upgrades — the pinned closures sit
+      # past the previously-vulnerable ranges.
       #
       # pip-audit has no severity selector; it fails on ANY advisory minus an
-      # explicit allowlist (--ignore-vuln <ID>, repeatable). The allowlist below
-      # is NOT empty — it carries exactly the two advisories the gate currently
-      # surfaces, both in aiohttp 3.13.5, both fixed in aiohttp 3.14.0:
-      #   GHSA-jg22-mg44-37j8, GHSA-hg6j-4rv6-33pg
-      # These are FIXABLE (bump aiohttp to 3.14.0), but that bump lives in the
-      # service requirements.txt files, which are OUT OF SCOPE for this
-      # ci.yml-only hardening PR. Tracked as a follow-up; the allowlist is the
-      # documented bridge so the gate goes green now without swallowing
-      # everything. Remove these two entries the moment aiohttp is bumped.
-      #
-      # Any OTHER advisory — including a new one in aiohttp — still fails the
-      # job (the PR's own security check reds; it cannot red main, since a PR
-      # must pass this job to merge). New criticals are NOT silently swallowed.
+      # explicit allowlist (--ignore-vuln <ID>, repeatable). The allowlist is
+      # currently EMPTY — the two aiohttp 3.13.5 advisories it used to bridge
+      # (GHSA-jg22-mg44-37j8, GHSA-hg6j-4rv6-33pg) were fixed by the aiohttp
+      # 3.14.x bump and both closures audit clean with no exclusions. If a new
+      # advisory ever needs bridging, add a dated --ignore-vuln entry WITH a
+      # comment naming its removal condition — never leave one past its fix.
       - name: pip-audit (QnA dependencies)
-        run: >-
-          pip-audit --requirement services/qna/requirements.txt
-          --ignore-vuln GHSA-jg22-mg44-37j8
-          --ignore-vuln GHSA-hg6j-4rv6-33pg
+        run: pip-audit --requirement services/qna/requirements.txt
 
       - name: pip-audit (ingestion dependencies)
         # libgl1 / libglib2.0-0 not needed here — pip-audit only inspects the
         # requirements file, doesn't import the packages.
-        # Same allowlist as the QnA step — ingestion also pins aiohttp 3.13.5.
-        run: >-
-          pip-audit --requirement services/ingestion/requirements.txt
-          --ignore-vuln GHSA-jg22-mg44-37j8
-          --ignore-vuln GHSA-hg6j-4rv6-33pg
+        run: pip-audit --requirement services/ingestion/requirements.txt
 
   # ---------------------------------------------------------------------------
   # Bicep — validate IaC template compiles
