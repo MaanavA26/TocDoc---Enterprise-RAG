@@ -91,7 +91,7 @@ PyYAML==6.0.2
 
 # --- RAGAS eval-only deps (the reason this harness is decoupled) ---
 ragas==0.4.3
-datasets==4.4.1
+datasets==5.0.0
 
 # --- test runner (CI gate: `pytest eval -q`) ---
 pytest
