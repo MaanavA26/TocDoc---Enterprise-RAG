@@ -42,6 +42,11 @@ updates:
       # release pins its exact pydantic-core); a solo core bump can never
       # resolve against the pinned closure (see closed #186/#187).
       - dependency-name: "pydantic_core"
+      # websockets 16 is capped by langgraph-sdk (<16,>=14). Unignore when a
+      # langchain-group bump brings a langgraph-sdk that lifts the cap, and
+      # move both together (see closed #193/#209).
+      - dependency-name: "websockets"
+        update-types: ["version-update:semver-major"]
 
   # ---------------------------------------------------------------------------
   # Python — ingestion service (requirements.txt + requirements-dev.txt)
@@ -70,6 +75,9 @@ updates:
     ignore:
       # pydantic_core moves only in lockstep with pydantic (see the qna block).
       - dependency-name: "pydantic_core"
+      # websockets 16 capped by langgraph-sdk <16 (see the qna block).
+      - dependency-name: "websockets"
+        update-types: ["version-update:semver-major"]
       # The OpenTelemetry family is exact-pinned by azure-monitor-opentelemetry
       # (1.8.8, the latest as of 2026-06-12, pins instrumentation==0.61b0;
       # instrumentation 0.61b0 requires wrapt<2; opentelemetry-api 1.40 holds
