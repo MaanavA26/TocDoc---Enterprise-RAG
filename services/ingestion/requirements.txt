@@ -22,7 +22,7 @@ click==8.4.1
 cryptography==48.0.1
 distro==1.9.0
 et_xmlfile==2.0.0
-fastapi==0.136.3
+fastapi==0.137.0
 frozenlist==1.8.0
 greenlet==3.5.1 ; platform_machine == "aarch64" or platform_machine == "ppc64le" or platform_machine == "x86_64" or platform_machine == "amd64" or platform_machine == "AMD64" or platform_machine == "win32" or platform_machine == "WIN32"
 h11==0.16.0
