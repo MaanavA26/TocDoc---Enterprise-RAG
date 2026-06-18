@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ApiError } from "../api/client";
 import { useApi } from "../api/ApiContext";
 import type { DeleteDocumentResponse, DeleteTenantResponse } from "../api/types";
@@ -16,6 +16,14 @@ function DeleteDocumentCard() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
   const [result, setResult] = useState<DeleteDocumentResponse | null>(null);
+
+  // Reset on scope change so a prior tenant's input/result/error never carries
+  // into a new bot_tag.
+  useEffect(() => {
+    setDocumentId("");
+    setError(null);
+    setResult(null);
+  }, [botTag]);
 
   const handleDelete = async () => {
     if (!documentId.trim()) return;
@@ -80,6 +88,15 @@ function DeleteTenantCard() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
   const [result, setResult] = useState<DeleteTenantResponse | null>(null);
+
+  // Reset confirmation + result/error on scope change so a re-typed tag or
+  // armed checkbox never persists across a bot_tag switch.
+  useEffect(() => {
+    setConfirmChecked(false);
+    setTypedTag("");
+    setError(null);
+    setResult(null);
+  }, [botTag]);
 
   const armed = confirmChecked && typedTag.trim() === botTag;
 

@@ -28,7 +28,7 @@ for correlation and any per-field validation details.
 
 ## Prerequisites
 
-- Node.js 18+ (developed against Node 20/22; works on current LTS and later).
+- Node.js **20.19+** or **22.13+** (required by eslint 9 / typescript-eslint 8; CI uses 22.13).
 - A reachable ingestion service exposing the admin API, and a valid admin token
   (`X-Admin-Token`).
 
@@ -94,7 +94,7 @@ response models in `services/ingestion/admin/models.py`. The TypeScript types in
 | `npm run dev`       | Start the Vite dev server.                     |
 | `npm run build`     | Type-check (`tsc -b`) and produce a `dist/`.   |
 | `npm run preview`   | Serve the production build locally.            |
-| `npm run typecheck` | `tsc --noEmit` type check only.                |
+| `npm run typecheck` | Type-check via `tsc -b` (build mode, no emit).  |
 | `npm run lint`      | ESLint over the project.                       |
 | `npm test`          | Run the vitest suite once.                     |
 

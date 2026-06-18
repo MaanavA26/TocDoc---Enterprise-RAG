@@ -34,13 +34,21 @@ export default function ConnectorsPage() {
   const [initialLoading, setInitialLoading] = useState(true);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const loadedOnce = useRef(false);
+  // loadRuns fires from the initial effect, the polling interval, the manual
+  // "Refresh now" button, and the post-trigger reload — several can be in
+  // flight at once. Apply only the latest response so an older, slower fetch
+  // can't clobber a newer one (out-of-order refresh).
+  const runsCallIdRef = useRef(0);
 
   const loadRuns = useCallback(async () => {
+    const callId = ++runsCallIdRef.current;
     try {
       const data = await client.listConnectorRuns(50);
+      if (runsCallIdRef.current !== callId) return;
       setRuns(data);
       setListError(null);
     } catch (err) {
+      if (runsCallIdRef.current !== callId) return;
       setListError(
         err instanceof ApiError
           ? err

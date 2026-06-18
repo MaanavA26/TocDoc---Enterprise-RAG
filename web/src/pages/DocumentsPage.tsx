@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useApi } from "../api/ApiContext";
 import type { DocumentDetailResponse } from "../api/types";
 import { useAsync } from "../hooks/useAsync";
@@ -71,6 +71,12 @@ function DocumentDetail({
 export default function DocumentsPage() {
   const { client, botTag } = useApi();
   const [selected, setSelected] = useState<string | null>(null);
+
+  // Clear the open detail panel when the bot_tag scope changes — otherwise the
+  // previously selected document_id immediately refetches under the new scope.
+  useEffect(() => {
+    setSelected(null);
+  }, [botTag]);
 
   const { data, loading, error, reload } = useAsync(
     () => client.listDocuments(botTag),

@@ -35,11 +35,19 @@ export function useAsync<T>(
   });
   const callIdRef = useRef(0);
 
+  // Keep the latest loader in a ref so `run` (intentionally memoized on `deps`,
+  // not on `loader`) always invokes the CURRENT loader. Without this, reload()
+  // could call a stale loader bound to an old API client after a settings/scope
+  // change while `deps` were unchanged.
+  const loaderRef = useRef(loader);
+  loaderRef.current = loader;
+
   const run = useCallback(() => {
     if (!enabled) return;
     const callId = ++callIdRef.current;
     setState((s) => ({ ...s, loading: true, error: null }));
-    loader()
+    loaderRef
+      .current()
       .then((data) => {
         if (callIdRef.current === callId) {
           setState({ data, loading: false, error: null });
