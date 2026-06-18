@@ -65,8 +65,9 @@ flowchart LR
     U -->|Bearer JWT| MW
     MW -->|JWKS fetch HTTPS| AAD
     MW --> TB --> PIPE --> SS --> SEARCH
-    U -->|file upload + X-Admin-Token| UP
-    U -->|X-Admin-Token| ADMIN --> SAS --> SEARCH
+    U -.->|file upload + X-Admin-Token\n(only if ingress externalized)| UP
+    U -.->|X-Admin-Token\n(only if ingress externalized)| ADMIN
+    ADMIN --> SAS --> SEARCH
     QnA -.secrets at startup.-> KV
     ING -.secrets at startup.-> KV
     PIPE --> AOAI
