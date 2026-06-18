@@ -75,7 +75,7 @@ openpyxl==3.1.5
 
 # --- document / model utilities (QnA import-time closure) ---
 PyMuPDF==1.27.2.3
-pypdf==6.13.2
+pypdf==6.13.3
 pytesseract==0.3.13
 pillow==12.2.0
 pydantic==2.13.4
