@@ -69,8 +69,9 @@ USER appuser
 EXPOSE 5501
 
 # Probe the in-process /health route via the stdlib (no curl needed at the app
-# layer). urlopen raises on a non-2xx response, exiting non-zero and marking
-# the container unhealthy.
+# layer). urlopen raises HTTPError on a 4xx/5xx response; any other non-200
+# status fails the explicit `.status == 200` check. Either path exits non-zero
+# and marks the container unhealthy.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5501/health', timeout=4).status == 200 else 1)"]
 
