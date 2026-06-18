@@ -15,6 +15,11 @@ pip install -r services/qna/requirements.txt
 pip install -r services/ingestion/requirements.txt
 ```
 
+> **Intel-Mac note:** `cryptography` ships **arm64-only** macOS wheels, so an Intel
+> (x86_64) Mac builds it from source (needs a Rust toolchain + OpenSSL). Apple
+> Silicon, Linux, and the container images are unaffected. See
+> [`docs/LOCAL_DEV.md`](docs/LOCAL_DEV.md) → Prerequisites for the workaround.
+
 Install the CI tooling used for local checks:
 
 ```bash

@@ -22,6 +22,13 @@ to run the test suites.
 | Docker + Docker Compose | 24.x / v2 | Only needed for the Compose workflow. |
 | Azure resources | — | Only needed to serve real requests, not to run tests. |
 
+> **macOS contributors — `cryptography` wheels.** `cryptography` (49.x) publishes
+> **arm64-only** macOS wheels. On **Apple Silicon** `pip install` just works. On an
+> **Intel (x86_64) Mac** there is no prebuilt wheel, so pip builds it from source —
+> install a **Rust toolchain** (`rustup`) and OpenSSL headers first, or develop via
+> the **Docker Compose** workflow / on Linux / on Apple Silicon. **CI and the
+> container images (`linux/amd64`) are unaffected** — this is a local-dev-only caveat.
+
 The two services have **separate** dependency sets and are run independently:
 
 ```text
