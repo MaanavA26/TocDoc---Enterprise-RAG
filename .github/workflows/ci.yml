@@ -468,3 +468,91 @@ jobs:
 
       - name: Run pytest
         run: pytest tests/integration -q
+
+  # ---------------------------------------------------------------------------
+  # Docker build + boot smoke (advisory; NOT a required status check).
+  # ---------------------------------------------------------------------------
+  #
+  # CI never built the service images before this — only release.yml did, on tag
+  # push, so a Dockerfile regression first surfaced at release time. This job
+  # builds each image (linux/amd64, matching release.yml so we test the artifact
+  # we actually ship) and boots it far enough to clear the image's own
+  # HEALTHCHECK, on PRs that touch a service's Dockerfile/.dockerignore.
+  #
+  # It lives in this workflow with NO workflow-level path filter (so it never
+  # strands a PR on "Expected — waiting") and self-skips via a step-level
+  # dorny/paths-filter. It is deliberately NOT in branch protection's required
+  # checks yet — advisory until proven stable; promote it there in a separate,
+  # explicit protection-rule change (see the banner at the top of this file).
+  docker-build:
+    name: docker build (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [qna, ingestion]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Detect Dockerfile changes
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            docker:
+              - 'services/${{ matrix.service }}/Dockerfile'
+              - 'services/${{ matrix.service }}/.dockerignore'
+
+      - name: Set up Docker Buildx
+        if: steps.changes.outputs.docker == 'true'
+        uses: docker/setup-buildx-action@v4
+
+      # Build the linux/amd64 image (the platform release.yml ships) and load it
+      # into the local daemon for the smoke. gha cache keeps warm builds cheap.
+      - name: Build image
+        if: steps.changes.outputs.docker == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: services/${{ matrix.service }}
+          file: services/${{ matrix.service }}/Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: tocdoc-${{ matrix.service }}:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Boot the container and let Docker adjudicate the image's own HEALTHCHECK.
+      # qna validates config at import and loads Key Vault at startup, so it needs
+      # dummy env to reach a listening state (--network none makes the KV fetch
+      # fail fast + hermetically; loopback for the healthcheck still works).
+      # ingestion needs no env. Pass criterion: health=healthy within ~100s.
+      - name: Boot + healthcheck smoke
+        if: steps.changes.outputs.docker == 'true'
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.service }}" = "qna" ]; then
+            docker run -d --name smoke --network none \
+              -e AZURE_OPENAI_ENDPOINT=https://dummy.openai.azure.com \
+              -e AZURE_OPENAI_KEY=dummy \
+              -e AZURE_OPENAI_VERSION=2024-06-01 \
+              -e AZURE_OPENAI_EMBEDDING_MODEL=text-embedding-3-small \
+              -e AZURE_SEARCH_ENDPOINT=https://dummy.search.windows.net \
+              -e AZURE_SEARCH_KEY=dummy -e INDEX_NAME=dummy -e AUDIENCE_ID=api://dummy \
+              -e AZURE_TENANT_ID=00000000-0000-0000-0000-000000000000 \
+              -e AZURE_CLIENT_ID=00000000-0000-0000-0000-000000000000 \
+              -e AZURE_CLIENT_SECRET=dummy -e AZURE_KEY_VAULT=dummy-kv \
+              tocdoc-qna:ci
+          else
+            docker run -d --name smoke tocdoc-ingestion:ci
+          fi
+          for i in $(seq 1 20); do
+            status="$(docker inspect -f '{{.State.Health.Status}}' smoke 2>/dev/null || echo missing)"
+            echo "attempt $i: health=$status"
+            if [ "$status" = "healthy" ]; then docker rm -f smoke >/dev/null; exit 0; fi
+            if [ "$status" = "unhealthy" ]; then echo '--- container logs ---'; docker logs smoke; docker rm -f smoke >/dev/null; exit 1; fi
+            sleep 5
+          done
+          echo "healthcheck never reached healthy"; docker logs smoke; docker rm -f smoke >/dev/null; exit 1

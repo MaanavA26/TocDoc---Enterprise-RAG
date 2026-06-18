@@ -130,6 +130,16 @@ force-pushes/deletions. Renaming a `ci.yml` job or adding workflow path
 filters strands PRs on "Expected — waiting"; update the protection rule in the
 same change (warning comment at the top of `ci.yml`).
 
+**Advisory (NOT required) jobs.** `ci.yml` also runs `docker build (qna)` /
+`docker build (ingestion)` (build + boot-healthcheck smoke; self-skips unless a
+service Dockerfile/.dockerignore changed) and `web (build/test)` (npm
+ci/build/typecheck/lint/test on Node 22.13; self-skips unless `web/**` changed).
+Both live in the workflow with **no** workflow path filter (so they never strand
+a PR) and self-skip via step-level `dorny/paths-filter`. They are **deliberately
+NOT in the required-checks list** — advisory until proven stable. A red advisory
+job does NOT block an `--admin` merge, so read them by eye; promote one to
+required only via an explicit, separate branch-protection change.
+
 CODEOWNERS (added via #64) resolves to the repo owner, who also authors PRs —
 so GitHub blocks self-approval and owner-authored PRs are merged with an
 `--admin` bypass. Because `enforce_admins` is OFF, **`--admin` bypasses the
