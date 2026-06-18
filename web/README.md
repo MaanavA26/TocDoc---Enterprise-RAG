@@ -53,18 +53,21 @@ Open the app, expand **Connection settings**, and enter:
 These values are stored in `sessionStorage` only — they survive navigation but
 are cleared when the tab closes, and are never written to disk or committed.
 
-## Configuring the API URL / token via env (optional)
+## Configuring the API base URL via env (optional)
 
-For local convenience you can pre-fill the connection settings at build time.
-Copy `.env.example` to `.env.local` (gitignored) and set:
+For local convenience you can pre-fill the **base URL** at build time. Copy
+`.env.example` to `.env.local` (gitignored) and set:
 
 ```dotenv
 VITE_ADMIN_API_BASE_URL=http://localhost:8000
-VITE_ADMIN_TOKEN=your-admin-token
 ```
 
-UI-entered values always take precedence over these defaults. **Never commit a
-real token or a client-specific URL.**
+UI-entered values always take precedence. **Never commit a client-specific URL.**
+
+**The admin token is never provided via a build-time Vite env var.** Vite
+inlines every `VITE_*` value into the generated bundle, so a build-time token
+would be embedded in the shipped client JS and readable by anyone with it. Enter
+the token in the UI at runtime — it is held only in `sessionStorage`.
 
 ## API base URL contract
 

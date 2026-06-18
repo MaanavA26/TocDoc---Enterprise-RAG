@@ -3,13 +3,13 @@
 // Resolution order:
 //   1. Values the operator types into the UI (persisted to sessionStorage —
 //      survives navigation, cleared when the tab closes; never localStorage).
-//   2. Build-time defaults from Vite env (VITE_ADMIN_API_BASE_URL,
-//      VITE_ADMIN_TOKEN) — optional, LOCAL DEV ONLY. Vite inlines VITE_* vars
-//      into the built bundle, so VITE_ADMIN_TOKEN must NEVER be set for a
-//      production/shared build (it would ship the token in the client JS).
-//      Prefer the runtime UI entry (sessionStorage) above for any real token.
+//   2. Build-time default for the BASE URL only, from Vite env
+//      (VITE_ADMIN_API_BASE_URL) — optional, local-dev convenience.
 //
-// No real URL or token value is ever committed; see .env.example.
+// The admin TOKEN deliberately has NO build-time env path: Vite inlines VITE_*
+// vars into the built bundle, so a build-time token would ship in the client
+// JS. The token is runtime/session-only — entered in the UI, kept in
+// sessionStorage. No real URL or token is ever committed; see .env.example.
 
 export interface ApiSettings {
   baseUrl: string;
@@ -41,7 +41,9 @@ export function loadSettings(): ApiSettings {
   const storedToken = safeGetItem(TOKEN_KEY);
   return {
     baseUrl: storedBase ?? envDefault("VITE_ADMIN_API_BASE_URL"),
-    adminToken: storedToken ?? envDefault("VITE_ADMIN_TOKEN"),
+    // No env fallback for the token — runtime/sessionStorage only (a VITE_ env
+    // token would be inlined into the shipped bundle).
+    adminToken: storedToken ?? "",
   };
 }
 
