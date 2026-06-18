@@ -556,3 +556,63 @@ jobs:
             sleep 5
           done
           echo "healthcheck never reached healthy"; docker logs smoke; docker rm -f smoke >/dev/null; exit 1
+
+  # ---------------------------------------------------------------------------
+  # Web — admin dashboard SPA (advisory; NOT a required status check).
+  # ---------------------------------------------------------------------------
+  #
+  # Builds/typechecks/lints/tests the Vite+React+TS admin dashboard under web/.
+  # Lives in ci.yml with NO workflow path filter (so it never strands a PR on
+  # "Expected — waiting") and self-skips via a step-level dorny/paths-filter when
+  # web/ is untouched. Node pinned to 22.13 (eslint 9 / typescript-eslint 8
+  # require >=20.19 || >=22.13). No `npm audit` step by design: a non-gating
+  # audit is fake-green, and a gating one would block on dev-only advisories —
+  # JS supply-chain gating is a separate, deliberate decision. ADVISORY: not in
+  # branch protection's required checks (a red web job does not block --admin);
+  # promote later via an explicit protection-rule change.
+  web:
+    name: web (build/test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Detect web changes
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            web:
+              - 'web/**'
+
+      - name: Set up Node
+        if: steps.changes.outputs.web == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.13'
+
+      - name: Install (npm ci)
+        if: steps.changes.outputs.web == 'true'
+        working-directory: web
+        run: npm ci
+
+      - name: Build (tsc -b + vite build)
+        if: steps.changes.outputs.web == 'true'
+        working-directory: web
+        run: npm run build
+
+      - name: Typecheck
+        if: steps.changes.outputs.web == 'true'
+        working-directory: web
+        run: npm run typecheck
+
+      - name: Lint
+        if: steps.changes.outputs.web == 'true'
+        working-directory: web
+        run: npm run lint
+
+      - name: Test
+        if: steps.changes.outputs.web == 'true'
+        working-directory: web
+        run: npm test
