@@ -71,7 +71,7 @@ propcache==0.5.2
 pyasn1==0.6.3
 pycparser==3.0
 pydantic==2.13.4
-pydantic-settings==2.14.1
+pydantic-settings==2.14.2
 pydantic_core==2.46.4
 PyJWT==2.13.0
 python-dateutil==2.9.0.post0
