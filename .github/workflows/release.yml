@@ -64,7 +64,7 @@ jobs:
             image: tocdoc-ingestion
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -135,7 +135,7 @@ jobs:
       contents: write   # required to create a GitHub Release
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # gh is preinstalled on ubuntu-latest. --generate-notes produces release
       # notes from merged PRs/commits since the previous tag. --verify-tag
