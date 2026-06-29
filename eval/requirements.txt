@@ -24,7 +24,7 @@
 #     pip install -r eval/requirements.txt
 
 # --- web / async / http (QnA import-time closure) ---
-fastapi==0.137.0
+fastapi==0.138.1
 starlette==1.3.1
 uvicorn==0.49.0
 python-multipart==0.0.32
@@ -35,7 +35,7 @@ frozenlist==1.8.0
 multidict==6.7.1
 propcache==0.5.2
 yarl==1.24.2
-anyio==4.13.0
+anyio==4.14.1
 httpx==0.28.1
 httpcore==1.0.9
 httpx-sse==0.4.3
@@ -69,23 +69,23 @@ tiktoken==0.9.0
 
 # --- data / numeric (ragas-compatible: pandas 2.x, numpy 2.2.x) ---
 pandas==2.2.3
-numpy==2.4.6
-scipy==1.17.1
+numpy==2.5.0
+scipy==1.18.0
 openpyxl==3.1.5
 
 # --- document / model utilities (QnA import-time closure) ---
 PyMuPDF==1.27.2.3
-pypdf==6.13.3
+pypdf==6.14.2
 pytesseract==0.3.13
 pillow==12.2.0
 pydantic==2.13.4
-pydantic-settings==2.14.1
+pydantic-settings==2.14.2
 pydantic_core==2.46.4
 marshmallow==3.26.2
 dataclasses-json==0.6.7
-SQLAlchemy==2.0.50
-sqlmodel==0.0.38
-greenlet==3.5.1
+SQLAlchemy==2.0.51
+sqlmodel==0.0.39
+greenlet==3.5.3
 python-dotenv==1.2.2
 PyYAML==6.0.3
 
