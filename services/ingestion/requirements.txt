@@ -3,7 +3,7 @@ aiohttp==3.14.1
 aiosignal==1.4.0
 annotated-doc==0.0.4
 annotated-types==0.7.0
-anyio==4.14.0
+anyio==4.14.1
 asgiref==3.11.1
 attrs==26.1.0
 azure-ai-documentintelligence==1.0.2
@@ -23,7 +23,7 @@ click==8.4.2
 cryptography==49.0.0
 distro==1.9.0
 et_xmlfile==2.0.0
-fastapi==0.138.0
+fastapi==0.139.0
 frozenlist==1.8.0
 greenlet==3.5.3 ; platform_machine == "aarch64" or platform_machine == "ppc64le" or platform_machine == "x86_64" or platform_machine == "amd64" or platform_machine == "AMD64" or platform_machine == "win32" or platform_machine == "WIN32"
 h11==0.16.0
