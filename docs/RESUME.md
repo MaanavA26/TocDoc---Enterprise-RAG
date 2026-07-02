@@ -110,12 +110,28 @@ deploy that ignores them will refuse to serve or reject calls — by design:
 
 ## Dependabot
 
-Fully reconciled — **0 open Dependabot PRs** at last pass. The old "deferred
-cascade" is resolved: the runtime is on Python 3.12 and both services on
-langchain 1.x, so pandas-3 / numpy / scipy / openai-2 / langchain-1.x all
-installed and validated. When Dependabot opens new PRs: green CI ⇒ merge (one per
-`requirements.txt` at a time, let it rebase the rest); anything requiring a major
-coordinated jump ⇒ do it as a runtime-validated upgrade PR with the suite green.
+Fully reconciled — **0 open Dependabot PRs** at last pass (2026-07-02: the
+19-PR June-dormancy wave cleared — 5 merged, 14 closed as superseded/declined,
+via 2 authored coordinated PRs). The old "deferred cascade" is resolved: the
+runtime is on Python 3.12 and both services on langchain 1.x. Two standing
+rules, both learned 2026-07-02:
+
+- **Shared pins move in lockstep or not at all.** `test (integration)` installs
+  BOTH service closures into one environment, so a PR bumping a shared exact
+  pin in only one service is ResolutionImpossible by construction — per-service
+  Dependabot PRs (grouped or single) touching a dep pinned in both services can
+  NEVER pass that required check. Supersede them with one coordinated
+  both-services PR (#229/#260 precedent). eval-, web-, actions-, and
+  teams-bot-only PRs have their own closures and are exempt: green CI ⇒ merge.
+- **A recorded green is not a current green.** Advisories land out from under
+  open PRs; a 13-day-old green can sit on a security gate that would fail if
+  re-run today. When pip-audit-relevant advisories have been disclosed since a
+  PR's last check run, re-run its checks (`@dependabot rebase`) before merging
+  — never `--admin` through a recorded-but-refuted green. (2026-07-02
+  deviation, recorded: #234 was merged on a stale green while the gate was
+  latent-red; the content was a dev-only lockfile security fix, so harmless —
+  but don't repeat the pattern.)
+
 Note the dev pip proxy mirror can lag public PyPI (it once froze `aiohttp` to
 3.13.5) — **CI (public PyPI) is the source of truth, not a local proxy venv.**
 
