@@ -96,7 +96,7 @@ typing-inspect==0.9.0
 typing-inspection==0.4.2
 typing_extensions==4.16.0
 urllib3==2.7.0
-uvicorn==0.49.0
+uvicorn==0.50.0
 websockets==15.0.1
 xxhash==3.8.0
 yarl==1.24.2
