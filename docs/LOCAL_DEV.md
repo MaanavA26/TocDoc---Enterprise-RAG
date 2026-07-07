@@ -17,7 +17,7 @@ to run the test suites.
 
 | Tool | Version | Notes |
 | --- | --- | --- |
-| Python | 3.10 | Matches the container base image (`python:3.10-slim`). |
+| Python | 3.12 | Matches the container base image (`python:3.12-slim`) and CI. |
 | pip / venv | bundled with Python | A per-service virtualenv is recommended. |
 | Docker + Docker Compose | 24.x / v2 | Only needed for the Compose workflow. |
 | Azure resources | — | Only needed to serve real requests, not to run tests. |

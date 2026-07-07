@@ -1,516 +1,235 @@
 <div align="center">
 
-# TocDoc – Enterprise RAG Assistant
+# TocDoc — Enterprise RAG
 
-**Production-grade, multi-tenant Retrieval-Augmented Generation (RAG) platform  
-for intelligent document Q&A over enterprise PDF corpora.**
+**Source-available, multi-tenant, document-grounded Q&A platform,
+deployed into each client's own Azure subscription.**
 
-[![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![Azure OpenAI](https://img.shields.io/badge/Azure%20OpenAI-GPT--4o--mini-0078D4?logo=microsoft-azure&logoColor=white)](https://azure.microsoft.com/en-us/products/ai-services/openai-service)
-[![Azure AI Search](https://img.shields.io/badge/Azure%20AI%20Search-Hybrid%20Vector-0078D4?logo=microsoft-azure&logoColor=white)](https://azure.microsoft.com/en-us/products/ai-services/cognitive-search)
+[![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python&logoColor=white)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.139-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![LangChain](https://img.shields.io/badge/LangChain-1.x-1C3C3C)](https://python.langchain.com/)
+[![Azure](https://img.shields.io/badge/Azure-OpenAI%20·%20AI%20Search%20·%20Doc%20Intelligence-0078D4?logo=microsoft-azure&logoColor=white)](https://azure.microsoft.com/)
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL%201.1-blue)](LICENSE)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)](CONTRIBUTING.md)
 
 </div>
 
 ---
 
-## Table of Contents
+TocDoc ingests enterprise document corpora (PDF, DOCX, PPTX, HTML, MD, TXT) into
+a hybrid vector index and answers natural-language questions with **cited,
+grounded responses** — strictly constrained to the indexed corpus. It is built
+for the deployment model where the **client operates the stack in their own
+Azure tenancy**: no data leaves their subscription, and the orchestration code
+is source-available for inspection.
 
-- [Overview](#overview)
-- [Architecture](#architecture)
-- [Features](#features)
-- [Tech Stack](#tech-stack)
-- [Project Structure](#project-structure)
-- [Prerequisites](#prerequisites)
-- [Configuration](#configuration)
-- [Getting Started](#getting-started)
-  - [Local Development](#local-development)
-  - [Docker Compose](#docker-compose)
-- [API Reference](#api-reference)
-  - [Ingestion Service](#ingestion-service)
-  - [QnA Service](#qna-service)
-- [Deployment](#deployment)
-- [Known Limitations & Roadmap](#known-limitations--roadmap)
-- [Contributing](#contributing)
-- [License](#license)
+Two stateless FastAPI services form the core:
 
----
+| Service | Port | Path prefix | Responsibility |
+|---|---|---|---|
+| **Ingestion** | 5501 | `/upload_pipeline` | parse (Azure Document Intelligence) → chunk → embed → index; admin API; Blob/SharePoint connectors |
+| **QnA** | 5500 | `/qna` | Azure AD JWT auth → tenant binding → rephrase → hybrid retrieve → grounded answer + citations; SSE streaming |
 
-## Overview
+Around them: a typed **Python SDK** (+CLI, +LangChain retriever), a **Microsoft
+Teams bot**, an **admin web dashboard** (React SPA), a **RAGAS evaluation
+harness**, **Locust load tests**, and IaC for three deployment shapes
+(**Bicep** → Azure Container Apps, **Terraform** mirror, **Helm** → AKS).
 
-TocDoc is a production-ready RAG platform built to power **document-grounded Q&A chatbots** for enterprise environments. It ingests PDF documents into a hybrid vector search index and answers natural-language queries with **cited, grounded responses** — never hallucinating or drawing on pre-trained knowledge beyond the provided document corpus.
+## Project status — honest snapshot
 
-The system is split into two independently deployable microservices:
-
-| Service | Responsibility |
-|---|---|
-| **Ingestion** | Parse PDFs → chunk → embed → index into Azure Cognitive Search |
-| **QnA** | Rephrase queries → retrieve → call LLM → return cited answer |
-
-Both services are containerized, stateless, and designed for Kubernetes-native deployment with horizontal scaling.
-
----
+- **Shipped:** the two services with fail-closed security defaults, admin API,
+  connectors, SSE streaming, structured error contract, request-ID
+  observability, SDK, Teams bot adapter, admin SPA, eval harness, IaC — ~740
+  hermetic tests across the seven required CI suites, gated by 13 required
+  checks (hard pip-audit gate, 60% coverage floor on the two services, CodeQL).
+  The admin SPA and Docker images build/test as advisory CI jobs.
+- **Built but dark:** the P3 agentic layer (LangGraph router / map-reduce /
+  ReAct / self-critique) ships behind default-OFF flags
+  (`QNA_AGENT_ENABLED` + per-node flags). Enabling it is gated on an
+  architect-signed ADR and a staged rollout — it is **not validated
+  end-to-end**. See `docs/deployment/P3_ENABLEMENT.md`.
+- **Contract-only:** `page_citations` exists in the response schema but is never
+  populated — page-level ingestion awaits a reindex decision (ADR 09).
+- **Not yet done:** no live-Azure validation has ever been run
+  (`docs/deployment/SMOKE_TEST.md` is the mandatory pre-production gate); no
+  release tag has been cut; the BSL license placeholders (Licensor, Change
+  Date) are pending; PyMuPDF's AGPL license is an open sellability blocker
+  (`docs/LICENSE_COMPLIANCE.md`).
 
 ## Architecture
 
 ```mermaid
-flowchart TD
-    subgraph Client
-        UI[Frontend / API Client]
+flowchart LR
+    subgraph Clients
+        SDK[Python SDK / CLI]
+        TB[Teams bot]
+        WEB[Admin SPA]
     end
 
-    subgraph Ingestion Service [:5501]
-        A[POST /upload] --> B[Azure Document Intelligence\nread or layout mode]
-        B --> C{Chunking Strategy}
-        C -->|layout| D[MarkdownHeaderTextSplitter\npreserves structure]
-        C -->|read| E[Token Sliding Window\n500 tokens · 50 overlap]
-        D & E --> F[AzureOpenAI Embeddings\ntext-embedding-3-small]
-        F --> G[(Azure Cognitive Search\nHNSW Vector Index)]
+    subgraph QnA [QnA service :5500 /qna]
+        AUTH[Azure AD JWT RS256<br/>+ tenant binding, fail-closed] --> REPH[Rephrase<br/>greeting / follow-up aware]
+        REPH --> RET[Hybrid retrieval<br/>BM25 + HNSW vector, TOP_K 20<br/>optional L2 semantic rerank]
+        RET --> ANS[Grounded answer<br/>+ citation resolution]
+        AUTH -.->|flags default OFF| P3[LangGraph agentic layer<br/>router / map-reduce / ReAct / verifier]
     end
 
-    subgraph QnA Service [:5500]
-        H[POST /qna] --> I[Auth Middleware\nAzure AD JWT]
-        I --> J[Query Rephraser\ngreeting · followup · standalone]
-        J --> K[Embed rephrased query]
-        K --> L[Hybrid Search\ntext + vector · fr_tag filter]
-        L --> M[Grounded Prompt Builder]
-        M --> N[Azure OpenAI\ngpt-4o-mini]
-        N --> O[Citation Parser]
-        O --> P[JSON Response\nanswer + citation map]
+    subgraph Ingestion [Ingestion service :5501 /upload_pipeline]
+        UP[POST /upload<br/>X-Admin-Token] --> DI[Azure Document Intelligence<br/>prebuilt-read or prebuilt-layout]
+        DI --> CH[Chunking<br/>read: 500 tok / 50 overlap<br/>layout: markdown headers + token]
+        CH --> EMB[Azure OpenAI embeddings<br/>text-embedding-3-small · 1536d]
+        EMB --> IDX[(Azure AI Search<br/>HNSW index, bot_tag isolation)]
+        CONN[Blob / SharePoint connectors] --> UP
+        ADMIN[Admin API<br/>documents · stats · delete · sync] --> IDX
     end
 
-    UI -->|PDF upload| A
-    UI -->|conversation history| H
-    G -->|top-K chunks| L
-    P -->|answer + sources| UI
+    SDK & TB & WEB --> AUTH
+    WEB --> ADMIN
+    IDX -->|top-K chunks, fr_tag + bot_tag filtered| RET
 ```
 
----
+Multi-tenancy is enforced at the retrieval layer: every chunk carries a
+`bot_tag`, every query is filtered by it, and the QnA service **fails closed**
+(403 before any search) if a token's tenant isn't mapped to the requested
+`bot_tag`. Full tour: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-## Features
+## Security defaults that will surprise a naive deploy
 
-- **Dual ingestion modes** — `read` (token-chunked for dense text) and `layout` (header-split for structured documents)
-- **Hybrid retrieval** — combines full-text BM25 and HNSW vector KNN search in a single query, with optional Azure AI Search L2 semantic reranking (set `AZURE_SEARCH_SEMANTIC_CONFIG=mySemanticConfig`; requires Standard S1+, falls back to hybrid otherwise)
-- **Conversation-aware rephrasing** — LLM rewrites follow-up queries into self-contained, retrieval-optimized questions using up to 3 turns of history
-- **Grounded, cited responses** — model is strictly constrained to the retrieved knowledge base; filenames are parsed and mapped to source paths
-- **Greeting detection** — conversational turns bypass retrieval and are handled efficiently
-- **Multi-tenant indexing** — every chunk is tagged with `bot_tag` for per-tenant document isolation
-- **Azure Key Vault integration** — secrets loaded at startup; no secrets in application code
-- **Azure AD JWT authentication** — middleware validates Bearer tokens on every QnA request
-- **Kubernetes-ready** — stateless services with `/health` probes, configurable via environment variables
-- **Structured logging** — all services emit structured `%(asctime)s - %(name)s - %(levelname)s` logs to stdout + rotating file
+These shipped fail-closed on purpose (see `docs/RESUME.md`):
 
----
+- **Tenant binding is ON by default** — `QNA_ENFORCE_TENANT_BINDING=true`
+  requires `QNA_TENANT_BOT_TAG_MAP` (JSON `{tenant_id: [bot_tag, …]}`); missing
+  or unparseable map ⇒ 403 on every request. Single-workspace deployments must
+  configure the map or explicitly opt out.
+- **Ingestion `/upload` and all `/admin/*` routes require `X-Admin-Token`**;
+  an unset `ADMIN_API_TOKEN` makes the service refuse (503) rather than open up.
+- **Ingestion ingress is internal by default** in Bicep/Terraform
+  (`ingestionIngressExternal=false`); QnA stays external (JWT-authed).
+- App-level rate limiting (429 + `Retry-After`) on `/qna` and `/upload` —
+  per-process, so multi-replica deployments still need ingress-level limits.
 
-## Tech Stack
+Posture summary: [`SECURITY.md`](SECURITY.md). Vulnerability reports via GitHub
+Security Advisories.
 
-| Layer | Technology |
-|---|---|
-| API Framework | FastAPI 0.115, Uvicorn |
-| LLM | Azure OpenAI (`gpt-4o-mini`) |
-| Embeddings | Azure OpenAI (`text-embedding-3-small`, 1536 dims) |
-| Vector Store | Azure Cognitive Search (HNSW + semantic ranker) |
-| Document Parsing | Azure Document Intelligence (`prebuilt-read`, `prebuilt-layout`) |
-| Secret Management | Azure Key Vault |
-| Auth | Azure Active Directory (JWT RS256) |
-| PDF Processing | PyMuPDF (page count), tiktoken (token chunking) |
-| LangChain | `langchain-openai`, `langchain-community`, `MarkdownHeaderTextSplitter` |
-| Testing | pytest, pytest-asyncio, httpx |
-| Containerization | Docker, Docker Compose |
-
----
-
-## Project Structure
+## Repository layout
 
 ```
-TocDoc-Enterprise-RAG/
-│
-├── services/
-│   │
-│   ├── ingestion/                  # Document ingestion microservice
-│   │   ├── app.py                  # FastAPI app + /upload endpoint
-│   │   ├── custom_rag.py           # Core RAG class (parse · chunk · embed · index)
-│   │   ├── Dockerfile
-│   │   ├── requirements.txt
-│   │   └── .env.example
-│   │
-│   └── qna/                        # Q&A microservice
-│       ├── app.py                  # FastAPI app + /qna endpoint
-│       ├── Dockerfile
-│       ├── requirements.txt
-│       ├── pytest.ini
-│       ├── .env.example
-│       ├── src/
-│       │   ├── clients/
-│       │   │   └── azure_clients.py        # AzureOpenAIHandler (lazy init)
-│       │   ├── config/
-│       │   │   └── config.py               # Settings, AzureConfig, LocalConfig
-│       │   ├── core/
-│       │   │   ├── auth.py                 # JWT middleware
-│       │   │   ├── lifecycle.py            # Startup / shutdown hooks
-│       │   │   └── logger.py               # Module-level logger
-│       │   ├── llm/
-│       │   │   └── prompts.py              # System prompts (answer + rephrasal)
-│       │   ├── pipeline/
-│       │   │   └── qna_pipeline.py         # End-to-end Q&A orchestration
-│       │   ├── services/
-│       │   │   ├── embedding_service.py    # Async embedding wrapper
-│       │   │   ├── search_service.py       # Hybrid Azure Search wrapper
-│       │   │   ├── openai_service.py       # Chat completion + rephrasing
-│       │   │   └── text_processor.py       # Answer + citation parser
-│       │   └── utils/
-│       │       └── util.py                 # Pydantic models, helper functions
-│       └── test/
-│           └── test.py                     # pytest integration tests
-│
-├── docker-compose.yml              # Local dev: spin up both services
-├── .env.example                    # Combined env variable reference
-├── .gitignore
-├── LICENSE                         # Business Source License 1.1 (source-available)
-└── README.md
+services/qna/           QnA service                      services/ingestion/    Ingestion service
+services/teams-bot/     Teams (Bot Framework) adapter    clients/python/        tocdoc-sdk + CLI + LangChain retriever
+web/                    Admin dashboard SPA (React 18)   eval/                  RAGAS eval harness (own frozen dep set)
+tests/integration/      Hermetic cross-service e2e       loadtest/              Locust scenarios
+infra/                  Bicep + Terraform (Container Apps, Key Vault, Search, OpenAI, Doc Intelligence)
+charts/tocdoc/          Helm chart for AKS               docs/                  MkDocs site (GitHub Pages)
 ```
 
----
+## Getting started (local)
 
-## Prerequisites
+Python **3.12**. Each component installs its own pinned closure.
 
-| Requirement | Minimum Version |
-|---|---|
-| Python | 3.10 |
-| Docker + Docker Compose | 24.x / 2.x |
-| Azure Subscription | — |
-| Azure OpenAI resource | GPT-4o-mini + text-embedding-3-small deployments |
-| Azure Cognitive Search | Standard tier (for vector search) |
-| Azure Document Intelligence | Standard S0 (for `layout` mode) |
-| Azure Key Vault | (optional — for secret rotation in production) |
-| Azure AD App Registration | (required for QnA JWT authentication) |
+```bash
+# Services (two terminals, or docker compose up --build)
+pip install -r services/qna/requirements.txt
+uvicorn app:app --port 5500 --reload   # from services/qna — needs env, see below
 
----
+pip install -r services/ingestion/requirements.txt
+uvicorn app:app --port 5501 --reload   # from services/ingestion
 
-## Configuration
+# Docs & health once running
+#   http://localhost:5500/qna/docs          http://localhost:5500/qna/health
+#   http://localhost:5501/upload_pipeline/docs   http://localhost:5501/upload_pipeline/health
+```
 
-Both services are configured entirely via environment variables. Copy the relevant `.env.example` and populate all values before running.
+Configuration is env-var driven (canonical UPPER_SNAKE names with Key Vault
+dual-read on QnA). Copy each service's `.env.example`, see
+[`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) for the reference and
+[`docs/RESUME.md`](docs/RESUME.md) for the fail-closed tenant-binding and
+feature-flag variables, and [`docs/LOCAL_DEV.md`](docs/LOCAL_DEV.md) for the
+quickstart (including the Intel-Mac `cryptography` build caveat).
 
-### Ingestion Service — `services/ingestion/.env`
+### Tests
 
-| Variable | Description | Example |
+```bash
+pytest services/qna/test           # 260 tests (also: pip install pytest pytest-asyncio — test deps are not in requirements.txt)
+pytest services/ingestion/test    # 247 tests (needs requirements-dev.txt too)
+pytest clients/python/tests        # 86 tests  (pip install -e "clients/python[dev]")
+pytest services/teams-bot          # 35 tests
+pytest eval                        # 49 tests  (own venv — frozen langchain 0.3.x, do not merge with service deps)
+pytest tests/integration           # 35 tests  (install BOTH services' requirements into one env)
+cd web && npm ci && npm test       # 10 tests  (Node 22.13 in CI)
+```
+
+## API in one glance
+
+Full on-the-wire reference (payloads, SSE frames, error envelope):
+[`docs/API.md`](docs/API.md).
+
+| Endpoint | Auth | Purpose |
 |---|---|---|
-| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI resource endpoint | `https://my-openai.openai.azure.com/` |
-| `AZURE_OPENAI_KEY` | Azure OpenAI API key | |
-| `AZURE_OPENAI_VERSION` | API version | `2024-02-01` |
-| `AZURE_OPENAI_EMBEDDING_MODEL` | Embedding model deployment name | `text-embedding-3-small` |
-| `AZURE_SEARCH_ENDPOINT` | Azure Cognitive Search endpoint | `https://my-search.search.windows.net` |
-| `AZURE_SEARCH_KEY` | Search admin key | |
-| `INDEX_NAME` | Target search index name | `tocdoc-index-v1` |
-| `DOC_INTELLIGENCE_ENDPOINT` | Document Intelligence endpoint | |
-| `DOC_INTELLIGENCE_KEY` | Document Intelligence key | |
+| `POST /qna/qna` | Azure AD JWT | grounded answer: `{answer, citation{file: path}}` |
+| `POST /qna/qna/stream` | Azure AD JWT | SSE token stream + final citation event |
+| `POST /upload_pipeline/upload` | X-Admin-Token | ingest file/folder (`bot_tag`, `fr_mode=read\|layout`) |
+| `GET/DELETE /upload_pipeline/admin/documents…` | X-Admin-Token | list / inspect / delete documents |
+| `GET /upload_pipeline/admin/index/stats` | X-Admin-Token | index counts & breakdowns |
+| `POST /upload_pipeline/admin/connectors/{blob\|sharepoint}/sync` | X-Admin-Token | 202 + run_id, poll via `…/connectors/runs` |
+| `GET /{prefix}/health` | public | liveness |
 
-### QnA Service — `services/qna/.env`
-
-| Variable | Description | Example |
-|---|---|---|
-| `AzureOpenaiAccountEndpoint` | Azure OpenAI endpoint | `https://my-openai.openai.azure.com/` |
-| `TocdocOpenAIKey` | Azure OpenAI API key | |
-| `AzureOpenaiApiVersion` | API version | `2024-02-01` |
-| `AzureOpenaiLlmModel` | Chat model deployment name | `gpt-4o-mini` |
-| `AZURE_OPENAI_EMBEDDING_MODEL` | Embedding model deployment name | `text-embedding-3-small` |
-| `AzureSearchEndpoint` | Azure Cognitive Search endpoint | |
-| `AzureSearchKey` | Search admin key | |
-| `INDEX_NAME` | Search index to query | |
-| `AZURE_SEARCH_SEMANTIC_CONFIG` | Optional. Semantic configuration name for L2 reranking. Empty (default) = pure hybrid retrieval. Set to `mySemanticConfig` to enable; requires Azure AI Search Standard (S1)+ — falls back to hybrid on unsupported tiers | `mySemanticConfig` |
-| `TocdocSPClientID` | Service principal client ID | |
-| `TocdocSPSecretValue` | Service principal secret | |
-| `TocdocSPTenantID` | Azure AD tenant ID | |
-| `AZURE_KEY_VAULT` | Key Vault name (without `.vault.azure.net`) | |
-| `AUDIENCE_ID` | JWT audience for token validation | |
-
----
-
-## Getting Started
-
-### Local Development
-
-```bash
-# 1. Clone the repository
-git clone https://github.com/MaanavA26/TocDoc---Enterprise-RAG.git
-cd TocDoc---Enterprise-RAG
-
-# 2. Configure the Ingestion service
-cp services/ingestion/.env.example services/ingestion/.env
-# Edit services/ingestion/.env and fill in all Azure credentials
-
-# 3. Configure the QnA service
-cp services/qna/.env.example services/qna/.env
-# Edit services/qna/.env and fill in all Azure credentials
-
-# 4a. Run the Ingestion service
-cd services/ingestion
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app:app --host 0.0.0.0 --port 5501 --reload
-
-# 4b. Run the QnA service (in a separate terminal)
-cd services/qna
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app:app --host 0.0.0.0 --port 5500 --reload
-```
-
-### Docker Compose
-
-```bash
-# Start both services
-docker compose up --build
-
-# Start in detached mode
-docker compose up --build -d
-
-# View logs
-docker compose logs -f
-
-# Stop
-docker compose down
-```
-
-Services will be available at:
-
-| Service | URL |
-|---|---|
-| Ingestion API docs | http://localhost:5501/upload_pipeline/docs |
-| QnA API docs | http://localhost:5500/qna/docs |
-| Ingestion health | http://localhost:5501/upload_pipeline/health |
-| QnA health | http://localhost:5500/qna/health |
-
----
-
-## API Reference
-
-### Ingestion Service
-
-#### `POST /upload_pipeline/upload`
-
-Ingests a single PDF file or a server-side folder of PDFs into the Azure Cognitive Search index.
-
-**Query Parameters**
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `bot_tag` | `string` | Yes | Tenant / bot identifier stored on every indexed chunk |
-| `filepath` | `string` | Yes | Absolute server-side path to the file or folder |
-| `fr_mode` | `string` | No | `read` (default) or `layout` |
-
-**Form Data**
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `file` | `UploadFile` | Conditional | Required when `filepath` is a single file |
-
-**Single-file example**
-
-```bash
-curl -X POST "http://localhost:5501/upload_pipeline/upload" \
-  -F "file=@/path/to/document.pdf" \
-  -G \
-  --data-urlencode "bot_tag=acme-corp" \
-  --data-urlencode "filepath=/data/documents/document.pdf" \
-  --data-urlencode "fr_mode=layout"
-```
-
-**Response (200)**
-
-```json
-{
-  "status": "successfully indexed",
-  "detail": {
-    "status": "successful",
-    "filename": "document.pdf",
-    "total_pages": 12,
-    "total_chunks": 34,
-    "max_token": 498,
-    "min_token": 42,
-    "avg_token": 312.5,
-    "max_character": 1987,
-    "min_character": 168,
-    "avg_character": 1248.3
-  }
-}
-```
-
-**Folder batch example**
-
-```bash
-curl -X POST "http://localhost:5501/upload_pipeline/upload" \
-  -G \
-  --data-urlencode "bot_tag=acme-corp" \
-  --data-urlencode "filepath=/data/documents/folder" \
-  --data-urlencode "fr_mode=read"
-```
-
----
-
-### QnA Service
-
-#### `POST /qna/qna`
-
-Answers a user query grounded in the indexed document corpus. Requires a valid Azure AD Bearer token.
-
-**Headers**
-
-| Header | Value |
-|---|---|
-| `Authorization` | `Bearer <azure-ad-jwt>` |
-| `Content-Type` | `application/json` |
-
-**Request Body**
-
-```json
-{
-  "session_id": "session-abc-123",
-  "bot_tag": "acme-corp",
-  "fr_tag": "read",
-  "bot": [
-    {
-      "user_query": "What are the payment terms in the Q1 procurement contract?",
-      "bot_response": null
-    }
-  ]
-}
-```
-
-| Field | Type | Description |
-|---|---|---|
-| `session_id` | `string` | Correlation ID for the conversation session |
-| `bot_tag` | `string` | Tenant / bot identifier (must match ingestion `bot_tag`) |
-| `fr_tag` | `string` | Retrieval mode: `read` or `layout` (must match the ingestion `fr_mode`) |
-| `bot` | `array` | Full conversation history, oldest first. Last entry is the current query. |
-
-**Response (200)**
-
-```json
-{
-  "answer": "The Q1 procurement contract specifies net-30 payment terms with a 2% early-payment discount if settled within 10 days of invoice date.",
-  "citation": {
-    "Q1_Procurement_Contract.pdf": "/data/documents/Q1_Procurement_Contract.pdf"
-  }
-}
-```
-
-**Multi-turn conversation example**
-
-```json
-{
-  "session_id": "session-abc-123",
-  "bot_tag": "acme-corp",
-  "fr_tag": "read",
-  "bot": [
-    {
-      "user_query": "What are the payment terms in the Q1 procurement contract?",
-      "bot_response": "The Q1 procurement contract specifies net-30 payment terms..."
-    },
-    {
-      "user_query": "What about penalties for late payment?",
-      "bot_response": null
-    }
-  ]
-}
-```
-
-The QnA service automatically detects that *"What about penalties for late payment?"* is a follow-up and rephrases it to *"What are the penalties for late payment in the Q1 procurement contract?"* before retrieval.
-
-**Error Responses**
-
-| Status | Condition |
-|---|---|
-| `400` | Missing required field (`query`, `bot_tag`, `fr_tag`) or empty bot list |
-| `401` | Missing, expired, or malformed JWT |
-| `500` | Upstream Azure service failure |
-
----
+Errors use a stable envelope `{error: {code, message, request_id}}` with
+`X-Request-ID` correlation on every response.
 
 ## Deployment
 
-TocDoc is designed for production deployment on **Azure Kubernetes Service (AKS)** or any Kubernetes-compatible platform.
+Three supported shapes, one contract (see
+[`docs/deployment/INSTALLATION.md`](docs/deployment/INSTALLATION.md)):
 
-### Kubernetes Checklist
+- **Bicep → Azure Container Apps**: `infra/main.bicep` provisions OpenAI,
+  AI Search, Document Intelligence, Key Vault (purge-protected), Log Analytics,
+  App Insights, and both Container Apps. `az deployment group create …`
+- **Terraform**: `infra/terraform/` — same resources, Key Vault-referenced
+  secrets, user-assigned identity.
+- **Helm → AKS**: `charts/tocdoc/` — HPA, PDB, NetworkPolicy, Key Vault CSI,
+  ServiceMonitor (all optional-off; `values-production.yaml` enables the
+  recommended set).
 
-- [ ] Build and push both Docker images to your container registry (ACR recommended)
-- [ ] Create Kubernetes `Deployment` and `Service` manifests for each microservice
-- [ ] Store secrets in **Azure Key Vault** and mount via CSI driver or environment injection
-- [ ] Configure **Horizontal Pod Autoscaler** (HPA) for each service — both are stateless
-- [ ] Wire `/health` endpoints to Kubernetes **liveness** and **readiness** probes
-- [ ] Place both services behind an **Ingress** controller (NGINX or Azure Application Gateway)
-- [ ] Enable structured log forwarding to **Azure Monitor / Log Analytics**
+Container images publish to GHCR (`tocdoc-qna`, `tocdoc-ingestion`) on `v*`
+tags via `release.yml` (no tag cut yet). **Before any client traffic, run the
+live smoke runbook:** [`docs/deployment/SMOKE_TEST.md`](docs/deployment/SMOKE_TEST.md).
 
-### Recommended Resource Requests (per pod)
+## CI
 
-| Service | CPU Request | CPU Limit | Memory Request | Memory Limit |
-|---|---|---|---|---|
-| Ingestion | 250m | 1000m | 512Mi | 2Gi |
-| QnA | 250m | 1000m | 512Mi | 2Gi |
+`ci.yml` enforces 13 required checks on `main`: ruff, bandit + **pip-audit as a
+hard gate**, Bicep build, Helm lint, shellcheck, seven test suites (qna,
+ingestion, sdk, eval, teams-bot, integration, loadtest — the 60% coverage
+floor applies to the qna/ingestion legs), and CodeQL. Advisory (non-blocking) jobs build/boot both Docker images
+and build/test the web SPA. Dependabot is grouped per dependency family; the
+repo convention for shared service pins is documented in
+[`docs/RESUME.md`](docs/RESUME.md).
 
-> **Tip:** Ingestion is CPU/network-bound during Document Intelligence calls. Scale horizontally if batch ingestion throughput is a bottleneck.
+## Documentation
 
----
-
-## Known Limitations & Roadmap
-
-> Most of the original P0/P1 limitations are now **resolved** — RS256 JWT signature verification, `bot_tag` tenant isolation, the structured error contract, the admin API, connector ingestion, and the CI quality gate have all shipped. See the [master tracker](docs/agent_plan/00_MASTER_TRACKER.md) and [ARCHITECTURE.md](docs/ARCHITECTURE.md).
-
-### Current Limitations
-
-| # | Limitation | Notes |
-|---|---|---|
-| 1 | **Synchronous Azure SDK calls wrapped in bounded `ThreadPoolExecutor`s** | Correct and concurrency-safe; fully-async Azure clients are a possible future optimization for higher throughput. |
-| 2 | **`pip-audit` is report-only; coverage is computed but not gated** | Dependency CVEs are surfaced (and now auto-raised by Dependabot) but don't yet fail the build; a coverage threshold lands once a baseline is set. |
-| 3 | **Validated against mocks + CI, not yet a live Azure deployment** | All tests are hermetic; an end-to-end smoke test against a real Azure resource group is the recommended pre-production step. |
-| 4 | **Page-level citations not yet shipped** | Citations resolve to source files today; page-level provenance is designed (ADR) and pending a reindex decision. |
-
-### Roadmap
-
-- [x] RS256 JWT signature verification against the Azure AD JWKS endpoint — *shipped*
-- [x] `bot_tag` as a mandatory tenant filter in retrieval — *shipped*
-- [x] Config-gated semantic reranking (Azure Semantic Ranker) — *shipped*
-- [x] GitHub Actions CI/CD with lint, security, and test gates — *shipped*
-- [x] Admin API for index management (delete by `bot_tag`, reindex stub, stats) — *shipped*
-- [x] Blob Storage + SharePoint connector ingestion — *shipped*
-- [ ] Page-level citations (pending a reindex decision — see ADR)
-- [ ] Agentic layer (LangGraph: router / map-reduce / ReAct / self-critique / memory / SSE streaming)
-- [ ] Microsoft Teams bot front end
-- [ ] RAGAS evaluation gating in CI; coverage threshold
-- [ ] Kubernetes / Helm packaging; published Python SDK
-
----
-
-## Contributing
-
-Contributions are welcome. Please follow these steps:
-
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feature/your-feature-name`
-3. Make your changes and add tests where appropriate
-4. Run the QnA test suite: `cd services/qna && pytest test/`
-5. Open a Pull Request against `main` with a clear description of the change
-
-For significant changes, please open an issue first to discuss the approach.
-
----
+The MkDocs site (deployed by CI to GitHub Pages) indexes everything:
+[`docs/README.md`](docs/README.md). Key entries: architecture tour, API and
+configuration references, day-2 operations runbook, threat model, license
+compliance audit, ADRs, and the resume-from-cold guide
+([`docs/RESUME.md`](docs/RESUME.md)) — the most current status document.
+AI-agent operating guide: [`CLAUDE.md`](CLAUDE.md).
 
 ## License
 
-TocDoc is **source-available** under the [Business Source License 1.1](LICENSE) (BSL 1.1):
+TocDoc is **source-available** under the
+[Business Source License 1.1](LICENSE):
 
-- ✅ **Free for non-production use** — development, testing, evaluation, internal experimentation, and research.
-- ⛔ **Competing production/commercial use** (offering TocDoc or a derivative as a hosted, managed, or embedded service to third parties) requires a **commercial license** — contact the maintainers.
-- 🔄 On the **Change Date** (see [LICENSE](LICENSE)) each version automatically converts to the **Apache License 2.0**.
+- ✅ Free for non-production use — development, testing, evaluation, research.
+- ⛔ Offering TocDoc (or a derivative) as a competing hosted/managed/embedded
+  service requires a commercial license.
+- 🔄 Each version converts to **Apache 2.0** on its Change Date.
 
-This keeps the code open for inspection and contribution while protecting the commercial product. Vulnerability reports: see [SECURITY.md](SECURITY.md).
+> Note: the LICENSE currently carries placeholder legal parameters (Licensor
+> entity, Change Date) pending confirmation, and one dependency
+> (PyMuPDF, AGPL-3.0) has an open compliance decision — see
+> [`docs/LICENSE_COMPLIANCE.md`](docs/LICENSE_COMPLIANCE.md).
 
 ---
 
 <div align="center">
 
-Built with FastAPI · Azure OpenAI · Azure Cognitive Search · Azure Document Intelligence
+FastAPI · LangChain 1.x / LangGraph · Azure OpenAI · Azure AI Search · Azure Document Intelligence
 
 </div>
