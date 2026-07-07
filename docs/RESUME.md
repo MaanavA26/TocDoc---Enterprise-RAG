@@ -97,11 +97,10 @@ deploy that ignores them will refuse to serve or reject calls — by design:
    still has placeholders: **Licensor** = `TocDoc` ("replace with the legal
    entity") and **Change Date** = `2030-06-05` ("confirm/adjust"). A human must
    confirm both.
-4. **THREAT_MODEL exposure call (PR #90, held).** A code-grounded security doc
-   exists but enumerates residual risks; on a public repo that reads as an
-   attacker checklist. Decide: merge as-is / keep internal / trim to
-   controls-in-place. (Most of its original residual risks are now FIXED, so a
-   refreshed version is far safer to publish.)
+4. ~~THREAT_MODEL exposure call~~ **Resolved 2026-06-18:** #90 was approved by
+   the architect and merged — `docs/THREAT_MODEL.md` is in the repo. Residual
+   go-public consideration: the pre-hardening draft remains SHA-retrievable
+   (commit 467a1b7) and should be scrubbed before the repo goes public.
 
 > Resolved since the last snapshot: the Python-3.12 runtime bump + the langchain/
 > fastapi/pandas/openai dependency cascade (no longer deferred), and the
@@ -220,5 +219,7 @@ pytest eval/tests
 - **Autonomous hardening run:** `docs/AUTONOMOUS_SESSION_LOG.md` — full audit→fix
   record (65 findings, 5 HIGH) with one-line reverts.
 - **License / sellability:** `docs/LICENSE_COMPLIANCE.md` (incl. the PyMuPDF AGPL blocker).
-- **Security posture:** `SECURITY.md` (controls in place) + `docs/security/CODEQL_TRIAGE.md`.
-  Detailed residual-risk threat models were kept out of the public repo by design.
+- **Security posture:** `SECURITY.md` (controls in place) +
+  `docs/security/CODEQL_TRIAGE.md` + `docs/THREAT_MODEL.md` (the code-grounded
+  threat model merged via #90 on 2026-06-18, after most of its residual risks
+  were fixed).

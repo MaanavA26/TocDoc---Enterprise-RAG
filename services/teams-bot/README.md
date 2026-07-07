@@ -181,6 +181,7 @@ python3 -m venv .venv
 
 ## CI note
 
-The repo CI gate currently covers `qna`, `ingestion`, the SDK, and `eval` — it
-does **not** yet run `teams-bot`. Adding `services/teams-bot` to the CI matrix
-is a tracked follow-up.
+`test (teams-bot)` runs in `ci.yml` and is a **required status check** on
+`main` (it installs `requirements-dev.txt` from this directory so the editable
+in-repo SDK dependency resolves). Note this service's Python deps are not yet
+covered by Dependabot or the pip-audit security gate — a tracked follow-up.

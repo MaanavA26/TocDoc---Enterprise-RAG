@@ -39,6 +39,9 @@ For licensing terms, see the root [LICENSE](../LICENSE) (Business Source License
 ## Security, compliance & audit
 
 - [../SECURITY.md](../SECURITY.md) — Security policy + the security-controls posture.
+- [THREAT_MODEL.md](THREAT_MODEL.md) — Code-grounded threat model (assets, trust
+  boundaries, residual risks; merged via #90 after its original residual risks
+  were largely fixed).
 - [security/CODEQL_TRIAGE.md](security/CODEQL_TRIAGE.md) — CodeQL scan triage.
 - [LICENSE_COMPLIANCE.md](LICENSE_COMPLIANCE.md) — Dependency license-compatibility
   audit for BSL-1.1 sellability (incl. the **PyMuPDF AGPL** blocker).
