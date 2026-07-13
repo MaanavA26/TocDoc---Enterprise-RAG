@@ -15,7 +15,7 @@ aiohttp==3.14.1
 aiosignal==1.4.0
 annotated-doc==0.0.4
 annotated-types==0.7.0
-anyio==4.14.1
+anyio==4.14.2
 attrs==26.1.0
 azure-ai-documentintelligence==1.0.2
 azure-common==1.1.28
@@ -96,7 +96,7 @@ typing-inspect==0.9.0
 typing-inspection==0.4.2
 typing_extensions==4.16.0
 urllib3==2.7.0
-uvicorn==0.49.0
+uvicorn==0.51.0
 websockets==15.0.1
 xxhash==3.8.0
 yarl==1.24.2
