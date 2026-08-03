@@ -24,18 +24,18 @@
 #     pip install -r eval/requirements.txt
 
 # --- web / async / http (QnA import-time closure) ---
-fastapi==0.139.0
+fastapi==0.141.1
 starlette==1.3.1
-uvicorn==0.49.0
+uvicorn==0.52.0
 python-multipart==0.0.32
-aiohttp==3.14.1
+aiohttp==3.14.3
 aiohappyeyeballs==2.7.1
 aiosignal==1.4.0
 frozenlist==1.8.0
 multidict==6.7.1
 propcache==0.5.2
-yarl==1.24.2
-anyio==4.14.1
+yarl==1.24.5
+anyio==4.14.2
 httpx==0.28.1
 httpcore==1.0.9
 httpx-sse==0.4.3
@@ -69,7 +69,7 @@ tiktoken==0.9.0
 
 # --- data / numeric (ragas-compatible: pandas 2.x, numpy 2.2.x) ---
 pandas==2.2.3
-numpy==2.5.0
+numpy==2.5.1
 scipy==1.18.0
 openpyxl==3.1.5
 
@@ -85,13 +85,13 @@ marshmallow==3.26.2
 dataclasses-json==0.6.7
 SQLAlchemy==2.0.51
 sqlmodel==0.0.39
-greenlet==3.5.3
+greenlet==3.5.4
 python-dotenv==1.2.2
 PyYAML==6.0.3
 
 # --- RAGAS eval-only deps (the reason this harness is decoupled) ---
 ragas==0.4.3
-datasets==5.0.0
+datasets==5.0.1
 
 # --- test runner (CI gate: `pytest eval -q`) ---
 pytest
