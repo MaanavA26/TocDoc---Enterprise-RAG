@@ -20,7 +20,7 @@ cffi==2.0.0
 charset-normalizer==3.4.7
 click==8.4.2
 # 49.x ships arm64-only macOS wheels; Intel-Mac local installs build from source (Rust+OpenSSL). CI/containers (linux/amd64) + Apple Silicon unaffected. See docs/LOCAL_DEV.md.
-cryptography==49.0.0
+cryptography==50.0.0
 distro==1.9.0
 et_xmlfile==2.0.0
 fastapi==0.139.0
