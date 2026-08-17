@@ -21,7 +21,7 @@ azure-ai-documentintelligence==1.0.2
 azure-common==1.1.28
 azure-core==1.41.0
 azure-identity==1.25.3
-azure-keyvault-secrets==4.11.0
+azure-keyvault-secrets==4.11.1
 azure-search-documents==12.0.0
 certifi==2026.6.17
 cffi==2.0.0
