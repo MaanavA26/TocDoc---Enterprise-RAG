@@ -24,18 +24,18 @@
 #     pip install -r eval/requirements.txt
 
 # --- web / async / http (QnA import-time closure) ---
-fastapi==0.139.0
-starlette==1.3.1
-uvicorn==0.49.0
+fastapi==0.141.1
+starlette==1.6.0
+uvicorn==0.52.4
 python-multipart==0.0.32
-aiohttp==3.14.1
+aiohttp==3.14.3
 aiohappyeyeballs==2.7.1
 aiosignal==1.4.0
 frozenlist==1.8.0
 multidict==6.7.1
 propcache==0.5.2
-yarl==1.24.2
-anyio==4.14.1
+yarl==1.24.5
+anyio==4.14.2
 httpx==0.28.1
 httpcore==1.0.9
 httpx-sse==0.4.3
@@ -49,7 +49,7 @@ azure-ai-documentintelligence==1.0.2
 azure-common==1.1.28
 azure-core==1.41.0
 azure-identity==1.25.3
-azure-keyvault-secrets==4.11.0
+azure-keyvault-secrets==4.11.1
 azure-search-documents==12.0.0
 msal==1.37.0
 msal-extensions==1.3.1
@@ -69,29 +69,29 @@ tiktoken==0.9.0
 
 # --- data / numeric (ragas-compatible: pandas 2.x, numpy 2.2.x) ---
 pandas==2.2.3
-numpy==2.5.0
+numpy==2.5.2
 scipy==1.18.0
 openpyxl==3.1.5
 
 # --- document / model utilities (QnA import-time closure) ---
-PyMuPDF==1.28.0
-pypdf==6.14.2
+PyMuPDF==1.28.2
+pypdf==6.16.1
 pytesseract==0.3.13
 pillow==12.3.0
 pydantic==2.13.4
-pydantic-settings==2.14.2
+pydantic-settings==2.15.0
 pydantic_core==2.46.4
 marshmallow==3.26.2
 dataclasses-json==0.6.7
-SQLAlchemy==2.0.51
+SQLAlchemy==2.0.52
 sqlmodel==0.0.39
-greenlet==3.5.3
-python-dotenv==1.2.2
+greenlet==3.5.5
+python-dotenv==1.2.3
 PyYAML==6.0.3
 
 # --- RAGAS eval-only deps (the reason this harness is decoupled) ---
 ragas==0.4.3
-datasets==5.0.0
+datasets==5.0.1
 
 # --- test runner (CI gate: `pytest eval -q`) ---
 pytest
